@@ -177,6 +177,7 @@ export class CueManager {
     this.delivered = new Set();
     this.activeSources = new Set();
     this.customBufferCache = new Map();
+    this.maxCustomBuffers = 4;
   }
 
   async init() {
@@ -241,12 +242,19 @@ export class CueManager {
     try {
       if (!await this.init()) return false;
       let buffer = this.customBufferCache.get(id);
-      if (!buffer) {
+      if (buffer) {
+        this.customBufferCache.delete(id);
+        this.customBufferCache.set(id, buffer);
+      } else {
         const record = await this.getCustomSound(id);
         if (!record?.data) return false;
         const raw = record.data instanceof ArrayBuffer ? record.data : record.data?.buffer;
         if (!raw) return false;
         buffer = await this.ctx.decodeAudioData(raw.slice(0));
+        while (this.customBufferCache.size >= this.maxCustomBuffers) {
+          const oldest = this.customBufferCache.keys().next().value;
+          this.customBufferCache.delete(oldest);
+        }
         this.customBufferCache.set(id, buffer);
       }
       if (generation !== this.generation) return false;
