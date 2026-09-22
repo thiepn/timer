@@ -419,7 +419,6 @@ button { cursor: pointer; }
   .backup-parts { grid-template-columns: 1fr; }
 }
 
-
 /* v1.7 device integration */
 .update-banner {
   position: fixed;
