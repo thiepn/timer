@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.8.0
+
+### Added
+- Dedicated accessibility and internationalization modules.
+- Focus-contained dialogs with Escape handling and focus restoration.
+- Semantic live timer announcements for step transitions, pause/resume, manual completion and workout completion.
+- Accessibility preferences for large controls, high contrast, text size, reduced motion and screen-reader optimization.
+- Locale preferences for language, 12/24-hour display and numbering-system behavior.
+- English/German UI localization plus expanded and RTL pseudo-locales for layout certification.
+- Locale-aware dates and human-readable duration formatting.
+- Forced-colors/high-contrast CSS and explicit RTL layout hooks.
+- Keyboard-shortcut reference UI and regression tests.
+
+### Improved
+- Browser pinch zoom remains available; no viewport zoom restrictions were introduced.
+- Global workout shortcuts ignore focused interactive/text-entry controls, preventing keyboard double actions.
+- Wall-layout controls stay visible while keyboard focus is inside the live workout surface.
+- History view switching uses ordinary pressed-button semantics rather than an incomplete ARIA tabs pattern.
+- Active timer progress exposes progressbar semantics without announcing every render tick.
+- Screen-reader optimization suppresses app speech synthesis even when routine cue overrides request voice.
+- Service-worker shell now caches accessibility and localization modules for offline use.
+
+### Compatibility
+- IndexedDB remains v4 and backup payload remains v4; no data migration is required.
+- Existing users receive new accessibility/i18n preferences through default settings merging.
+
 ## 1.7.0
 
 ### Added

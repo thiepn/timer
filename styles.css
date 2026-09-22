@@ -282,7 +282,7 @@ button { cursor: pointer; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .001ms !important; transition-duration: .001ms !important; }
+  html:not([data-reduce-motion="off"]) *, html:not([data-reduce-motion="off"]) *::before, html:not([data-reduce-motion="off"]) *::after { scroll-behavior: auto !important; animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
 }
 
 .custom-tree { display: grid; gap: 10px; margin-top: 12px; }
@@ -476,3 +476,85 @@ button { cursor: pointer; }
   .update-banner { align-items: flex-start; }
   .update-banner span { padding-top: 9px; }
 }
+
+
+/* v1.8 accessibility, internationalization & interaction hardening */
+html[data-text-scale="large"] { font-size: 112.5%; }
+html[data-text-scale="xlarge"] { font-size: 125%; }
+html[data-reduce-motion="on"] *, html[data-reduce-motion="on"] *::before, html[data-reduce-motion="on"] *::after {
+  scroll-behavior: auto !important;
+  animation-duration: .001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .001ms !important;
+}
+
+.app-shell[data-high-contrast="true"] {
+  --border: color-mix(in srgb, var(--text) 64%, transparent);
+  --text-2: color-mix(in srgb, var(--text) 82%, var(--bg));
+  --text-3: color-mix(in srgb, var(--text) 70%, var(--bg));
+  --accent-soft: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.app-shell[data-high-contrast="true"] .card,
+.app-shell[data-high-contrast="true"] .btn,
+.app-shell[data-high-contrast="true"] .input,
+.app-shell[data-high-contrast="true"] .select,
+.app-shell[data-high-contrast="true"] .list-row,
+.app-shell[data-high-contrast="true"] .sheet-item,
+.app-shell[data-high-contrast="true"] .live-control { border-width: 2px; }
+.app-shell[data-high-contrast="true"] .progress { height: 12px; outline: 1px solid var(--text); }
+
+.app-shell[data-large-controls="true"] .btn { min-height: 56px; padding-block: 12px; }
+.app-shell[data-large-controls="true"] .icon-btn { width: 52px; height: 52px; }
+.app-shell[data-large-controls="true"] .nav-item { min-height: 64px; }
+.app-shell[data-large-controls="true"] .live-control { min-height: 68px; }
+.app-shell[data-large-controls="true"] .live-control.primary { min-height: 76px; }
+.app-shell[data-large-controls="true"] .toggle-row { min-height: 64px; }
+
+/* Long translations and browser zoom should wrap before controls become unreachable. */
+.btn, .sheet-item, .nav-item, .toggle-row, .capability-row, .record-row, .mode-card, .builder-summary { overflow-wrap: anywhere; }
+.row-between, .toggle-row, .capability-row { min-width: 0; }
+.row-between > *, .toggle-row > *, .capability-row > * { min-width: 0; }
+.input, .select, textarea, button { scroll-margin-block: 110px; }
+#app-main { scroll-padding-block: 76px 140px; }
+
+/* RTL uses logical direction where controls are directional. */
+html[dir="rtl"] .toggle::after { inset-inline-start: auto; inset-inline-end: 3px; }
+html[dir="rtl"] .toggle[aria-pressed="true"]::after { transform: translateX(-20px); }
+html[dir="rtl"] .progress > span { transform-origin: right center; }
+html[dir="rtl"] .list-row-main, html[dir="rtl"] .mode-card, html[dir="rtl"] .sheet-item { text-align: right; }
+html[dir="rtl"] .event-row { direction: rtl; }
+html[dir="rtl"] .event-row time { text-align: left; }
+
+/* Semantic progress remains visually identical. */
+.progress[role="progressbar"] { position: relative; }
+
+/* Focused Wall controls must never disappear behind auto-hide. */
+.layout-wall:focus-within .live-controls,
+.layout-wall:focus-within .live-top { opacity: 1 !important; pointer-events: auto !important; }
+
+.accessibility-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
+.locale-note { padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); color: var(--text-2); font-size: .82rem; }
+.shortcut-grid { display: grid; gap: 8px; }
+.shortcut-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 44px; padding: 7px 0; border-bottom: 1px solid var(--border); }
+.shortcut-row:last-child { border-bottom: 0; }
+.shortcut-row kbd { min-width: 40px; padding: 4px 8px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 8px; background: var(--surface-2); text-align: center; font: 700 .8rem ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+@media (max-width: 560px) {
+  .accessibility-grid { grid-template-columns: 1fr; }
+  html[data-text-scale="xlarge"] .bottom-nav { height: auto; min-height: var(--nav-h); }
+  html[data-text-scale="xlarge"] .nav-item { padding-block: 7px; }
+  html[data-text-scale="xlarge"] .quick-controls { grid-template-columns: 68px minmax(100px,1fr) 68px; }
+}
+
+@media (forced-colors: active) {
+  :root { forced-color-adjust: auto; }
+  .card, .btn, .input, .select, .list-row, .sheet, .sheet-item, .bottom-nav, .app-header, .live-control, .toggle, .progress { border: 1px solid CanvasText; }
+  .btn.primary, .live-control.primary, .preset-btn.active, .nav-item.active { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible { outline: 3px solid Highlight; outline-offset: 3px; }
+  .phase-work, .phase-rest, .phase-other, .progress > span { forced-color-adjust: none; background: Highlight; }
+}
+
+html[data-high-contrast="true"] .sheet, html[data-high-contrast="true"] .sheet-item, html[data-high-contrast="true"] .update-banner { border-width: 2px; }
+html[data-large-controls="true"] .sheet .btn, html[data-large-controls="true"] .sheet .sheet-item { min-height: 56px; }
+.app-shell[data-large-controls="true"] .bottom-nav { height: auto; min-height: var(--nav-h); }
+.app-shell[data-large-controls="true"] #app-main { padding-bottom: calc(var(--nav-h) + 52px + env(safe-area-inset-bottom)); }

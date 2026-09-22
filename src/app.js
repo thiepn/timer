@@ -1,5 +1,5 @@
 import {
-  TimerEngine, BrowserClock, formatClock, durationLabel, estimatePlanDuration,
+  TimerEngine, BrowserClock, formatClock, estimatePlanDuration,
   buildCountdown, buildInterval, buildCircuit, buildBoxing, buildRunWalk,
   buildEmom, buildAmrap, buildForTime, buildStopwatch, buildLadder, buildPyramid,
   buildCustomRoutine, validateCustomRoutine, collectCustomParameterRefs, resolveCustomParameterValues, formulaVariableName
@@ -9,6 +9,8 @@ import { CueManager, WakeLockManager, requestNotificationPermission, showComplet
 import { analyzeSession, comparisonFingerprint, comparableSessions, objectiveRecord, factualTrend, summarizeRange, startOfLocalDay, startOfLocalWeek, monthCalendar, sessionsToCsv } from './analytics.js';
 import { createBackupArchive, verifyBackupArchive, encryptBackupArchive, decryptBackupArchive, isLegacyBackup, isEncryptedBackup, isBackupArchive, isRoutinePackage, backupCounts } from './resilience.js';
 import { SessionOwnershipManager, MediaSessionManager, parseLaunchCommand, detectDeviceCapabilities } from './device.js';
+import { LOCALE_OPTIONS, resolveLocale, applyDocumentLocale, localizeDOM, translateSource, translateBuiltInLabel, phaseLabel as localizedPhaseLabel, formatDuration, formatDate, formatNumber, t as i18nT } from './i18n.js';
+import { FocusTrap, Announcer, focusMainHeading, isInteractiveTarget, timerEventAnnouncement } from './accessibility.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -19,7 +21,7 @@ const ms = (seconds) => Math.max(0, Math.round(Number(seconds || 0) * 1000));
 const sec = (milliseconds) => Math.round(Number(milliseconds || 0) / 1000);
 const mins = (minutes) => ms(Number(minutes || 0) * 60);
 const pct = (n) => `${Math.round(clamp(n || 0, 0, 1) * 100)}%`;
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 
 const BUILDER_META = {
   interval: { name: 'Interval', desc: 'Work / rest repetitions' },
@@ -177,18 +179,42 @@ const state = {
   updateReady: false,
   updateDeferred: false,
   reloadOnControllerChange: false,
-  deviceCapabilities: null
+  deviceCapabilities: null,
+  locale: 'en'
 };
 
-const cue = new CueManager(() => state.settings, () => state.cueProfiles, async (id) => state.db.get('customSounds', id));
+const currentLocale = () => state.locale || resolveLocale(state.settings?.language || 'system');
+const tr = (key, vars = {}) => i18nT(key, currentLocale(), vars);
+const durationLabel = (value, options = {}) => formatDuration(value, currentLocale(), { numberingSystem: state.settings?.numberSystem || 'system', ...options });
+const uiDate = (value, options = {}) => formatDate(value, currentLocale(), options, state.settings?.timeFormat || 'system', state.settings?.numberSystem || 'system');
+const uiNumber = (value, options = {}) => formatNumber(value, currentLocale(), options, state.settings?.numberSystem || 'system');
+
+const cue = new CueManager(() => ({ ...state.settings, voice: state.settings.screenReaderOptimized ? false : state.settings.voice }), () => state.cueProfiles, async (id) => state.db.get('customSounds', id));
 const wakeLock = new WakeLockManager();
 const ownership = new SessionOwnershipManager();
 const mediaSession = new MediaSessionManager();
+const sheetFocus = new FocusTrap();
 const main = $('#app-main');
 const appShell = $('#app');
 const header = $('#app-header');
 const bottomNav = $('#bottom-nav');
 const importFile = $('#import-file');
+const announcer = new Announcer($('#a11y-live-polite'), $('#a11y-live-assertive'));
+
+let localizationQueued = false;
+function localizeNow(root = document.body) {
+  applyDocumentLocale(currentLocale());
+  localizeDOM(root, currentLocale());
+}
+function scheduleLocalization(root = document.body) {
+  if (localizationQueued) return;
+  localizationQueued = true;
+  queueMicrotask(() => { localizationQueued = false; localizeNow(root); });
+}
+const localizationObserver = new MutationObserver((records) => {
+  if (records.some((record) => record.addedNodes?.length)) scheduleLocalization(document.body);
+});
+localizationObserver.observe(document.body, { childList: true, subtree: true });
 
 function toast(message, timeout = 2600) {
   const root = $('#toast-root');
@@ -424,10 +450,19 @@ async function handleLaunchCommand(command = { type: 'HOME' }) {
 }
 
 function applyTheme() {
+  state.locale = resolveLocale(state.settings.language || 'system');
   appShell.dataset.theme = state.settings.theme || 'dark';
+  appShell.dataset.highContrast = String(Boolean(state.settings.highContrast));
+  appShell.dataset.largeControls = String(Boolean(state.settings.largeControls));
+  document.documentElement.dataset.highContrast = String(Boolean(state.settings.highContrast));
+  document.documentElement.dataset.largeControls = String(Boolean(state.settings.largeControls));
+  document.documentElement.dataset.textScale = state.settings.textScale || 'normal';
+  document.documentElement.dataset.reduceMotion = state.settings.reduceMotion || 'system';
   document.documentElement.style.colorScheme = state.settings.theme === 'light' ? 'light' : 'dark';
   const color = state.settings.theme === 'light' ? '#f3f6f9' : '#0b0d10';
   $('meta[name="theme-color"]')?.setAttribute('content', color);
+  applyDocumentLocale(state.locale);
+  scheduleLocalization(document.body);
 }
 
 function setRoute(route) {
@@ -436,11 +471,15 @@ function setRoute(route) {
   state.builderEditingId = null;
   state.builderEditingBlockId = null;
   render();
-  requestAnimationFrame(() => main.focus());
+  focusMainHeading(main);
 }
 
 function setNavActive() {
-  $$('.nav-item').forEach((b) => b.classList.toggle('active', b.dataset.route === state.route));
+  $$('.nav-item').forEach((b) => {
+    const active = b.dataset.route === state.route;
+    b.classList.toggle('active', active);
+    if (active) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+  });
 }
 
 function setLiveMode(on) {
@@ -455,7 +494,7 @@ function render() {
   if (state.remoteActive || state.displayMode) return renderRemoteActive();
   setLiveMode(false);
   setNavActive();
-  document.title = state.builder ? `${BUILDER_META[state.builder.type]?.name || 'Builder'} — Timer` : `${state.route[0].toUpperCase()}${state.route.slice(1)} — Timer`;
+  document.title = state.builder ? `${translateSource(BUILDER_META[state.builder.type]?.name || 'Builder', currentLocale())} — Timer` : `${translateSource(state.route[0].toUpperCase() + state.route.slice(1), currentLocale())} — Timer`;
   if (state.completion) return renderCompletion();
   if (state.builder) return renderBuilder();
   if (state.route === 'library') return renderLibrary();
@@ -521,12 +560,17 @@ function showCreateSheet() {
 
 function showSheet(title, content) {
   const root = $('#sheet-root');
-  root.innerHTML = `<div class="sheet-backdrop" data-action="close-sheet"><section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" data-sheet><div class="sheet-handle"></div><div class="row-between"><h2 id="sheet-title" class="sheet-title">${esc(title)}</h2><button class="icon-btn" data-action="close-sheet" aria-label="Close">×</button></div>${content}</section></div>`;
-  $('[data-sheet]', root)?.addEventListener('click', (e) => e.stopPropagation());
-  requestAnimationFrame(() => $('[data-sheet] button', root)?.focus());
+  root.innerHTML = `<div class="sheet-backdrop" data-action="close-sheet"><section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" data-sheet tabindex="-1"><div class="sheet-handle" aria-hidden="true"></div><div class="row-between"><h2 id="sheet-title" class="sheet-title">${esc(title)}</h2><button class="icon-btn" data-action="close-sheet" aria-label="Close">×</button></div>${content}</section></div>`;
+  const sheet = $('[data-sheet]', root);
+  sheet?.addEventListener('click', (e) => e.stopPropagation());
+  scheduleLocalization(root);
+  sheetFocus.activate(sheet, { background: appShell, onEscape: () => closeSheet() });
 }
 
-function closeSheet() { $('#sheet-root').innerHTML = ''; }
+function closeSheet() {
+  sheetFocus.deactivate();
+  $('#sheet-root').innerHTML = '';
+}
 
 function openBuilder(type, routine = null) {
   closeSheet();
@@ -535,6 +579,7 @@ function openBuilder(type, routine = null) {
   state.builderEditingBlockId = null;
   state.builderCueOverrides = structuredClone(routine?.cueOverrides || {});
   renderBuilder();
+  focusMainHeading(main);
 }
 
 function openBlockEditor(block) {
@@ -545,6 +590,7 @@ function openBlockEditor(block) {
   state.builderEditingBlockId = block.id;
   state.builderCueOverrides = {};
   renderBuilder();
+  focusMainHeading(main);
 }
 
 function blocksForCurrentBuilder() {
@@ -1260,6 +1306,13 @@ function attachEngine(engine, meta) {
   state.engineUnsub?.();
   state.engineUnsub = engine.subscribe((event, snapshot) => {
     cue.onEvent(event, snapshot);
+    const announcement = timerEventAnnouncement(event, {
+      phaseLabel: (phase) => localizedPhaseLabel(phase, currentLocale()),
+      translateLabel: (label) => translateBuiltInLabel(label, currentLocale()),
+      durationText: (value) => durationLabel(value, { style: 'long' }),
+      t: (key, vars) => tr(key, vars)
+    });
+    if (announcement) announcer.announce(announcement, { priority: event.type === 'session-completed' ? 'assertive' : 'polite' });
     mediaSession.update(engine.view());
     broadcastActiveSnapshot(snapshot, meta);
     if (!['session-completed', 'session-cancelled'].includes(event.type)) state.db.saveActive(snapshot, meta).catch(() => {});
@@ -1326,9 +1379,10 @@ async function finalizeSession(snapshot, cancelled = false) {
   await loadCollections();
   if (!cancelled) {
     state.completion = record;
-    if (state.settings.notifications) showCompletionNotification('Timer complete', record.title, { sessionId: record.id });
+    if (state.settings.notifications) showCompletionNotification(translateSource('Timer complete', currentLocale()), record.title, { sessionId: record.id });
   }
   render();
+  focusMainHeading(main);
   renderUpdateBanner();
   if (state.updateDeferred) setTimeout(() => applyUpdate(), 250);
 }
@@ -1339,7 +1393,7 @@ function renderLive() {
   state.engine.reconcile();
   if (!state.engine) return;
   const v = state.engine.view();
-  document.title = `${v.status === 'paused' ? 'Paused' : v.current?.label || 'Timer'} — Timer`;
+  document.title = `${v.status === 'paused' ? translateSource('Paused', currentLocale()) : translateBuiltInLabel(v.current?.label || 'Timer', currentLocale())} — Timer`;
   main.innerHTML = `
     <section id="live-shell" class="live-shell layout-${esc(state.settings.layout)} ${v.status === 'paused' ? 'paused' : ''}" data-phase="${esc(v.current?.phase || 'custom')}">
       <div class="live-top">
@@ -1348,10 +1402,10 @@ function renderLive() {
       </div>
       <div class="live-main">
         <div id="live-phase" class="live-phase"></div>
-        <div id="live-time" class="live-time" role="timer" aria-label="Timer"></div>
+        <div id="live-time" class="live-time" role="timer" aria-live="off" aria-atomic="true" aria-label="Timer"></div>
         <div id="live-label" class="live-label"></div>
         <div id="live-target" class="live-target"></div>
-        <div class="progress" aria-hidden="true"><span id="live-progress"></span></div>
+        <div id="live-progress-track" class="progress" role="progressbar" aria-label="Interval progress" aria-valuemin="0" aria-valuemax="100"><span id="live-progress"></span></div>
         <div id="mode-panel"></div>
         <div id="live-next" class="live-next"></div>
       </div>
@@ -1391,25 +1445,31 @@ function updateLiveView(force = false) {
   const text = formatClock(displayMs, { tenths, countUp: isCountUp });
   const liveTime = $('#live-time');
   if (force || liveTime?.textContent !== text) liveTime.textContent = text;
-  $('#live-phase').textContent = v.status === 'paused' ? 'Paused' : (current.phase || (isCountUp ? 'Time' : 'Work'));
-  $('#live-label').textContent = current.label || v.title;
+  const semanticPhase = v.status === 'paused' ? translateSource('Paused', currentLocale()) : localizedPhaseLabel(current.phase || (isCountUp ? 'custom' : 'work'), currentLocale());
+  $('#live-phase').textContent = semanticPhase;
+  $('#live-label').textContent = translateBuiltInLabel(current.label || v.title, currentLocale());
   $('#live-target').textContent = current.target ? String(current.target) : '';
+  liveTime?.setAttribute('aria-label', current.remainingMs != null ? tr('a11y.remaining', { duration: durationLabel(current.remainingMs, { style: 'long' }) }) : `${translateBuiltInLabel(current.label || v.title, currentLocale())} ${durationLabel(current.elapsedMs || 0, { style: 'long' })}`);
   const round = current.round;
   const blockLabel = current.blockPath?.at(-1)?.title;
   const sectionLabel = current.sectionPath?.at(-1)?.label;
   const generator = current.generatorPath?.at(-1);
   const generatorLabel = generator?.type === 'random' ? `Random ${generator.current} / ${generator.total}` : '';
-  const contextLabel = [blockLabel, sectionLabel, generatorLabel, round ? `Round ${round.current} / ${round.total}` : ''].filter(Boolean).join(' · ');
-  $('#live-round').textContent = contextLabel || (v.mode === 'stopwatch' ? 'Stopwatch' : v.title);
+  const roundLabel = round ? tr('a11y.round', round) : '';
+  const contextLabel = [blockLabel, sectionLabel, generatorLabel, roundLabel].filter(Boolean).join(' · ');
+  $('#live-round').textContent = contextLabel || (v.mode === 'stopwatch' ? translateSource('Stopwatch', currentLocale()) : translateBuiltInLabel(v.title, currentLocale()));
   const next = v.next;
-  $('#live-next').innerHTML = next ? `Next<br><strong>${esc(next.label)}${next.durationMs ? ` · ${formatClock(next.durationMs)}` : ''}</strong>` : '';
+  $('#live-next').innerHTML = next ? `${translateSource('Next', currentLocale())}<br><strong>${esc(translateBuiltInLabel(next.label, currentLocale()))}${next.durationMs ? ` · ${formatClock(next.durationMs)}` : ''}</strong>` : '';
   const p = current.progress ?? 0;
   $('#live-progress').style.transform = `scaleX(${clamp(p, 0, 1)})`;
+  const progressTrack = $('#live-progress-track');
+  if (current.progress == null) progressTrack?.removeAttribute('aria-valuenow');
+  else progressTrack?.setAttribute('aria-valuenow', String(Math.round(clamp(p,0,1) * 100)));
   const shell = $('#live-shell');
   shell.dataset.phase = current.phase || 'custom';
   shell.classList.toggle('paused', v.status === 'paused');
   shell.classList.toggle('controls-hidden', state.controlsHidden && state.settings.layout === 'wall');
-  $('#pause-btn').textContent = v.status === 'paused' ? 'Resume' : 'Pause';
+  $('#pause-btn').textContent = translateSource(v.status === 'paused' ? 'Resume' : 'Pause', currentLocale());
   const canAdjust = v.status === 'running' && current.remainingMs != null;
   $('#adjust-minus').disabled = !canAdjust;
   $('#adjust-plus').disabled = !canAdjust;
@@ -1439,11 +1499,11 @@ function updateSecondaryAction(v) {
   const btn = $('#live-secondary');
   if (!btn) return;
   const current = v.current || {};
-  if (v.mode === 'stopwatch') { btn.textContent = 'Lap'; btn.dataset.action = 'live-lap'; btn.disabled = v.status === 'paused'; }
-  else if (v.mode === 'for-time') { btn.textContent = 'Finish'; btn.dataset.action = 'live-finish'; btn.disabled = false; }
-  else if (current.manual && !current.restingUntilDeadline) { btn.textContent = 'Done'; btn.dataset.action = 'live-done'; btn.disabled = v.status === 'paused'; }
-  else if (current.restingUntilDeadline) { btn.textContent = 'Resting until next block'; btn.dataset.action = 'noop'; btn.disabled = true; }
-  else { btn.textContent = 'Next'; btn.dataset.action = 'live-next'; btn.disabled = v.status === 'paused'; }
+  if (v.mode === 'stopwatch') { btn.textContent = translateSource('Lap', currentLocale()); btn.dataset.action = 'live-lap'; btn.disabled = v.status === 'paused'; }
+  else if (v.mode === 'for-time') { btn.textContent = translateSource('Finish', currentLocale()); btn.dataset.action = 'live-finish'; btn.disabled = false; }
+  else if (current.manual && !current.restingUntilDeadline) { btn.textContent = translateSource('Done', currentLocale()); btn.dataset.action = 'live-done'; btn.disabled = v.status === 'paused'; }
+  else if (current.restingUntilDeadline) { btn.textContent = translateSource('Resting until next block', currentLocale()); btn.dataset.action = 'noop'; btn.disabled = true; }
+  else { btn.textContent = translateSource('Next', currentLocale()); btn.dataset.action = 'live-next'; btn.disabled = v.status === 'paused'; }
 }
 
 function setupWallAutoHide() {
@@ -1456,11 +1516,14 @@ function setupWallAutoHide() {
     shell?.classList.remove('controls-hidden');
     clearTimeout(state.wallHideTimer);
     state.wallHideTimer = setTimeout(() => {
+      if (shell?.contains(document.activeElement)) return reset();
       state.controlsHidden = true;
       shell?.classList.add('controls-hidden');
     }, 3500);
   };
   shell?.addEventListener('pointerdown', reset);
+  shell?.addEventListener('focusin', reset);
+  shell?.addEventListener('focusout', reset);
   reset();
 }
 
@@ -1567,8 +1630,8 @@ function renderHistory() {
       <input class="input" data-history-search value="${esc(state.historyQuery)}" placeholder="Search sessions" aria-label="Search history">
       <select class="select" data-history-mode aria-label="Filter history by mode">${historyModeOptions()}</select>
     </div>
-    <div class="segmented" role="tablist" aria-label="History view">
-      ${['list','calendar','stats'].map((view) => `<button role="tab" aria-selected="${state.historyView === view}" class="${state.historyView === view ? 'active' : ''}" data-action="history-view" data-view="${view}">${view[0].toUpperCase()+view.slice(1)}</button>`).join('')}
+    <div class="segmented" role="group" aria-label="History view">
+      ${['list','calendar','stats'].map((view) => `<button aria-pressed="${state.historyView === view}" class="${state.historyView === view ? 'active' : ''}" data-action="history-view" data-view="${view}">${view[0].toUpperCase()+view.slice(1)}</button>`).join('')}
     </div>
     <div class="analytics-grid history-summary-grid">
       <div class="metric"><strong>${recent30.sessions}</strong><span>Last 30 days</span></div>
@@ -1585,8 +1648,8 @@ function renderHistoryList(sessions) {
 function renderHistoryCalendar(sessions) {
   const monthDate = new Date(state.historyMonth);
   const cal = monthCalendar(sessions, monthDate.getFullYear(), monthDate.getMonth());
-  const monthLabel = new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' }).format(monthDate);
-  const weekday = Array.from({ length: 7 }, (_, i) => new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(new Date(2024, 0, 7 + i)));
+  const monthLabel = uiDate(monthDate, { month: 'long', year: 'numeric' });
+  const weekday = Array.from({ length: 7 }, (_, i) => uiDate(new Date(2024, 0, 7 + i), { weekday: 'short' }));
   const blanks = Array.from({ length: cal.firstWeekday }, () => `<div class="calendar-day empty-day" aria-hidden="true"></div>`).join('');
   const days = Array.from({ length: cal.days }, (_, i) => {
     const day = i + 1;
@@ -1626,7 +1689,7 @@ function renderHistoryStats(sessions) {
 }
 
 function sessionRowDetailed(s) {
-  const d = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(s.startedAt));
+  const d = uiDate(s.startedAt, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   const score = s.mode === 'amrap' ? `${s.data?.rounds || 0} + ${s.data?.reps || 0}` : formatClock(s.activeDurationMs, { countUp: true });
   const analysis = analyzeSession(s);
   const detail = [BUILDER_META[s.mode]?.name || s.mode || 'Timer', score, completionLabel(s.completionReason)];
@@ -1638,7 +1701,7 @@ function showHistoryDay(timestamp) {
   const from = startOfLocalDay(Number(timestamp));
   const to = from + 86400000;
   const sessions = filteredHistorySessions().filter((s) => s.startedAt >= from && s.startedAt < to);
-  const label = new Intl.DateTimeFormat(undefined, { dateStyle: 'full' }).format(new Date(from));
+  const label = uiDate(from, { dateStyle: 'full' });
   showSheet(label, `<div class="list">${sessions.length ? sessions.map(sessionRowDetailed).join('') : `<div class="muted">No sessions.</div>`}</div>`);
 }
 
@@ -1660,7 +1723,7 @@ function sessionModeAnalysis(s, analysis) {
   if (record) body += `<div class="record-callout"><strong>${record.isCurrent ? 'Current session matches the ' : ''}${esc(record.label)}</strong><span>${record.valueMs != null ? formatClock(record.valueMs,{countUp:true,tenths:record.type==='stopwatch'}) : esc(record.display)} · ${record.sampleSize} comparable attempts</span></div>`;
   if (trend?.type === 'times') body += `<div class="card card-pad"><div class="section-title">Last ${trend.values.length} comparable times</div><div class="trend-values">${trend.values.map((value) => `<span>${formatClock(value,{countUp:true})}</span>`).join('<b>→</b>')}</div></div>`;
   if (trend?.type === 'scores') body += `<div class="card card-pad"><div class="section-title">Last ${trend.values.length} comparable scores</div><div class="trend-values">${trend.values.map((value) => `<span>${esc(value)}</span>`).join('<b>→</b>')}</div></div>`;
-  if (comparable.length > 1) body += `<div class="card card-pad"><div class="section-title">Comparable attempts</div><div class="mini-history">${comparable.map((item) => `<button data-action="session-detail" data-id="${esc(item.id)}"><span>${new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric'}).format(new Date(item.startedAt))}</span><strong>${item.mode === 'amrap' ? esc(`${item.data?.rounds || 0} + ${item.data?.reps || 0}`) : formatClock(item.activeDurationMs,{countUp:true})}</strong></button>`).join('')}</div></div>`;
+  if (comparable.length > 1) body += `<div class="card card-pad"><div class="section-title">Comparable attempts</div><div class="mini-history">${comparable.map((item) => `<button data-action="session-detail" data-id="${esc(item.id)}"><span>${uiDate(item.startedAt,{month:'short',day:'numeric'})}</span><strong>${item.mode === 'amrap' ? esc(`${item.data?.rounds || 0} + ${item.data?.reps || 0}`) : formatClock(item.activeDurationMs,{countUp:true})}</strong></button>`).join('')}</div></div>`;
   return body;
 }
 
@@ -1668,7 +1731,7 @@ function showSessionDetail(id) {
   const s = state.sessions.find((x) => x.id === id);
   if (!s) return;
   const analysis = analyzeSession(s);
-  const d = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(s.startedAt));
+  const d = uiDate(s.startedAt, { dateStyle: 'medium', timeStyle: 'short' });
   const planned = analysis.plannedDurationMs;
   const actualVsPlanned = planned != null ? `${formatClock(analysis.activeDurationMs,{countUp:true})} / ${formatClock(planned,{countUp:true})}` : formatClock(analysis.activeDurationMs,{countUp:true});
   const phaseTotal = Object.values(analysis.phaseTotals).reduce((a,b)=>a+b,0) || 1;
@@ -1729,6 +1792,7 @@ function renderSettings() {
   const caps = state.deviceCapabilities;
   const voices = state.availableVoices || [];
   const selectedProfile = cueProfileById(s.cueProfileId || 'standard', state.cueProfiles);
+  const localeOptions = LOCALE_OPTIONS.map((option) => `<option value="${esc(option.id)}" ${s.language === option.id ? 'selected' : ''}>${esc(option.label)}</option>`).join('');
   const voiceOptions = `<option value="" ${!s.voiceURI ? 'selected' : ''}>System default</option>${voices.map((voice) => `<option value="${esc(voice.voiceURI)}" ${s.voiceURI === voice.voiceURI ? 'selected' : ''}>${esc(voice.name)} · ${esc(voice.lang)}${voice.localService ? ' · Local' : ''}</option>`).join('')}`;
   const customProfileRows = state.cueProfiles.length ? state.cueProfiles.map((profile) => `<div class="list-row"><div class="list-row-main"><div class="list-row-title">${esc(profile.title)}</div><div class="list-row-meta">${esc(SOUND_PACKS[profile.soundPack]?.title || profile.soundPack || 'Clean')} · ${profile.voice ? 'Voice' : 'No voice'} · ${profile.warningSeconds || 0}s warning</div></div><button class="icon-btn" data-action="delete-cue-profile" data-id="${esc(profile.id)}" aria-label="Delete ${esc(profile.title)}">×</button></div>`).join('') : `<div class="small muted">No custom cue profiles yet.</div>`;
   const soundRows = state.customSounds.length ? state.customSounds.map((sound) => `<div class="list-row"><button class="list-row-main" data-action="preview-custom-sound" data-id="${esc(sound.id)}"><div class="list-row-title">${esc(sound.title)}</div><div class="list-row-meta">${durationLabel(sound.durationMs || 0)} · ${Math.max(1, Math.round((sound.size || 0) / 1024))} KB</div></button><button class="icon-btn" data-action="delete-custom-sound" data-id="${esc(sound.id)}" aria-label="Delete ${esc(sound.title)}">×</button></div>`).join('') : `<div class="small muted">No uploaded cue sounds.</div>`;
@@ -1737,6 +1801,20 @@ function renderSettings() {
       <h2 class="section-title">Appearance</h2>
       <div class="field"><label for="theme-select">Theme</label><select id="theme-select" class="select" data-setting="theme"><option value="dark" ${s.theme === 'dark' ? 'selected' : ''}>Dark</option><option value="light" ${s.theme === 'light' ? 'selected' : ''}>Light</option><option value="oled" ${s.theme === 'oled' ? 'selected' : ''}>OLED</option></select></div>
       <div class="field"><label for="layout-select">Default live layout</label><select id="layout-select" class="select" data-setting="layout"><option value="focus" ${s.layout === 'focus' ? 'selected' : ''}>Focus</option><option value="classic" ${s.layout === 'classic' ? 'selected' : ''}>Classic</option><option value="strength" ${s.layout === 'strength' ? 'selected' : ''}>Strength</option><option value="wall" ${s.layout === 'wall' ? 'selected' : ''}>Wall</option></select></div>
+    </section>
+    <section class="card form-card" style="margin-top:12px"><h2 class="section-title">Accessibility & Language</h2>
+      <div class="accessibility-grid">
+        <div class="field"><label>Language</label><select class="select" data-setting="language">${localeOptions}</select></div>
+        <div class="field"><label>Text size</label><select class="select" data-setting="textScale"><option value="normal" ${s.textScale==='normal'?'selected':''}>Normal</option><option value="large" ${s.textScale==='large'?'selected':''}>Large</option><option value="xlarge" ${s.textScale==='xlarge'?'selected':''}>Extra large</option></select></div>
+        <div class="field"><label>Reduce motion</label><select class="select" data-setting="reduceMotion"><option value="system" ${s.reduceMotion==='system'?'selected':''}>System</option><option value="on" ${s.reduceMotion==='on'?'selected':''}>On</option><option value="off" ${s.reduceMotion==='off'?'selected':''}>Off</option></select></div>
+        <div class="field"><label>Time format</label><select class="select" data-setting="timeFormat"><option value="system" ${s.timeFormat==='system'?'selected':''}>System</option><option value="24" ${s.timeFormat==='24'?'selected':''}>24-hour</option><option value="12" ${s.timeFormat==='12'?'selected':''}>12-hour</option></select></div>
+        <div class="field"><label>Number digits</label><select class="select" data-setting="numberSystem"><option value="system" ${s.numberSystem==='system'?'selected':''}>System digits</option><option value="latn" ${s.numberSystem==='latn'?'selected':''}>Latin digits</option></select></div>
+      </div>
+      ${settingToggle('High contrast', 'highContrast', s.highContrast, 'Stronger borders, text contrast and progress visibility')}
+      ${settingToggle('Large controls', 'largeControls', s.largeControls, 'Larger touch targets and more spacing in live controls')}
+      ${settingToggle('Screen reader optimization', 'screenReaderOptimized', s.screenReaderOptimized, 'Prioritizes semantic announcements and suppresses app speech to avoid overlapping voices')}
+      <div class="locale-note">Browser pinch zoom remains enabled. Pseudo locales are included for layout/RTL testing and are not production translations.</div>
+      <button class="btn" data-action="show-keyboard-shortcuts">Keyboard shortcuts</button>
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">Timer</h2>
       <div class="field"><label for="adjust-setting">Time adjustment</label><select id="adjust-setting" class="select" data-setting="adjustmentMs"><option value="5000" ${s.adjustmentMs===5000?'selected':''}>5 seconds</option><option value="15000" ${s.adjustmentMs===15000?'selected':''}>15 seconds</option><option value="30000" ${s.adjustmentMs===30000?'selected':''}>30 seconds</option><option value="60000" ${s.adjustmentMs===60000?'selected':''}>1 minute</option></select></div>
@@ -1781,10 +1859,10 @@ function renderSettings() {
         <div class="metric"><strong>${state.recoverySnapshots.length}</strong><span>Recovery snapshots</span></div>
         <div class="metric"><strong>${state.quarantineItems.length}</strong><span>Quarantined items</span></div>
       </div>
-      <div class="small muted">Last external backup: ${state.settings.lastExternalBackupAt ? new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'short'}).format(new Date(state.settings.lastExternalBackupAt)) : 'Never'}</div>
+      <div class="small muted">Last external backup: ${state.settings.lastExternalBackupAt ? uiDate(state.settings.lastExternalBackupAt,{dateStyle:'medium',timeStyle:'short'}) : 'Never'}</div>
       <div class="row" style="flex-wrap:wrap"><button class="btn primary" data-action="export-backup">Create backup</button><button class="btn" data-action="import-backup">Restore / Import</button>${state.lastRestoreSnapshotId ? '<button class="btn" data-action="undo-last-restore">Undo last restore</button>' : ''}</div>
       <div class="row" style="flex-wrap:wrap"><button class="btn" data-action="create-recovery">Create local recovery snapshot</button><button class="btn" data-action="show-quarantine">Quarantine</button></div>
-      ${state.recoverySnapshots.length ? `<div class="recovery-list"><div class="small muted">Recent recovery snapshots</div>${state.recoverySnapshots.slice(0,4).map((snap)=>`<div class="recovery-row"><button class="list-row-main" data-action="restore-recovery" data-id="${esc(snap.id)}"><div class="list-row-title">${esc(snap.label)}</div><div class="list-row-meta">${new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'short'}).format(new Date(snap.createdAt))} · ${(snap.sizeEstimate/1024).toFixed(0)} KB</div></button></div>`).join('')}</div>` : ''}
+      ${state.recoverySnapshots.length ? `<div class="recovery-list"><div class="small muted">Recent recovery snapshots</div>${state.recoverySnapshots.slice(0,4).map((snap)=>`<div class="recovery-row"><button class="list-row-main" data-action="restore-recovery" data-id="${esc(snap.id)}"><div class="list-row-title">${esc(snap.label)}</div><div class="list-row-meta">${uiDate(snap.createdAt,{dateStyle:'medium',timeStyle:'short'})} · ${(snap.sizeEstimate/1024).toFixed(0)} KB</div></button></div>`).join('')}</div>` : ''}
       <details><summary>Sync readiness</summary><div class="small muted" style="margin-top:8px">Device ID: ${esc(state.dataHealth?.deviceId || 'Unavailable')}<br>Change journal: ${state.dataHealth?.pendingChanges ?? 0} entries<br>Tombstones: ${state.dataHealth?.tombstoneCount ?? 0}</div></details>
       <button class="btn danger" data-action="clear-history">Clear history</button>
     </section>
@@ -1807,7 +1885,7 @@ function renderSettings() {
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">App</h2>
       <button class="btn" data-action="install">Install PWA</button>
-      <div class="small muted">Timer v1.7.0 · local-first · offline capable</div>
+      <div class="small muted">Timer v1.8.0 · local-first · offline capable</div>
     </section>`;
 }
 
@@ -2117,7 +2195,7 @@ async function undoLastRestore() {
 
 async function showQuarantine() {
   await refreshDataResilience();
-  showSheet('Quarantined Data', `<div class="stack">${state.quarantineItems.length ? state.quarantineItems.map((item) => `<div class="card card-pad"><strong>${esc(item.entityType)}</strong><div class="small muted">${esc(item.entityId || 'Unknown ID')} · ${new Date(item.createdAt).toLocaleString()}</div><div style="margin-top:6px">${esc(item.reason)}</div></div>`).join('') : '<div class="empty">No quarantined records.</div>'}${state.quarantineItems.length ? '<button class="btn danger" data-action="clear-quarantine">Clear quarantine</button>' : ''}</div>`);
+  showSheet('Quarantined Data', `<div class="stack">${state.quarantineItems.length ? state.quarantineItems.map((item) => `<div class="card card-pad"><strong>${esc(item.entityType)}</strong><div class="small muted">${esc(item.entityId || 'Unknown ID')} · ${uiDate(item.createdAt,{dateStyle:'medium',timeStyle:'short'})}</div><div style="margin-top:6px">${esc(item.reason)}</div></div>`).join('') : '<div class="empty">No quarantined records.</div>'}${state.quarantineItems.length ? '<button class="btn danger" data-action="clear-quarantine">Clear quarantine</button>' : ''}</div>`);
 }
 
 async function installApp() {
@@ -2219,7 +2297,7 @@ async function onVisibilityChange() {
     broadcastActiveSnapshot(snapshot, state.activeMeta);
     if (state.settings.activeNotifications && globalThis.Notification?.permission === 'granted') {
       const view = state.engine.view();
-      showActiveSessionNotification(view.title || 'Timer', `${view.current?.label || 'Timer'} · Tap to return`).catch(() => {});
+      showActiveSessionNotification(translateBuiltInLabel(view.title || 'Timer', currentLocale()), `${translateBuiltInLabel(view.current?.label || 'Timer', currentLocale())} · ${translateSource('Tap to return', currentLocale())}`).catch(() => {});
     }
   } else {
     await closeTimerNotification('timer-active');
@@ -2290,6 +2368,7 @@ document.addEventListener('change', async (e) => {
     state.settings[key] = numeric.has(key) ? Number(e.target.value) : e.target.value;
     if (key === 'cueProfileId') applySelectedCueProfile(e.target.value);
     await saveSettings();
+    if (['language','timeFormat','numberSystem','textScale','reduceMotion','theme','layout'].includes(key)) { applyTheme(); return renderSettings(); }
     if (key === 'cueProfileId' || key === 'voiceRate') renderSettings();
   }
 });
@@ -2373,6 +2452,19 @@ document.addEventListener('click', async (e) => {
   if (action === 'history-export-json') return exportHistoryJson();
   if (action === 'history-export-csv') return exportHistoryCsv();
   if (action === 'delete-block') return deleteReusableBlock(btn.dataset.id);
+
+  if (action === 'show-keyboard-shortcuts') {
+    return showSheet('Keyboard shortcuts', `<div class="shortcut-grid">
+      <div class="shortcut-row"><span>Pause / Resume</span><kbd>Space</kbd></div>
+      <div class="shortcut-row"><span>Next interval</span><kbd>→</kbd></div>
+      <div class="shortcut-row"><span>Previous interval</span><kbd>←</kbd></div>
+      <div class="shortcut-row"><span>Adjust time</span><kbd>↑ / ↓</kbd></div>
+      <div class="shortcut-row"><span>Restart step</span><kbd>R</kbd></div>
+      <div class="shortcut-row"><span>Mute / Unmute</span><kbd>M</kbd></div>
+      <div class="shortcut-row"><span>Lock / Unlock</span><kbd>L</kbd></div>
+      <div class="shortcut-row"><span>Fullscreen</span><kbd>F</kbd></div>
+    </div>`);
+  }
 
   if (action === 'setting-toggle') {
     const k = btn.dataset.key;
@@ -2467,7 +2559,7 @@ document.addEventListener('click', async (e) => {
 importFile.addEventListener('change', async () => { const file = importFile.files?.[0]; importFile.value = ''; if (file) await importBackupFile(file); });
 
 document.addEventListener('keydown', (e) => {
-  if (!state.engine || ['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)) return;
+  if (!state.engine || $('#sheet-root [data-sheet]') || isInteractiveTarget(e.target)) return;
   let handled = true;
   if (e.code === 'Space') state.engine.view().status === 'paused' ? state.engine.resume() : state.engine.pause();
   else if (e.key === 'ArrowRight') state.engine.next();
@@ -2478,6 +2570,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.key.toLowerCase() === 'm') cue.toggleMute();
   else if (e.key.toLowerCase() === 'l') { state.liveLocked = !state.liveLocked; renderLive(); }
   else if (e.key.toLowerCase() === 'f') { if (document.fullscreenElement) document.exitFullscreen?.(); else document.documentElement.requestFullscreen?.(); }
+  else if (e.key === '?' || (e.key === '/' && e.shiftKey)) { showSheet('Keyboard shortcuts', `<div class="shortcut-grid"><div class="shortcut-row"><span>Pause / Resume</span><kbd>Space</kbd></div><div class="shortcut-row"><span>Next interval</span><kbd>→</kbd></div><div class="shortcut-row"><span>Previous interval</span><kbd>←</kbd></div><div class="shortcut-row"><span>Adjust time</span><kbd>↑ / ↓</kbd></div><div class="shortcut-row"><span>Restart step</span><kbd>R</kbd></div><div class="shortcut-row"><span>Mute / Unmute</span><kbd>M</kbd></div><div class="shortcut-row"><span>Lock / Unlock</span><kbd>L</kbd></div><div class="shortcut-row"><span>Fullscreen</span><kbd>F</kbd></div></div>`); }
   else handled = false;
   if (handled) { e.preventDefault(); updateLiveView(true); }
 });
