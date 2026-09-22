@@ -5,9 +5,10 @@ import {
   buildCustomRoutine, validateCustomRoutine, collectCustomParameterRefs, resolveCustomParameterValues, formulaVariableName
 } from './core.js';
 import { TimerDB, defaultSettings, requestPersistentStorage, storageEstimate } from './db.js';
-import { CueManager, WakeLockManager, requestNotificationPermission, showCompletionNotification, BUILTIN_CUE_PROFILES, SOUND_PACKS, cueProfileById, profileSettings } from './audio.js';
+import { CueManager, WakeLockManager, requestNotificationPermission, showCompletionNotification, showActiveSessionNotification, closeTimerNotification, BUILTIN_CUE_PROFILES, SOUND_PACKS, cueProfileById, profileSettings } from './audio.js';
 import { analyzeSession, comparisonFingerprint, comparableSessions, objectiveRecord, factualTrend, summarizeRange, startOfLocalDay, startOfLocalWeek, monthCalendar, sessionsToCsv } from './analytics.js';
 import { createBackupArchive, verifyBackupArchive, encryptBackupArchive, decryptBackupArchive, isLegacyBackup, isEncryptedBackup, isBackupArchive, isRoutinePackage, backupCounts } from './resilience.js';
+import { SessionOwnershipManager, MediaSessionManager, parseLaunchCommand, detectDeviceCapabilities } from './device.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -18,7 +19,7 @@ const ms = (seconds) => Math.max(0, Math.round(Number(seconds || 0) * 1000));
 const sec = (milliseconds) => Math.round(Number(milliseconds || 0) / 1000);
 const mins = (minutes) => ms(Number(minutes || 0) * 60);
 const pct = (n) => `${Math.round(clamp(n || 0, 0, 1) * 100)}%`;
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 
 const BUILDER_META = {
   interval: { name: 'Interval', desc: 'Work / rest repetitions' },
@@ -165,11 +166,24 @@ const state = {
   recoverySnapshots: [],
   quarantineItems: [],
   dataHealth: null,
-  lastRestoreSnapshotId: null
+  lastRestoreSnapshotId: null,
+  remoteActive: null,
+  remoteEngine: null,
+  remoteRaf: 0,
+  displayMode: false,
+  pendingTakeover: false,
+  launchCommand: { type: 'HOME' },
+  swRegistration: null,
+  updateReady: false,
+  updateDeferred: false,
+  reloadOnControllerChange: false,
+  deviceCapabilities: null
 };
 
 const cue = new CueManager(() => state.settings, () => state.cueProfiles, async (id) => state.db.get('customSounds', id));
 const wakeLock = new WakeLockManager();
+const ownership = new SessionOwnershipManager();
+const mediaSession = new MediaSessionManager();
 const main = $('#app-main');
 const appShell = $('#app');
 const header = $('#app-header');
@@ -183,6 +197,230 @@ function toast(message, timeout = 2600) {
   el.textContent = message;
   root.append(el);
   setTimeout(() => el.remove(), timeout);
+}
+
+
+function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+function clearLaunchQuery() {
+  try {
+    const url = new URL(location.href);
+    if (!url.searchParams.has('launch')) return;
+    url.searchParams.delete('launch');
+    url.searchParams.delete('id');
+    url.searchParams.delete('duration');
+    history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+  } catch {}
+}
+
+function renderUpdateBanner() {
+  const root = $('#update-root');
+  if (!root) return;
+  if (!state.updateReady) { root.innerHTML = ''; return; }
+  const active = Boolean(state.engine || state.remoteActive);
+  const deferred = state.updateDeferred;
+  root.innerHTML = `<div class="update-banner" role="status"><span>${active ? (deferred ? 'Update queued for after the active timer.' : 'Update ready. It will not interrupt the active timer.') : 'Timer update ready.'}</span><button class="btn ${active ? '' : 'primary'}" data-action="apply-update">${active ? 'Update after timer' : 'Update now'}</button></div>`;
+}
+
+function configureMediaSession() {
+  if (!state.settings.mediaControls || !state.engine || !mediaSession.supported()) { mediaSession.disable(); return; }
+  mediaSession.enable({
+    play: () => { if (state.engine?.view()?.status === 'paused') { state.engine.resume(); updateLiveView(true); } },
+    pause: () => { if (state.engine?.view()?.status === 'running') { state.engine.pause(); updateLiveView(true); } },
+    next: () => { state.engine?.next(); updateLiveView(true); },
+    previous: () => { state.engine?.previous(); updateLiveView(true); },
+    stop: () => { if (state.engine?.view()?.status === 'running') { state.engine.pause(); updateLiveView(true); } }
+  });
+  mediaSession.update(state.engine.view());
+}
+
+function broadcastActiveSnapshot(snapshot = state.engine?.snapshot(), meta = state.activeMeta) {
+  if (!snapshot || !ownership.isOwner()) return;
+  ownership.post('ACTIVE_SNAPSHOT', { snapshot, meta });
+}
+
+function startOwnershipHeartbeat() {
+  ownership.startHeartbeat(() => state.engine ? { snapshot: state.engine.snapshot(), meta: state.activeMeta } : null, 1500);
+}
+
+function setRemoteActive(active) {
+  if (!active?.snapshot || ['completed','cancelled'].includes(active.snapshot.status)) {
+    state.remoteActive = null;
+    state.remoteEngine = null;
+    cancelAnimationFrame(state.remoteRaf);
+    return;
+  }
+  state.remoteActive = { snapshot: structuredClone(active.snapshot), meta: structuredClone(active.meta || active.snapshot.meta || {}) };
+  try { state.remoteEngine = TimerEngine.restore(state.remoteActive.snapshot, new BrowserClock()); }
+  catch { state.remoteEngine = null; }
+}
+
+function renderRemoteActive() {
+  cancelAnimationFrame(state.remoteRaf);
+  setLiveMode(true);
+  const engine = state.remoteEngine;
+  const view = engine?.view?.();
+  if (!engine || !view || ['completed','cancelled'].includes(view.status)) {
+    main.innerHTML = `<section class="remote-session-empty"><div class="brand-mark" aria-hidden="true">◷</div><h1>${state.displayMode ? 'Wall Display' : 'Active Timer'}</h1><p class="muted">No active timer is available from another window.</p>${state.displayMode ? '<button class="btn" data-action="close-display-window">Close display</button>' : '<button class="btn primary" data-action="remote-refresh">Check again</button>'}</section>`;
+    return;
+  }
+  if (state.displayMode) {
+    main.innerHTML = `<section id="remote-live" class="live-shell layout-wall remote-display" data-phase="${esc(view.current?.phase || 'custom')}"><div class="live-top"><span id="remote-round" class="pill"></span><span class="pill">Display · read only</span></div><div class="live-main"><div id="remote-phase" class="live-phase"></div><div id="remote-time" class="live-time" role="timer"></div><div id="remote-label" class="live-label"></div></div><div class="remote-display-footer">Controlled by another Timer window</div></section>`;
+  } else {
+    main.innerHTML = `<section class="remote-session"><div class="quick-label">Active in another window</div><div id="remote-time" class="quick-time"></div><h1 id="remote-label"></h1><p id="remote-phase" class="muted"></p><div class="stack"><button class="btn primary big" data-action="takeover-session">Take over here</button><button class="btn" data-action="focus-owner">Focus owner window</button></div><p class="small muted">Only one window owns audio, Wake Lock and session persistence at a time.</p></section>`;
+  }
+  const loop = () => {
+    if (!state.remoteEngine || state.engine) return;
+    try { state.remoteEngine.reconcile(); } catch {}
+    const v = state.remoteEngine.view();
+    if (!v || ['completed','cancelled'].includes(v.status)) return;
+    const current = v.current || {};
+    const displayMs = current.remainingMs != null ? current.remainingMs : current.elapsedMs;
+    const text = formatClock(displayMs, { tenths: v.mode === 'stopwatch', countUp: current.remainingMs == null });
+    if ($('#remote-time')) $('#remote-time').textContent = text;
+    if ($('#remote-label')) $('#remote-label').textContent = current.label || v.title;
+    if ($('#remote-phase')) $('#remote-phase').textContent = v.status === 'paused' ? 'Paused' : (current.phase || 'Time');
+    if ($('#remote-round')) {
+      const round = current.round;
+      $('#remote-round').textContent = round ? `Round ${round.current} / ${round.total}` : v.title;
+    }
+    const shell = $('#remote-live'); if (shell) shell.dataset.phase = current.phase || 'custom';
+    state.remoteRaf = requestAnimationFrame(loop);
+  };
+  loop();
+}
+
+async function restoreOwnedActive(active) {
+  if (!active?.snapshot || ['completed','cancelled'].includes(active.snapshot.status)) return false;
+  try {
+    setRemoteActive(null);
+    const engine = TimerEngine.restore(active.snapshot, new BrowserClock());
+    state.engine = engine;
+    state.activeMeta = active.meta || active.snapshot.meta || {};
+    cue.beginSession(state.activeMeta);
+    attachEngine(engine, state.activeMeta);
+    if (engine.view()?.status === 'completed') { await finalizeSession(engine.snapshot(), false); return true; }
+    if (state.settings.keepAwake) wakeLock.acquire();
+    configureMediaSession();
+    startOwnershipHeartbeat();
+    broadcastActiveSnapshot();
+    renderLive();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function relinquishRuntimeOwnership() {
+  if (!ownership.isOwner()) return;
+  const snapshot = state.engine?.snapshot();
+  const meta = state.activeMeta;
+  if (snapshot) await state.db.saveActive(snapshot, meta).catch(() => {});
+  cancelAnimationFrame(state.liveRaf);
+  cue.endSession();
+  await wakeLock.release();
+  await closeTimerNotification('timer-active');
+  mediaSession.disable();
+  state.engineUnsub?.();
+  state.engineUnsub = null;
+  state.engine = null;
+  state.activeMeta = null;
+  if (snapshot) setRemoteActive({ snapshot, meta });
+  ownership.stopHeartbeat();
+  await ownership.release();
+  ownership.post('OWNER_RELEASED', { sessionId: snapshot?.id });
+  renderRemoteActive();
+  renderUpdateBanner();
+}
+
+async function takeOverActiveSession() {
+  if (ownership.isOwner()) return;
+  state.pendingTakeover = true;
+  ownership.requestTakeover();
+  for (let i = 0; i < 20; i++) {
+    if (await ownership.acquire()) {
+      state.pendingTakeover = false;
+      const active = await state.db.getActive().catch(() => null);
+      if (active?.snapshot && await restoreOwnedActive(active)) return;
+      await ownership.release();
+      setRemoteActive(null);
+      render();
+      return toast('The active timer has already ended.');
+    }
+    await sleep(100);
+  }
+  state.pendingTakeover = false;
+  toast('Could not take over the timer yet. Try again.', 3600);
+}
+
+async function handleOwnershipMessage(message) {
+  if (!message?.type) return;
+  if (message.type === 'ACTIVE_SNAPSHOT' && !ownership.isOwner()) {
+    setRemoteActive(message);
+    if (!state.engine) renderRemoteActive();
+    return;
+  }
+  if (message.type === 'SESSION_ENDED' && !ownership.isOwner()) {
+    setRemoteActive(null);
+    if (state.displayMode) renderRemoteActive(); else render();
+    renderUpdateBanner();
+    if (state.updateDeferred) setTimeout(() => applyUpdate(), 250);
+    return;
+  }
+  if (message.type === 'TAKEOVER_REQUEST' && ownership.isOwner()) {
+    await relinquishRuntimeOwnership();
+    return;
+  }
+  if (message.type === 'FOCUS_REQUEST' && ownership.isOwner()) {
+    try { window.focus(); } catch {}
+  }
+}
+
+ownership.onMessage(handleOwnershipMessage);
+
+async function applyUpdate() {
+  if (!state.updateReady || !state.swRegistration) return;
+  if (state.engine || state.remoteActive) {
+    state.updateDeferred = true;
+    renderUpdateBanner();
+    return toast('Update queued for after the active timer.');
+  }
+  const waiting = state.swRegistration.waiting;
+  if (!waiting) { state.updateReady = false; renderUpdateBanner(); return; }
+  state.reloadOnControllerChange = true;
+  waiting.postMessage({ type: 'SKIP_WAITING' });
+}
+
+function markUpdateReady(registration) {
+  state.swRegistration = registration || state.swRegistration;
+  state.updateReady = Boolean(state.swRegistration?.waiting);
+  renderUpdateBanner();
+}
+
+async function handleLaunchCommand(command = { type: 'HOME' }) {
+  if (!command || command.type === 'HOME') { state.route = 'timer'; return render(); }
+  if (command.type === 'INVALID') { state.route = 'timer'; render(); return toast(command.reason || 'Invalid launch request.'); }
+  if (state.engine || state.remoteActive) {
+    if (command.type === 'DISPLAY') { state.displayMode = true; return renderRemoteActive(); }
+    if (command.type === 'ACTIVE_SESSION') return state.engine ? renderLive() : renderRemoteActive();
+    return state.engine ? renderLive() : renderRemoteActive();
+  }
+  if (command.type === 'QUICK') { state.route = 'timer'; return render(); }
+  if (command.type === 'STOPWATCH') return openBuilder('stopwatch');
+  if (command.type === 'FAVORITES') { state.route = 'library'; return render(); }
+  if (command.type === 'LAST_ROUTINE') {
+    const lastRoutineId = state.sessions.find((s) => s.routineId)?.routineId;
+    if (lastRoutineId) return startRoutine(lastRoutineId);
+    state.route = 'timer'; render(); return toast('No previously used saved routine found.');
+  }
+  if (command.type === 'TIMER') return startSession(buildCountdown({ durationMs: command.durationMs, label: `${durationLabel(command.durationMs)} Timer` }), { mode: 'countdown', title: `${durationLabel(command.durationMs)} Timer`, config: { durationMs: command.durationMs } });
+  if (command.type === 'ROUTINE') return startRoutine(command.id);
+  if (command.type === 'SESSION') {
+    state.route = 'history'; render();
+    return setTimeout(() => showSessionDetail(command.id), 0);
+  }
+  if (command.type === 'ACTIVE_SESSION') { state.route = 'timer'; render(); return toast('No active timer.'); }
+  if (command.type === 'DISPLAY') { state.displayMode = true; return renderRemoteActive(); }
 }
 
 function applyTheme() {
@@ -212,7 +450,9 @@ function setLiveMode(on) {
 }
 
 function render() {
+  renderUpdateBanner();
   if (state.engine) return renderLive();
+  if (state.remoteActive || state.displayMode) return renderRemoteActive();
   setLiveMode(false);
   setNavActive();
   document.title = state.builder ? `${BUILDER_META[state.builder.type]?.name || 'Builder'} — Timer` : `${state.route[0].toUpperCase()}${state.route.slice(1)} — Timer`;
@@ -992,8 +1232,14 @@ async function startRoutine(id) {
 
 async function startSession(plan, meta) {
   if (state.engine) return toast('A timer is already running.');
+  if (!ownership.isOwner() && !await ownership.acquire()) {
+    const active = await state.db.getActive().catch(() => null);
+    if (active?.snapshot) { setRemoteActive(active); renderRemoteActive(); }
+    return toast('Another Timer window owns the active runtime.', 3600);
+  }
   state.completion = null;
   state.finalized = false;
+  setRemoteActive(null);
   await cue.init();
   cue.beginSession(meta);
   const engine = new TimerEngine(new BrowserClock());
@@ -1003,6 +1249,10 @@ async function startSession(plan, meta) {
   state.activeMeta = meta;
   await state.db.saveActive(engine.snapshot(), meta).catch(() => toast('Recovery checkpoint could not be saved.'));
   if (state.settings.keepAwake) wakeLock.acquire();
+  configureMediaSession();
+  startOwnershipHeartbeat();
+  broadcastActiveSnapshot();
+  renderUpdateBanner();
   renderLive();
 }
 
@@ -1010,6 +1260,8 @@ function attachEngine(engine, meta) {
   state.engineUnsub?.();
   state.engineUnsub = engine.subscribe((event, snapshot) => {
     cue.onEvent(event, snapshot);
+    mediaSession.update(engine.view());
+    broadcastActiveSnapshot(snapshot, meta);
     if (!['session-completed', 'session-cancelled'].includes(event.type)) state.db.saveActive(snapshot, meta).catch(() => {});
     if (event.type === 'session-completed' || event.type === 'session-cancelled') finalizeSession(snapshot, event.type === 'session-cancelled');
   });
@@ -1020,7 +1272,10 @@ async function finalizeSession(snapshot, cancelled = false) {
   state.finalized = true;
   cancelAnimationFrame(state.liveRaf);
   await wakeLock.release();
+  await closeTimerNotification('timer-active');
   cue.endSession();
+  mediaSession.disable();
+  ownership.stopHeartbeat();
   const plan = snapshot.plan;
   const activeDurationMs = Math.max(0, (snapshot.endedAt || Date.now()) - snapshot.startedAt - (snapshot.pausedTotalMs || 0));
   const totals = snapshot.phaseTotals || {};
@@ -1060,6 +1315,8 @@ async function finalizeSession(snapshot, cancelled = false) {
   record.comparisonFingerprint = comparisonFingerprint(record);
   if (!cancelled) await state.db.put('sessions', record).catch(() => toast('Session history could not be saved.'));
   await state.db.clearActive().catch(() => {});
+  ownership.post('SESSION_ENDED', { sessionId: snapshot.id });
+  await ownership.release();
   state.engineUnsub?.();
   state.engineUnsub = null;
   state.engine = null;
@@ -1069,9 +1326,11 @@ async function finalizeSession(snapshot, cancelled = false) {
   await loadCollections();
   if (!cancelled) {
     state.completion = record;
-    if (state.settings.notifications) showCompletionNotification('Timer complete', record.title);
+    if (state.settings.notifications) showCompletionNotification('Timer complete', record.title, { sessionId: record.id });
   }
   render();
+  renderUpdateBanner();
+  if (state.updateDeferred) setTimeout(() => applyUpdate(), 250);
 }
 
 function renderLive() {
@@ -1466,6 +1725,8 @@ async function scrubDeletedCustomSound(soundId) {
 
 function renderSettings() {
   const s = state.settings;
+  state.deviceCapabilities = detectDeviceCapabilities();
+  const caps = state.deviceCapabilities;
   const voices = state.availableVoices || [];
   const selectedProfile = cueProfileById(s.cueProfileId || 'standard', state.cueProfiles);
   const voiceOptions = `<option value="" ${!s.voiceURI ? 'selected' : ''}>System default</option>${voices.map((voice) => `<option value="${esc(voice.voiceURI)}" ${s.voiceURI === voice.voiceURI ? 'selected' : ''}>${esc(voice.name)} · ${esc(voice.lang)}${voice.localService ? ' · Local' : ''}</option>`).join('')}`;
@@ -1508,8 +1769,10 @@ function renderSettings() {
       <div class="list">${soundRows}</div>
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">Notifications</h2>
-      ${settingToggle('Completion notifications', 'notifications', s.notifications, 'Requires browser notification permission')}
+      ${settingToggle('Completion notifications', 'notifications', s.notifications, 'Persistent completion alert where supported')}
+      ${settingToggle('Active timer notification', 'activeNotifications', s.activeNotifications, 'Best-effort static “timer running” notification when the app is hidden')}
       <button class="btn" data-action="enable-notifications">Request notification permission</button>
+      <div class="small muted">Permission: ${globalThis.Notification?.permission || 'unsupported'} · Exact screen-off alarms remain native-only.</div>
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">Data & Backup</h2>
       <div class="data-health-grid">
@@ -1525,9 +1788,26 @@ function renderSettings() {
       <details><summary>Sync readiness</summary><div class="small muted" style="margin-top:8px">Device ID: ${esc(state.dataHealth?.deviceId || 'Unavailable')}<br>Change journal: ${state.dataHealth?.pendingChanges ?? 0} entries<br>Tombstones: ${state.dataHealth?.tombstoneCount ?? 0}</div></details>
       <button class="btn danger" data-action="clear-history">Clear history</button>
     </section>
+    <section class="card form-card" style="margin-top:12px"><h2 class="section-title">Device & PWA</h2>
+      ${settingToggle('Headset / media controls', 'mediaControls', s.mediaControls, 'Experimental. May take media-button control away from music apps.')}
+      <div class="capability-grid">
+        ${capabilityRow('Installed PWA', caps.installedPwa)}
+        ${capabilityRow('Service worker / offline shell', caps.serviceWorker)}
+        ${capabilityRow('Single-runtime Web Lock', caps.webLocks, caps.webLocks ? '' : 'Lease fallback')}
+        ${capabilityRow('Window coordination', caps.broadcastChannel)}
+        ${capabilityRow('Wake Lock', caps.wakeLock)}
+        ${capabilityRow('Notifications', caps.notifications)}
+        ${capabilityRow('Media controls', caps.mediaSession)}
+        ${capabilityRow('System share sheet', caps.share)}
+        ${capabilityRow('Launch Handler', caps.launchHandler, caps.launchHandler ? '' : 'Optional')}
+        ${capabilityRow('True home-screen widget', false, 'Native only')}
+        ${capabilityRow('Exact local alarm', false, 'Native only')}
+      </div>
+      <div class="small muted">Primary reliable workout mode remains a visible installed PWA with Wake Lock. Background/locked-screen behavior is best effort unless a future native shell is added.</div>
+    </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">App</h2>
       <button class="btn" data-action="install">Install PWA</button>
-      <div class="small muted">Timer v1.6.0 · local-first · offline capable</div>
+      <div class="small muted">Timer v1.7.0 · local-first · offline capable</div>
     </section>`;
 }
 
@@ -1556,6 +1836,10 @@ function currentCueProfilePayload(title) {
   };
 }
 
+function capabilityRow(label, supported, note = '') {
+  return `<div class="capability-row"><span>${esc(label)}</span><strong class="${supported ? 'ok' : 'muted'}">${supported ? 'Supported' : (note || 'Unavailable')}</strong></div>`;
+}
+
 function settingToggle(label, key, checked, hint = '') {
   return `<div class="toggle-row"><div><strong>${esc(label)}</strong>${hint ? `<div class="small muted">${esc(hint)}</div>` : ''}</div><button class="toggle" data-action="setting-toggle" data-key="${key}" aria-pressed="${!!checked}" aria-label="${esc(label)}"></button></div>`;
 }
@@ -1580,6 +1864,7 @@ function liveMoreSheet() {
     <button class="sheet-item" data-action="live-lock">Lock controls</button>
     <button class="sheet-item" data-action="live-layout">Layout: ${esc(state.settings.layout)}</button>
     <button class="sheet-item" data-action="live-fullscreen">Toggle fullscreen</button>
+    <button class="sheet-item" data-action="open-display-window">Open Wall display window</button>
     <button class="sheet-item" data-action="live-mute">${cue.muted ? 'Unmute cues' : 'Mute cues'}</button>
     <button class="sheet-item" data-action="live-end" style="color:var(--danger)">End workout</button>
   </div>`);
@@ -1853,82 +2138,105 @@ async function loadCollections() {
 }
 
 async function boot() {
+  state.launchCommand = parseLaunchCommand(location.href);
+  state.displayMode = state.launchCommand.type === 'DISPLAY';
+  clearLaunchQuery();
   applyTheme();
   try { await state.db.open(); } catch { toast('Storage unavailable. Timers can still run, but recovery may be limited.', 5000); }
   state.settings = await state.db.loadSettings().catch(() => ({ ...defaultSettings }));
   refreshVoices();
   if ('speechSynthesis' in globalThis) globalThis.speechSynthesis.onvoiceschanged = () => { refreshVoices(); if (state.route === 'settings' && !state.engine) renderSettings(); };
   state.quickMs = state.settings.quickPresets?.[3] || 120000;
+  state.deviceCapabilities = detectDeviceCapabilities();
   applyTheme();
   await loadCollections();
   state.storagePersistent = await requestPersistentStorage();
   await refreshDataResilience();
   state.db.ensureDailyRecoverySnapshot().then(refreshDataResilience).catch(() => {});
   state.db.pruneTombstones().catch(() => {});
+  await registerPwa();
 
   const active = await state.db.getActive().catch(() => null);
   if (active?.snapshot && !['completed','cancelled'].includes(active.snapshot.status)) {
-    try {
-      const engine = TimerEngine.restore(active.snapshot, new BrowserClock());
-      state.engine = engine;
-      state.activeMeta = active.meta || active.snapshot.meta || {};
-      cue.beginSession(state.activeMeta);
-      attachEngine(engine, state.activeMeta);
-      if (engine.view()?.status === 'completed') await finalizeSession(engine.snapshot(), false);
-      else {
-        if (state.settings.keepAwake) wakeLock.acquire();
-        renderLive();
-      }
-    } catch {
-      await state.db.clearActive().catch(() => {});
-      toast('The previous active timer could not be restored.', 4200);
-      render();
+    if (state.displayMode) {
+      setRemoteActive(active);
+      renderRemoteActive();
+      return;
     }
-  } else {
-    handleLaunchIntent();
-    render();
+    if (await ownership.acquire()) {
+      if (!await restoreOwnedActive(active)) {
+        await ownership.release();
+        await state.db.clearActive().catch(() => {});
+        toast('The previous active timer could not be restored.', 4200);
+        await handleLaunchCommand(state.launchCommand);
+      }
+    } else {
+      setRemoteActive(active);
+      renderRemoteActive();
+    }
+    return;
   }
 
-  registerPwa();
+  if (state.displayMode) return renderRemoteActive();
+  await handleLaunchCommand(state.launchCommand);
 }
 
-function handleLaunchIntent() {
-  const params = new URLSearchParams(location.search);
-  const launch = params.get('launch');
-  if (!launch) return;
-  history.replaceState({}, '', location.pathname + location.hash);
-  if (launch === 'quick') { state.route = 'timer'; }
-  else if (launch === 'stopwatch') openBuilder('stopwatch');
-  else if (launch === 'favorites') { state.route = 'library'; }
-  else if (launch === 'last') {
-    const lastRoutineId = state.sessions.find((s) => s.routineId)?.routineId;
-    if (lastRoutineId) setTimeout(() => startRoutine(lastRoutineId), 0);
-  }
-}
-
-function registerPwa() {
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
+async function registerPwa() {
+  if (!('serviceWorker' in navigator)) return;
+  try {
+    const registration = await navigator.serviceWorker.register('./sw.js');
+    state.swRegistration = registration;
+    if (registration.waiting) markUpdateReady(registration);
+    registration.addEventListener('updatefound', () => {
+      const installing = registration.installing;
+      installing?.addEventListener('statechange', () => {
+        if (installing.state === 'installed' && navigator.serviceWorker.controller) {
+          setTimeout(() => markUpdateReady(registration), 0);
+        }
+      });
+    });
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (state.reloadOnControllerChange && !state.engine && !state.remoteActive) location.reload();
+    });
+    navigator.serviceWorker.addEventListener('message', (event) => {
+      if (event.data?.type === 'LAUNCH_URL' && event.data.url) handleLaunchCommand(parseLaunchCommand(event.data.url));
+      if (event.data?.type === 'SW_ACTIVATED') {
+        state.updateReady = false;
+        renderUpdateBanner();
+      }
+    });
+  } catch {}
   window.addEventListener('beforeinstallprompt', (e) => {
     e.preventDefault(); state.installPrompt = e; $('#install-btn')?.classList.remove('hidden');
   });
 }
 
 async function onVisibilityChange() {
-  if (!state.engine) return;
+  if (!state.engine || !ownership.isOwner()) return;
   if (document.visibilityState === 'hidden') {
-    await state.db.saveActive(state.engine.snapshot(), state.activeMeta).catch(() => {});
+    const snapshot = state.engine.snapshot();
+    await state.db.saveActive(snapshot, state.activeMeta).catch(() => {});
+    broadcastActiveSnapshot(snapshot, state.activeMeta);
+    if (state.settings.activeNotifications && globalThis.Notification?.permission === 'granted') {
+      const view = state.engine.view();
+      showActiveSessionNotification(view.title || 'Timer', `${view.current?.label || 'Timer'} · Tap to return`).catch(() => {});
+    }
   } else {
+    await closeTimerNotification('timer-active');
     state.engine.rebaseToWall();
     state.engine.reconcile();
     cue.init().catch(() => {});
     const status = state.engine?.view()?.status;
     if (state.settings.keepAwake && status && !['completed', 'cancelled'].includes(status)) wakeLock.acquire();
+    configureMediaSession();
+    broadcastActiveSnapshot();
   }
 }
 
 document.addEventListener('visibilitychange', onVisibilityChange);
-window.addEventListener('pagehide', () => { if (state.engine) state.db.saveActive(state.engine.snapshot(), state.activeMeta).catch(() => {}); });
+window.addEventListener('pagehide', () => { if (state.engine && ownership.isOwner()) state.db.saveActive(state.engine.snapshot(), state.activeMeta).catch(() => {}); });
 window.addEventListener('resize', () => { if (state.engine) updateLiveView(true); });
+window.addEventListener('unload', () => { if (!state.engine) ownership.dispose(); });
 
 function updateBuilderInput(target) {
   if (!state.builder) return;
@@ -1993,6 +2301,20 @@ document.addEventListener('click', async (e) => {
   if (!btn) return;
   const action = btn.dataset.action;
 
+  if (action === 'apply-update') return applyUpdate();
+  if (action === 'takeover-session') return takeOverActiveSession();
+  if (action === 'focus-owner') { ownership.requestFocus(); return; }
+  if (action === 'remote-refresh') { const active = await state.db.getActive().catch(() => null); setRemoteActive(active); return state.remoteActive ? renderRemoteActive() : render(); }
+  if (action === 'close-display-window') { try { window.close(); } catch {} return; }
+  if (action === 'open-display-window') {
+    closeSheet();
+    try {
+      const url = new URL(location.href); url.search = '?launch=display'; url.hash = '';
+      const display = window.open(url.toString(), 'timer-wall-display', 'popup,width=1200,height=800');
+      if (!display) toast('The browser blocked the display window. Allow pop-ups for Timer and try again.', 4200);
+    } catch { toast('Display window could not be opened.'); }
+    return;
+  }
   if (action === 'home') return setRoute('timer');
   if (action === 'create') return showCreateSheet();
   if (action === 'close-sheet') { state.pendingStart = null; return closeSheet(); }
@@ -2052,7 +2374,17 @@ document.addEventListener('click', async (e) => {
   if (action === 'history-export-csv') return exportHistoryCsv();
   if (action === 'delete-block') return deleteReusableBlock(btn.dataset.id);
 
-  if (action === 'setting-toggle') { const k = btn.dataset.key; state.settings[k] = !state.settings[k]; if (k === 'notifications' && state.settings[k]) { const p = await requestNotificationPermission(); if (p !== 'granted') state.settings[k] = false; } await saveSettings(); return renderSettings(); }
+  if (action === 'setting-toggle') {
+    const k = btn.dataset.key;
+    state.settings[k] = !state.settings[k];
+    if (['notifications','activeNotifications'].includes(k) && state.settings[k]) {
+      const p = await requestNotificationPermission();
+      if (p !== 'granted') state.settings[k] = false;
+    }
+    await saveSettings();
+    if (k === 'mediaControls') configureMediaSession();
+    return renderSettings();
+  }
   if (action === 'test-cue-kind') { await cue.test(btn.dataset.kind || 'work'); return; }
   if (action === 'save-cue-profile') {
     const title = prompt('Cue profile name', 'My Cue Profile')?.trim();

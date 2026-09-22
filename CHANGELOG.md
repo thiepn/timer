@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.7.0
+
+### Added
+- Validated launch-command routing for Quick Timer, stopwatch, saved routines, completed sessions, direct-duration timers, active-session return and read-only Wall display mode.
+- Single-runtime ownership using Web Locks with a bounded local lease fallback.
+- BroadcastChannel coordination with semantic session snapshots, explicit takeover and owner-focus requests.
+- Read-only same-device Wall display window driven by the authoritative active-session snapshot.
+- Safe service-worker update banner/deferral so waiting updates never reload an active workout.
+- Notification click routing plus optional static active-session notifications.
+- Experimental Media Session/headset controls behind an explicit setting.
+- Device & PWA capability diagnostics with native-only boundaries for Android widgets and exact local alarms.
+
+### Improved
+- Only the runtime owner may hold Wake Lock, emit cues, publish active persistence checkpoints or own Media Session controls.
+- Completion notifications now link back to the completed session detail.
+- Active notifications are closed when the app returns to the foreground or the session ends.
+- Installed PWA manifest declares focus-existing launch behavior where supported.
+
+### Compatibility
+- IndexedDB remains v4 and backup payload remains v4; no data migration is required.
+- Service-worker cache generation bumped to `thiepn-timer-v9`.
+
 ## 1.6.0
 
 ### Added

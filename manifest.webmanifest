@@ -1,5 +1,5 @@
 {
-  "name": "Timer — Workout Interval Timer",
+  "name": "Timer \u2014 Workout Interval Timer",
   "short_name": "Timer",
   "description": "Local-first workout timer for intervals, circuits, EMOM, AMRAP, boxing, run/walk and more.",
   "start_url": "./",
@@ -9,12 +9,39 @@
   "background_color": "#0b0d10",
   "theme_color": "#0b0d10",
   "icons": [
-    { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
   ],
   "shortcuts": [
-    { "name": "Quick Timer", "short_name": "Quick Timer", "url": "./?launch=quick" },
-    { "name": "Stopwatch", "short_name": "Stopwatch", "url": "./?launch=stopwatch" },
-    { "name": "Last Routine", "short_name": "Last Routine", "url": "./?launch=last" },
-    { "name": "Favorites", "short_name": "Favorites", "url": "./?launch=favorites" }
-  ]
+    {
+      "name": "Quick Timer",
+      "short_name": "Quick Timer",
+      "url": "./?launch=quick"
+    },
+    {
+      "name": "Stopwatch",
+      "short_name": "Stopwatch",
+      "url": "./?launch=stopwatch"
+    },
+    {
+      "name": "Last Routine",
+      "short_name": "Last Routine",
+      "url": "./?launch=last"
+    },
+    {
+      "name": "Favorites",
+      "short_name": "Favorites",
+      "url": "./?launch=favorites"
+    }
+  ],
+  "launch_handler": {
+    "client_mode": [
+      "focus-existing",
+      "auto"
+    ]
+  }
 }

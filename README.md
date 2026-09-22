@@ -1,6 +1,6 @@
 # Timer
 
-Current app version: **1.6.0**.
+Current app version: **1.7.0**.
 
 A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 
@@ -26,6 +26,9 @@ A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 - Active-session persistence and reload recovery
 - Versioned SHA-256-verified backup archives with selective export/restore, merge/replace preview, recovery snapshots, quarantine, optional password encryption, portable routine packages, and backward-compatible legacy restore
 - Offline service worker + installable PWA manifest
+- Single-runtime ownership across windows with Web Locks and a lease fallback
+- Read-only secondary Wall display window with explicit takeover
+- Deep-link launch commands, notification routing, safe deferred PWA updates, capability diagnostics and optional Media Session controls
 - Launcher shortcuts for Quick Timer, Stopwatch, Favorites and Last Routine
 - Keyboard controls during live sessions
 - Light, Dark and OLED appearance modes
@@ -148,3 +151,14 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 - Mutable entities carry sync revision/device metadata and create deterministic change journal entries; deletions emit tombstones for future multi-device sync.
 - Data & Backup settings expose storage usage, recovery count, quarantine count, device identity, journal size, and tombstone count.
 - Raw v1-v4 legacy backups remain importable.
+
+## v1.7.0 PWA and device integration hardening
+
+- Added validated launch commands for Quick Timer, direct countdowns, saved routines, session detail, active-session return and Wall display mode.
+- Added single active-runtime ownership using Web Locks where available with a short local lease fallback. Secondary windows become read-only observers instead of restoring duplicate cue/persistence engines.
+- Added BroadcastChannel coordination, semantic active-session heartbeat snapshots, explicit ownership takeover and owner-focus requests.
+- Added a same-device read-only Wall display window driven from the authoritative timer snapshot.
+- Service-worker updates now wait safely during active sessions and can be explicitly applied afterward without surprise workout reloads.
+- Notification clicks carry launch intent; optional active-session notifications are static/best-effort and never treated as exact background alarms.
+- Added optional experimental Media Session/headset controls with cleanup at session end.
+- Added Device & PWA capability diagnostics and explicit native-only reporting for true home-screen widgets and exact local alarms.

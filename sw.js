@@ -1,4 +1,4 @@
-const CACHE = 'thiepn-timer-v8';
+const CACHE = 'thiepn-timer-v9';
 const APP_SHELL = [
   './',
   './index.html',
@@ -10,6 +10,7 @@ const APP_SHELL = [
   './src/audio.js',
   './src/analytics.js',
   './src/resilience.js',
+  './src/device.js',
   './src/app.js'
 ];
 
@@ -22,7 +23,13 @@ self.addEventListener('activate', (event) => {
     const keys = await caches.keys();
     await Promise.all(keys.filter((key) => key !== CACHE && key.startsWith('thiepn-timer-')).map((key) => caches.delete(key)));
     await self.clients.claim();
+    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of clients) client.postMessage({ type: 'SW_ACTIVATED', cache: CACHE });
   })());
+});
+
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
 self.addEventListener('fetch', (event) => {
@@ -63,10 +70,16 @@ self.addEventListener('fetch', (event) => {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   event.waitUntil((async () => {
+    const target = new URL(event.notification.data?.url || './?launch=active', self.registration.scope).toString();
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const client of windows) {
-      if ('focus' in client) return client.focus();
+      try {
+        if ('navigate' in client) await client.navigate(target);
+        else client.postMessage({ type: 'LAUNCH_URL', url: target });
+      } catch { client.postMessage?.({ type: 'LAUNCH_URL', url: target }); }
+      if ('focus' in client) await client.focus();
+      return;
     }
-    if (self.clients.openWindow) return self.clients.openWindow('./');
+    if (self.clients.openWindow) return self.clients.openWindow(target);
   })());
 });
