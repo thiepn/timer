@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b0d10">
+  <meta name="color-scheme" content="dark light">
+  <meta name="description" content="A local-first workout interval timer with circuits, EMOM, AMRAP, boxing, run/walk, history and offline PWA support.">
+  <title>Timer</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#app-main">Skip to main content</a>
+  <div id="app" class="app-shell" data-theme="dark">
+    <header id="app-header" class="app-header">
+      <button class="brand" data-action="home" aria-label="Timer home">
+        <span class="brand-mark" aria-hidden="true">◷</span>
+        <span>Timer</span>
+      </button>
+      <div class="header-actions">
+        <button id="install-btn" class="icon-btn hidden" data-action="install" title="Install app" aria-label="Install Timer">↓</button>
+        <button class="icon-btn" data-action="create" title="Create timer" aria-label="Create timer">＋</button>
+      </div>
+    </header>
+
+    <main id="app-main" tabindex="-1"></main>
+
+    <nav id="bottom-nav" class="bottom-nav" aria-label="Primary navigation">
+      <button data-route="timer" class="nav-item active"><span aria-hidden="true">◷</span><span>Timer</span></button>
+      <button data-route="library" class="nav-item"><span aria-hidden="true">▦</span><span>Library</span></button>
+      <button data-route="history" class="nav-item"><span aria-hidden="true">◴</span><span>History</span></button>
+      <button data-route="settings" class="nav-item"><span aria-hidden="true">⚙</span><span>Settings</span></button>
+    </nav>
+  </div>
+
+  <div id="sheet-root"></div>
+  <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"></div>
+  <input id="import-file" class="visually-hidden" type="file" accept="application/json,.json,.timer.json">
+
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>
