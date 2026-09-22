@@ -1235,6 +1235,11 @@ function showSessionDetail(id) {
 
 function renderSettings() {
   const s = state.settings;
+  const voices = state.availableVoices || [];
+  const selectedProfile = cueProfileById(s.cueProfileId || 'standard', state.cueProfiles);
+  const voiceOptions = `<option value="" ${!s.voiceURI ? 'selected' : ''}>System default</option>${voices.map((voice) => `<option value="${esc(voice.voiceURI)}" ${s.voiceURI === voice.voiceURI ? 'selected' : ''}>${esc(voice.name)} · ${esc(voice.lang)}${voice.localService ? ' · Local' : ''}</option>`).join('')}`;
+  const customProfileRows = state.cueProfiles.length ? state.cueProfiles.map((profile) => `<div class="list-row"><div class="list-row-main"><div class="list-row-title">${esc(profile.title)}</div><div class="list-row-meta">${esc(SOUND_PACKS[profile.soundPack]?.title || profile.soundPack || 'Clean')} · ${profile.voice ? 'Voice' : 'No voice'} · ${profile.warningSeconds || 0}s warning</div></div><button class="icon-btn" data-action="delete-cue-profile" data-id="${esc(profile.id)}" aria-label="Delete ${esc(profile.title)}">×</button></div>`).join('') : `<div class="small muted">No custom cue profiles yet.</div>`;
+  const soundRows = state.customSounds.length ? state.customSounds.map((sound) => `<div class="list-row"><button class="list-row-main" data-action="preview-custom-sound" data-id="${esc(sound.id)}"><div class="list-row-title">${esc(sound.title)}</div><div class="list-row-meta">${durationLabel(sound.durationMs || 0)} · ${Math.max(1, Math.round((sound.size || 0) / 1024))} KB</div></button><button class="icon-btn" data-action="delete-custom-sound" data-id="${esc(sound.id)}" aria-label="Delete ${esc(sound.title)}">×</button></div>`).join('') : `<div class="small muted">No uploaded cue sounds.</div>`;
   main.innerHTML = `<div class="page-head"><div><h1>Settings</h1><p>Display, cues, data and device behavior.</p></div></div>
     <section class="card form-card">
       <h2 class="section-title">Appearance</h2>
@@ -1247,9 +1252,29 @@ function renderSettings() {
       ${settingToggle('Keep screen awake', 'keepAwake', s.keepAwake, 'Uses Screen Wake Lock when supported')}
       ${settingToggle('Wall layout auto-hide', 'wallAutoHide', s.wallAutoHide, 'Hide controls after a few seconds')}
     </section>
-    <section class="card form-card" style="margin-top:12px"><h2 class="section-title">Cues</h2>
-      ${settingToggle('Sound', 'sound', s.sound)}${settingToggle('3–2–1 countdown cues', 'countdownCues', s.countdownCues)}${settingToggle('Voice announcements', 'voice', s.voice)}${settingToggle('Haptics', 'haptics', s.haptics)}
-      <button class="btn" data-action="test-cues">Test cues</button>
+    <section class="card form-card cue-settings" style="margin-top:12px"><h2 class="section-title">Cue Profile</h2>
+      <div class="field"><label>Profile</label><select class="select" data-setting="cueProfileId">${cueProfileOptions(s.cueProfileId || 'standard')}</select></div>
+      <div class="small muted">${esc(selectedProfile?.title || 'Standard')} is the current baseline. You can still adjust the individual cue controls below.</div>
+      <div class="field"><label>Sound pack</label><select class="select" data-setting="soundPack">${soundPackOptions(s.soundPack || 'clean')}</select></div>
+      <div class="field"><label>Master cue volume</label><input class="input" data-setting="masterVolume" type="range" min="0" max="1" step="0.05" value="${esc(s.masterVolume ?? 1)}"></div>
+      ${settingToggle('Sound', 'sound', s.sound)}
+      ${settingToggle('3–2–1 countdown cues', 'countdownCues', s.countdownCues)}
+      ${settingToggle('Halfway cue', 'halfwayCue', s.halfwayCue)}
+      <div class="field"><label>Warning cue</label><select class="select" data-setting="warningSeconds"><option value="0" ${Number(s.warningSeconds)===0?'selected':''}>Off</option><option value="5" ${Number(s.warningSeconds)===5?'selected':''}>5 seconds</option><option value="10" ${Number(s.warningSeconds)===10?'selected':''}>10 seconds</option><option value="15" ${Number(s.warningSeconds)===15?'selected':''}>15 seconds</option><option value="30" ${Number(s.warningSeconds)===30?'selected':''}>30 seconds</option></select></div>
+      ${settingToggle('Voice announcements', 'voice', s.voice)}
+      <div class="field"><label>Voice detail</label><select class="select" data-setting="voiceVerbosity"><option value="minimal" ${s.voiceVerbosity==='minimal'?'selected':''}>Minimal · exercise only</option><option value="normal" ${s.voiceVerbosity==='normal'?'selected':''}>Normal · phase + exercise</option><option value="detailed" ${s.voiceVerbosity==='detailed'?'selected':''}>Detailed · round, duration and next</option></select></div>
+      <div class="field"><label>Voice</label><select class="select" data-setting="voiceURI">${voiceOptions}</select></div>
+      <div class="field"><label>Voice rate · ${Number(s.voiceRate || 1.05).toFixed(2)}×</label><input class="input" data-setting="voiceRate" type="range" min="0.6" max="1.6" step="0.05" value="${esc(s.voiceRate ?? 1.05)}"></div>
+      ${settingToggle('Haptics', 'haptics', s.haptics)}
+      <details class="step-cue-editor"><summary>Advanced sound mapping</summary><div class="cue-map-grid"><label class="custom-number-label">Work<select class="select" data-setting="soundWork">${cueSoundOptions(s.soundWork || '')}</select></label><label class="custom-number-label">Rest<select class="select" data-setting="soundRest">${cueSoundOptions(s.soundRest || '')}</select></label><label class="custom-number-label">Prepare<select class="select" data-setting="soundPrepare">${cueSoundOptions(s.soundPrepare || '')}</select></label><label class="custom-number-label">Countdown<select class="select" data-setting="soundCountdown">${cueSoundOptions(s.soundCountdown || '')}</select></label><label class="custom-number-label">Warning<select class="select" data-setting="soundWarning">${cueSoundOptions(s.soundWarning || '')}</select></label><label class="custom-number-label">Halfway<select class="select" data-setting="soundHalfway">${cueSoundOptions(s.soundHalfway || '')}</select></label><label class="custom-number-label">Finish<select class="select" data-setting="soundFinish">${cueSoundOptions(s.soundFinish || '')}</select></label></div></details>
+      <div class="cue-test-grid"><button class="btn" data-action="test-cue-kind" data-kind="work">Test work</button><button class="btn" data-action="test-cue-kind" data-kind="rest">Test rest</button><button class="btn" data-action="test-cue-kind" data-kind="warning">Test warning</button><button class="btn" data-action="test-cue-kind" data-kind="finish">Test finish</button></div>
+      <button class="btn" data-action="save-cue-profile">Save current settings as custom profile</button>
+      <div class="stack">${customProfileRows}</div>
+    </section>
+    <section class="card form-card" style="margin-top:12px"><h2 class="section-title">Custom Cue Sounds</h2>
+      <div class="small muted">Upload short local sounds (max 2 MB / 15 seconds). They stay offline and are included in full backups.</div>
+      <button class="btn" data-action="upload-custom-sound">Upload sound</button>
+      <div class="list">${soundRows}</div>
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">Notifications</h2>
       ${settingToggle('Completion notifications', 'notifications', s.notifications, 'Requires browser notification permission')}
