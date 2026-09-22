@@ -1,6 +1,6 @@
 # Timer
 
-Current app version: **1.2.0**.
+Current app version: **1.3.0**.
 
 A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 
@@ -16,7 +16,7 @@ A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 - Boxing rounds with correct optional final-rest behavior
 - Run / Walk intervals
 - Ladder and pyramid generators
-- Custom routines with nested sections and repeat blocks, timed/manual steps, launch parameters, reusable linked blocks, deterministic compilation and plan preview
+- Custom routines with nested sections/patterns, timed/manual steps, launch parameters, safe arithmetic formulas, progression generators, seeded random pools, reusable linked blocks, duration scaling/target fitting, deterministic compilation and plan preview
 - Saved routine library + favorites + search + routine deletion
 - Session history with actual observed work/rest time, including pauses, skips and early endings
 - Focus, Classic, Strength and Wall live layouts
@@ -94,3 +94,17 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 - Added subtree copy/paste with parameter dependency preservation and explicit unlinking back to concrete steps.
 - Backup format v2 carries reusable blocks while restore remains backward-compatible with v1 backups.
 - Fixed the in-memory database fallback cloning path exposed by the expanded backup tests.
+
+
+## v1.3.0 advanced generators and formulas
+
+- Added a small safe arithmetic formula language implemented with an internal parser/AST; no `eval`, `Function`, DOM, network, or arbitrary code execution is used.
+- Timed durations, manual caps, repeat counts, progression work/rest, and generator counts can resolve from formulas before the workout starts.
+- Formula context includes `round`, `rounds`, `outerRound`, `outerRounds`, `index`, `base`, `previous`, plus explicit numeric/duration launch-parameter variables.
+- Added formula helpers: `min`, `max`, `clamp`, `round`, `floor`, `ceil`, and `abs`.
+- Added Progression Generator nodes for increasing/decreasing work/rest patterns and ladder-style routines.
+- Added seeded Random Generator nodes with choose/shuffle modes, optional no-repeat selection, and immediate-repeat avoidance.
+- Random sessions resolve to a concrete sequence before runtime and store the exact seed/compiled plan for reproducibility.
+- Added explicit duration scaling and target-duration fitting for finite Custom Routines.
+- Compiled steps now preserve generator source paths in addition to node/section/repeat/block source metadata.
+- Reusable-block copy/unlink materializes formula/generator content safely into independent concrete steps.
