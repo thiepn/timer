@@ -132,6 +132,7 @@ export function resolveCueConfig(settings = {}, customProfiles = [], routineOver
   merged.masterVolume = clamp(settings.masterVolume ?? 1, 0, 1);
   merged.voiceVolume = clamp(settings.voiceVolume ?? .9, 0, 1);
   merged.voiceURI = settings.voiceURI || '';
+  if (settings.screenReaderOptimized) merged.voice = false;
   merged.transitionSound = stepOverrides.transitionSound || '';
   merged.voiceMode = stepOverrides.voiceMode || 'inherit';
   merged.voiceText = stepOverrides.voiceText || '';

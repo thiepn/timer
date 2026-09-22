@@ -1,6 +1,6 @@
 # Timer
 
-Current app version: **1.7.0**.
+Current app version: **1.8.0**.
 
 A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 
@@ -32,7 +32,7 @@ A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 - Launcher shortcuts for Quick Timer, Stopwatch, Favorites and Last Routine
 - Keyboard controls during live sessions
 - Light, Dark and OLED appearance modes
-- Accessibility baseline: semantic controls, visible focus, zoom preserved, reduced-motion support
+- Accessibility hardening: keyboard-safe controls, focus-contained dialogs, semantic timer announcements, browser zoom preserved, high contrast/forced-colors support, large controls/text, reduced motion, German localization, pseudo-localization and RTL test support
 
 ## Run locally
 
@@ -162,3 +162,15 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 - Notification clicks carry launch intent; optional active-session notifications are static/best-effort and never treated as exact background alarms.
 - Added optional experimental Media Session/headset controls with cleanup at session end.
 - Added Device & PWA capability diagnostics and explicit native-only reporting for true home-screen widgets and exact local alarms.
+
+
+## v1.8.0 accessibility, internationalization and interaction hardening
+
+- Added a dedicated accessibility layer with focus-contained dialogs, focus restoration, route-heading focus, semantic live announcements, and shortcut guards that ignore interactive/text-entry controls.
+- Live timer updates no longer rely on per-second ARIA announcements; phase changes, pause/resume, manual completion and workout completion are announced semantically instead.
+- Added large-control, high-contrast, text-size, reduced-motion, screen-reader-optimization, time-format and digit-format preferences. Browser pinch zoom remains enabled.
+- Added forced-colors support and additional resilience for 200–400% zoom, long strings and mobile virtual keyboards.
+- Added an internationalization layer with English, German, expanded pseudo-localization and RTL pseudo-localization; dates and human-readable durations are locale-aware while stored timer data remains locale-independent.
+- Added runtime language switching for normal screens, localized built-in phase labels and notification text, plus explicit RTL direction handling.
+- Wall-mode controls no longer auto-hide while keyboard focus is inside the live control surface.
+- Added a keyboard-shortcut reference surface and ensured global workout shortcuts cannot double-fire when a button/input is focused.

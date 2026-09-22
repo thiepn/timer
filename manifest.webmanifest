@@ -43,5 +43,7 @@
       "focus-existing",
       "auto"
     ]
-  }
+  },
+  "lang": "en",
+  "dir": "auto"
 }

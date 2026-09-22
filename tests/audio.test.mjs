@@ -42,3 +42,8 @@ test('speech verbosity is deterministic and step override can silence/customize 
   assert.equal(speechForStep(step, { voiceVerbosity: 'normal', voiceMode: 'off' }), '');
   assert.equal(speechForStep(step, { voiceVerbosity: 'normal', voiceMode: 'custom', voiceText: 'Go now' }), 'Go now');
 });
+
+test('screen reader optimization suppresses app speech even when routine profile enables voice', () => {
+  const config = resolveCueConfig({ cueProfileId: 'voice', voice: true, screenReaderOptimized: true }, [], { voice: true }, {});
+  assert.equal(config.voice, false);
+});
