@@ -2,7 +2,7 @@ import {
   TimerEngine, BrowserClock, formatClock, durationLabel, estimatePlanDuration,
   buildCountdown, buildInterval, buildCircuit, buildBoxing, buildRunWalk,
   buildEmom, buildAmrap, buildForTime, buildStopwatch, buildLadder, buildPyramid,
-  buildCustomRoutine, validateCustomRoutine
+  buildCustomRoutine, validateCustomRoutine, collectCustomParameterRefs, resolveCustomParameterValues
 } from './core.js';
 import { TimerDB, defaultSettings, requestPersistentStorage, storageEstimate } from './db.js';
 import { CueManager, WakeLockManager, requestNotificationPermission, showCompletionNotification } from './audio.js';
@@ -48,7 +48,7 @@ function defaultConfig(type) {
     case 'run-walk': return { title: 'Run / Walk', rounds: 10, runMinutes: 2, walkMinutes: 1, warmupMinutes: 5, cooldownMinutes: 5, finalWalk: true };
     case 'ladder': return { title: 'Ascending Ladder', start: 20, step: 10, levels: 5, rest: 10, direction: 'up' };
     case 'pyramid': return { title: 'Pyramid', start: 20, peak: 60, step: 10, rest: 10 };
-    case 'custom': return { title: 'Custom Routine', nodes: [{ id: uid('node'), type: 'repeat', count: 3, children: [
+    case 'custom': return { title: 'Custom Routine', parameters: [], nodes: [{ id: uid('node'), type: 'repeat', count: 3, children: [
       { id: uid('node'), type: 'timed', label: 'Work', phase: 'work', durationMs: 40000 },
       { id: uid('node'), type: 'timed', label: 'Rest', phase: 'rest', durationMs: 20000 }
     ] }] };
@@ -64,7 +64,7 @@ function parseMovements(text = '') {
   });
 }
 
-function planFromType(type, c) {
+function planFromType(type, c, options = {}) {
   switch (type) {
     case 'tabata':
     case 'interval': return buildInterval({ workMs: ms(c.work), restMs: ms(c.rest), rounds: c.rounds, prepareMs: ms(c.prepare), finalRest: !!c.finalRest, workLabel: 'Work', restLabel: 'Rest' });
@@ -85,7 +85,7 @@ function planFromType(type, c) {
     case 'run-walk': return buildRunWalk({ rounds: c.rounds, runMs: mins(c.runMinutes), walkMs: mins(c.walkMinutes), warmupMs: mins(c.warmupMinutes), cooldownMs: mins(c.cooldownMinutes), finalWalk: !!c.finalWalk });
     case 'ladder': return buildLadder({ title: c.title || 'Ladder', startMs: ms(c.start), stepMs: ms(c.step), levels: c.levels, restMs: ms(c.rest), direction: c.direction });
     case 'pyramid': return buildPyramid({ title: c.title || 'Pyramid', startMs: ms(c.start), peakMs: ms(c.peak), stepMs: ms(c.step), restMs: ms(c.rest) });
-    case 'custom': return buildCustomRoutine({ title: c.title || 'Custom Routine', nodes: c.nodes || [] });
+    case 'custom': return buildCustomRoutine({ title: c.title || 'Custom Routine', nodes: c.nodes || [], parameters: c.parameters || [], parameterValues: options.parameterValues || {}, blocks: options.blocks || state.blocks || [] });
     case 'stopwatch': return buildStopwatch();
     default: throw new Error(`Unknown builder type: ${type}`);
   }
@@ -109,7 +109,8 @@ function typeSummary(type, c) {
     case 'pyramid': return `${c.start}s → ${c.peak}s → ${c.start}s`;
     case 'custom': {
       const count = countCustomNodes(c.nodes || []);
-      return `${count} source item${count === 1 ? '' : 's'} · nested routine`;
+      const params = (c.parameters || []).length;
+      return `${count} source item${count === 1 ? '' : 's'}${params ? ` · ${params} parameter${params === 1 ? '' : 's'}` : ''}`;
     }
     case 'stopwatch': return 'Open-ended';
     default: return '';
@@ -125,9 +126,11 @@ const state = {
   db: new TimerDB(),
   settings: { ...defaultSettings },
   routines: [],
+  blocks: [],
   sessions: [],
   builder: null,
   builderEditingId: null,
+  builderEditingBlockId: null,
   quickMs: 120000,
   engine: null,
   engineUnsub: null,
@@ -144,7 +147,9 @@ const state = {
   storagePersistent: null,
   storageEstimate: null,
   libraryQuery: '',
-  librarySearchActive: false
+  librarySearchActive: false,
+  customClipboard: null,
+  pendingStart: null
 };
 
 const cue = new CueManager(() => state.settings);
@@ -175,6 +180,7 @@ function setRoute(route) {
   state.route = route;
   state.builder = null;
   state.builderEditingId = null;
+  state.builderEditingBlockId = null;
   render();
   requestAnimationFrame(() => main.focus());
 }
@@ -270,7 +276,23 @@ function openBuilder(type, routine = null) {
   closeSheet();
   state.builder = { type, config: structuredClone(routine?.config || defaultConfig(type)) };
   state.builderEditingId = routine?.id || null;
+  state.builderEditingBlockId = null;
   renderBuilder();
+}
+
+function openBlockEditor(block) {
+  if (!block) return;
+  closeSheet();
+  state.builder = { type: 'custom', config: { title: block.title, parameters: structuredClone(block.parameters || []), nodes: structuredClone(block.nodes || []) } };
+  state.builderEditingId = null;
+  state.builderEditingBlockId = block.id;
+  renderBuilder();
+}
+
+function blocksForCurrentBuilder() {
+  if (!state.builderEditingBlockId || !state.builder || state.builder.type !== 'custom') return state.blocks;
+  const draft = { id: state.builderEditingBlockId, title: state.builder.config.title || 'Reusable Block', parameters: structuredClone(state.builder.config.parameters || []), nodes: structuredClone(state.builder.config.nodes || []), revision: state.blocks.find((block) => block.id === state.builderEditingBlockId)?.revision || 1 };
+  return state.blocks.map((block) => block.id === draft.id ? draft : block);
 }
 
 function field(label, key, value, opts = {}) {
@@ -286,6 +308,7 @@ function renderBuilder() {
   setLiveMode(false);
   const { type, config: c } = state.builder;
   const m = BUILDER_META[type];
+  const editingBlock = state.builderEditingBlockId ? state.blocks.find((block) => block.id === state.builderEditingBlockId) : null;
   let body = '';
   if (type === 'interval' || type === 'tabata') {
     body = `${field('Work', 'work', c.work, { min: 1, max: 3600, suffix: 'sec' })}${field('Rest', 'rest', c.rest, { min: 1, max: 3600, suffix: 'sec' })}${field('Rounds', 'rounds', c.rounds, { min: 1, max: 10000 })}${field('Preparation', 'prepare', c.prepare, { min: 0, max: 3600, suffix: 'sec' })}${toggleField('Final rest', 'finalRest', !!c.finalRest, 'Include rest after the last work interval')}`;
@@ -307,23 +330,24 @@ function renderBuilder() {
   } else if (type === 'pyramid') {
     body = `${field('Start', 'start', c.start, { min: 1, max: 3600, suffix: 'sec' })}${field('Peak', 'peak', c.peak, { min: 1, max: 3600, suffix: 'sec' })}${field('Step', 'step', c.step, { min: 1, max: 3600, suffix: 'sec' })}${field('Rest', 'rest', c.rest, { min: 0, max: 3600, suffix: 'sec' })}`;
   } else if (type === 'custom') {
-    body = `<div class="field"><div class="row-between"><div><div class="field-label">Routine structure</div><div class="small muted">Nest sections and repeat blocks. Every item can also be moved without dragging.</div></div><button class="btn" data-action="custom-add" data-parent="">＋ Add</button></div><div class="custom-tree">${renderCustomTree(c.nodes || [])}</div>${!(c.nodes || []).length ? `<div class="empty">Add a step, repeat, or section to begin.</div>` : ''}<button class="btn block" data-action="custom-preview">Preview compiled plan</button></div>`;
+    c.parameters ||= [];
+    body = `${renderCustomParameters(c.parameters)}<div class="field"><div class="row-between"><div><div class="field-label">Routine structure</div><div class="small muted">Nest sections, repeats, and linked reusable blocks. Copy/paste and move controls work without dragging.</div></div><button class="btn" data-action="custom-add" data-parent="">＋ Add</button></div><div class="custom-tree">${renderCustomTree(c.nodes || [])}</div>${!(c.nodes || []).length ? `<div class="empty">Add a step, repeat, section, or reusable block to begin.</div>` : ''}<div class="row" style="flex-wrap:wrap"><button class="btn" data-action="custom-preview">Preview compiled plan</button>${state.blocks.length ? `<span class="pill">${state.blocks.length} reusable block${state.blocks.length === 1 ? '' : 's'}</span>` : ''}</div></div>`;
   } else if (type === 'stopwatch') {
     body = `<div class="card card-pad"><strong>Stopwatch</strong><p class="muted">Open-ended timing with pause, resume and lap recording.</p></div>`;
   }
 
   let plan, estimate;
-  try { plan = planFromType(type, c); estimate = estimatePlanDuration(plan); } catch {}
+  try { plan = planFromType(type, c, { blocks: blocksForCurrentBuilder() }); estimate = estimatePlanDuration(plan); } catch {}
   main.innerHTML = `
-    <div class="builder-head"><button class="icon-btn" data-action="builder-back" aria-label="Back">←</button><h1>${esc(m.name)}</h1><div class="builder-actions"><button class="btn" data-action="save-builder">Save</button><button class="btn primary" data-action="start-builder">Start</button></div></div>
+    <div class="builder-head"><button class="icon-btn" data-action="builder-back" aria-label="Back">←</button><h1>${esc(editingBlock ? 'Reusable Block' : m.name)}</h1><div class="builder-actions"><button class="btn" data-action="save-builder">${editingBlock ? 'Save Block' : 'Save'}</button><button class="btn primary" data-action="start-builder">${editingBlock ? 'Test' : 'Start'}</button></div></div>
     <div class="stack">
       <section class="card form-card">
         ${field('Name', 'title', c.title || m.name, { type: 'text' })}
         ${body}
         <div id="builder-summary" class="builder-summary"><span>${esc(typeSummary(type, c))}</span><strong>${estimate != null ? durationLabel(estimate) : 'Varies'}</strong></div>
       </section>
-      <button class="btn primary big block" data-action="start-builder">Start ${esc(m.name)}</button>
-      ${state.builderEditingId ? `<button class="btn danger block" data-action="delete-routine" data-id="${esc(state.builderEditingId)}">Delete saved routine</button>` : ''}
+      <button class="btn primary big block" data-action="start-builder">${editingBlock ? 'Test Reusable Block' : `Start ${esc(m.name)}`}</button>
+      ${state.builderEditingId ? `<button class="btn danger block" data-action="delete-routine" data-id="${esc(state.builderEditingId)}">Delete saved routine</button>` : state.builderEditingBlockId ? `<button class="btn danger block" data-action="delete-block" data-id="${esc(state.builderEditingBlockId)}">Delete reusable block</button>` : ''}
     </div>`;
 }
 
@@ -366,7 +390,8 @@ function customPathLabel(path = []) {
   for (const index of path) {
     const node = nodes[index];
     if (!node) break;
-    labels.push(node.label || (node.type === 'repeat' ? 'Repeat block' : node.type === 'manual' ? 'Manual step' : 'Timed step'));
+    const block = node.type === 'block' ? state.blocks.find((item) => item.id === node.blockId) : null;
+    labels.push(node.label || block?.title || (node.type === 'repeat' ? 'Repeat block' : node.type === 'manual' ? 'Manual step' : node.type === 'section' ? 'Section' : 'Timed step'));
     nodes = node.children || [];
   }
   return labels.join(' › ') || 'Routine';
@@ -388,6 +413,104 @@ function customParentCollection(path) {
   return collection ? { collection, index, parentPath } : null;
 }
 
+function walkCustomNodes(nodes, fn) {
+  for (const node of nodes || []) {
+    fn(node);
+    if (node?.type === 'repeat' || node?.type === 'section') walkCustomNodes(node.children, fn);
+  }
+}
+
+function parameterDefaultValue(parameter) {
+  if (parameter.type === 'duration') return parameter.defaultMs;
+  return parameter.defaultValue;
+}
+
+function defaultParameterValues(parameters = []) {
+  return Object.fromEntries(parameters.map((parameter) => [parameter.id, parameterDefaultValue(parameter)]));
+}
+
+function customParameterById(id) {
+  return (state.builder?.config?.parameters || []).find((parameter) => parameter.id === id);
+}
+
+function customParameterOptions(type, selected, noneLabel = 'Fixed value') {
+  const params = (state.builder?.config?.parameters || []).filter((parameter) => parameter.type === type);
+  return `<option value="" ${selected ? '' : 'selected'}>${esc(noneLabel)}</option>${params.map((parameter) => `<option value="${esc(parameter.id)}" ${selected === parameter.id ? 'selected' : ''}>${esc(parameter.label)}</option>`).join('')}`;
+}
+
+function renderParameterValueInput(parameter, value, attrs = '') {
+  if (parameter.type === 'duration') {
+    const seconds = Math.round(Number(value ?? parameter.defaultMs) / 1000);
+    return `<input class="input" type="number" min="${Math.max(1, Math.round((parameter.minMs || 1000) / 1000))}" max="${Math.round((parameter.maxMs || 86400000) / 1000)}" step="1" value="${esc(seconds)}" data-param-unit="seconds" ${attrs}>`;
+  }
+  if (parameter.type === 'choice') {
+    return `<select class="select" ${attrs}>${(parameter.options || []).map((option) => `<option value="${esc(option.value)}" ${value === option.value ? 'selected' : ''}>${esc(option.label || option.value)}</option>`).join('')}</select>`;
+  }
+  return `<input class="input" type="number" min="${parameter.min ?? ''}" max="${parameter.max ?? ''}" step="${parameter.integer === false ? 'any' : '1'}" value="${esc(value ?? parameter.defaultValue)}" ${attrs}>`;
+}
+
+function renderCustomParameters(parameters = []) {
+  return `<div class="parameter-editor">
+    <div class="row-between"><div><div class="field-label">Launch parameters</div><div class="small muted">Expose values you want to change each time this routine starts.</div></div><button class="btn" data-action="custom-add-param">＋ Parameter</button></div>
+    ${parameters.length ? `<div class="parameter-list">${parameters.map((parameter) => {
+      const duration = parameter.type === 'duration';
+      return `<div class="parameter-row" data-param-id="${esc(parameter.id)}">
+        <div class="row-between"><span class="node-kind">${duration ? 'Duration' : parameter.type === 'choice' ? 'Choice' : 'Number'}</span><button class="mini-btn danger-text" data-action="custom-delete-param" data-id="${esc(parameter.id)}" aria-label="Delete parameter">×</button></div>
+        <input class="input" value="${esc(parameter.label || '')}" data-param-id="${esc(parameter.id)}" data-param-field="label" aria-label="Parameter name">
+        ${duration ? `<div class="parameter-grid"><label class="custom-number-label">Default seconds<input class="input" type="number" min="1" value="${Math.round(parameter.defaultMs / 1000)}" data-param-id="${esc(parameter.id)}" data-param-field="defaultMs" data-param-unit="seconds"></label><label class="custom-number-label">Min seconds<input class="input" type="number" min="1" value="${Math.round((parameter.minMs || 1000) / 1000)}" data-param-id="${esc(parameter.id)}" data-param-field="minMs" data-param-unit="seconds"></label><label class="custom-number-label">Max seconds<input class="input" type="number" min="1" value="${Math.round((parameter.maxMs || 3600000) / 1000)}" data-param-id="${esc(parameter.id)}" data-param-field="maxMs" data-param-unit="seconds"></label></div>` : `<div class="parameter-grid"><label class="custom-number-label">Default<input class="input" type="number" value="${esc(parameter.defaultValue)}" data-param-id="${esc(parameter.id)}" data-param-field="defaultValue"></label><label class="custom-number-label">Minimum<input class="input" type="number" value="${esc(parameter.min ?? 1)}" data-param-id="${esc(parameter.id)}" data-param-field="min"></label><label class="custom-number-label">Maximum<input class="input" type="number" value="${esc(parameter.max ?? 1000)}" data-param-id="${esc(parameter.id)}" data-param-field="max"></label></div>`}
+      </div>`;
+    }).join('')}</div>` : `<div class="small muted parameter-empty">No launch parameters yet.</div>`}
+  </div>`;
+}
+
+function createCustomParameter(kind) {
+  if (kind === 'number') return { id: uid('param'), type: 'number', label: 'Rounds', defaultValue: 3, min: 1, max: 1000, integer: true };
+  return { id: uid('param'), type: 'duration', label: 'Work time', defaultMs: 40000, minMs: 1000, maxMs: 3600000, stepMs: 1000 };
+}
+
+function showCustomParameterSheet() {
+  showSheet('Add Parameter', `<div class="sheet-list"><button class="sheet-item" data-action="custom-add-param-kind" data-kind="duration"><div><strong>Duration</strong><div class="small muted">Seconds/minutes used by timed steps or manual caps</div></div></button><button class="sheet-item" data-action="custom-add-param-kind" data-kind="number"><div><strong>Number</strong><div class="small muted">Whole-number values such as repeat counts</div></div></button></div>`);
+}
+
+function addCustomParameter(kind) {
+  state.builder.config.parameters ||= [];
+  state.builder.config.parameters.push(createCustomParameter(kind));
+  closeSheet();
+  renderBuilder();
+}
+
+function deleteCustomParameter(id) {
+  const parameters = state.builder?.config?.parameters || [];
+  const index = parameters.findIndex((parameter) => parameter.id === id);
+  if (index < 0) return;
+  let used = false;
+  walkCustomNodes(state.builder.config.nodes, (node) => {
+    if ([node.durationParamId, node.timeCapParamId, node.countParamId].includes(id)) used = true;
+  });
+  if (used && !confirm('This parameter is used by routine items. Remove the parameter and return those items to fixed values?')) return;
+  const parameter = parameters[index];
+  walkCustomNodes(state.builder.config.nodes, (node) => {
+    if (node.durationParamId === id) { node.durationParamId = undefined; node.durationMs = parameter.defaultMs; }
+    if (node.timeCapParamId === id) { node.timeCapParamId = undefined; node.timeCapMs = parameter.defaultMs; }
+    if (node.countParamId === id) { node.countParamId = undefined; node.count = parameter.defaultValue; }
+  });
+  parameters.splice(index, 1);
+  renderBuilder();
+}
+
+function updateCustomParameterInput(target) {
+  if (!state.builder || state.builder.type !== 'custom') return;
+  const id = target.dataset.paramId;
+  const field = target.dataset.paramField;
+  if (!id || !field) return;
+  const parameter = customParameterById(id);
+  if (!parameter) return;
+  if (target.dataset.paramUnit === 'seconds') parameter[field] = ms(target.value);
+  else if (target.type === 'number') parameter[field] = Number(target.value);
+  else parameter[field] = target.value;
+  refreshBuilderSummary();
+}
+
 function createCustomNode(kind) {
   if (kind === 'rest') return { id: uid('node'), type: 'timed', label: 'Rest', phase: 'rest', durationMs: 20000 };
   if (kind === 'manual') return { id: uid('node'), type: 'manual', label: 'Manual step', phase: 'work', target: '' };
@@ -405,14 +528,27 @@ function customPhaseOptions(value) {
   return ['work','rest','prepare','recovery','cooldown','custom'].map((phase) => `<option value="${phase}" ${value === phase ? 'selected' : ''}>${phase[0].toUpperCase() + phase.slice(1)}</option>`).join('');
 }
 
+function customNodeControls(path, { block = false } = {}) {
+  return `<div class="custom-node-actions"><button class="mini-btn" data-action="custom-copy" data-path="${path}" aria-label="Copy item">⧉</button>${block ? `<button class="mini-btn" data-action="custom-unlink-block" data-path="${path}" aria-label="Unlink reusable block">↗</button>` : `<button class="mini-btn" data-action="custom-extract-block" data-path="${path}" aria-label="Save as reusable block">▣</button>`}<button class="mini-btn" data-action="custom-move" data-path="${path}" data-dir="-1" aria-label="Move item up">↑</button><button class="mini-btn" data-action="custom-move" data-path="${path}" data-dir="1" aria-label="Move item down">↓</button><button class="mini-btn danger-text" data-action="custom-delete" data-path="${path}" aria-label="Delete item">×</button></div>`;
+}
+
 function renderCustomTree(nodes = [], depth = 0, prefix = []) {
   return nodes.map((node, index) => {
     const path = [...prefix, index].join('.');
-    const controls = `<div class="custom-node-actions"><button class="mini-btn" data-action="custom-move" data-path="${path}" data-dir="-1" aria-label="Move item up">↑</button><button class="mini-btn" data-action="custom-move" data-path="${path}" data-dir="1" aria-label="Move item down">↓</button><button class="mini-btn danger-text" data-action="custom-delete" data-path="${path}" aria-label="Delete item">×</button></div>`;
+    if (node.type === 'block') {
+      const block = state.blocks.find((item) => item.id === node.blockId);
+      const controls = customNodeControls(path, { block: true });
+      const values = node.parameterValues || {};
+      return `<div class="custom-node custom-container block-ref" style="--depth:${depth}"><div class="custom-node-head"><span class="node-kind">Linked Block</span>${controls}</div><div><strong>${esc(block?.title || 'Missing block')}</strong><div class="tiny">${block ? `Revision ${block.revision || 1}` : 'This reusable block no longer exists.'}</div></div>${block?.parameters?.length ? `<div class="block-param-list">${block.parameters.map((parameter) => `<label class="custom-number-label">${esc(parameter.label)}${renderParameterValueInput(parameter, values[parameter.id] ?? parameterDefaultValue(parameter), `data-block-param-path="${path}" data-block-param-id="${esc(parameter.id)}"`)}</label>`).join('')}</div>` : ''}</div>`;
+    }
+
+    const controls = customNodeControls(path);
     if (node.type === 'repeat') {
+      const bound = node.countParamId || '';
       return `<div class="custom-node custom-container" style="--depth:${depth}">
         <div class="custom-node-head"><span class="node-kind">Repeat</span>${controls}</div>
-        <div class="custom-container-config"><label>Rounds <input class="input compact" type="number" min="1" max="1000" value="${esc(node.count)}" data-custom-path="${path}" data-custom-field="count"></label><button class="btn ghost compact-btn" data-action="custom-add" data-parent="${path}">＋ Add inside</button></div>
+        <div class="binding-grid"><label class="custom-number-label">Rounds source<select class="select" data-custom-path="${path}" data-custom-field="countParamId">${customParameterOptions('number', bound)}</select></label>${bound ? `<div class="binding-value">Uses <strong>${esc(customParameterById(bound)?.label || 'missing parameter')}</strong></div>` : `<label class="custom-number-label">Rounds<input class="input" type="number" min="1" max="1000" value="${esc(node.count)}" data-custom-path="${path}" data-custom-field="count"></label>`}</div>
+        <div class="custom-container-config"><span class="small muted">${(node.children || []).length} item${(node.children || []).length === 1 ? '' : 's'}</span><button class="btn ghost compact-btn" data-action="custom-add" data-parent="${path}">＋ Add inside</button></div>
         <div class="custom-children">${renderCustomTree(node.children || [], depth + 1, [...prefix, index])}</div>
       </div>`;
     }
@@ -425,14 +561,13 @@ function renderCustomTree(nodes = [], depth = 0, prefix = []) {
       </div>`;
     }
     const manual = node.type === 'manual';
+    const bound = manual ? (node.timeCapParamId || '') : (node.durationParamId || '');
     const secondsValue = manual ? (node.timeCapMs ? sec(node.timeCapMs) : 0) : sec(node.durationMs || 0);
     return `<div class="custom-node custom-leaf" style="--depth:${depth}">
       <div class="custom-node-head"><span class="node-kind">${manual ? 'Manual' : 'Timed'}</span>${controls}</div>
       <input class="input" value="${esc(node.label || '')}" data-custom-path="${path}" data-custom-field="label" aria-label="Step label">
-      <div class="custom-leaf-grid">
-        <select class="select" data-custom-path="${path}" data-custom-field="phase" aria-label="Step phase">${customPhaseOptions(node.phase || 'work')}</select>
-        <label class="custom-number-label">${manual ? 'Cap (0 = none)' : 'Seconds'}<input class="input" type="number" min="0" step="1" value="${secondsValue}" data-custom-path="${path}" data-custom-field="${manual ? 'timeCapMs' : 'durationMs'}" data-custom-unit="seconds"></label>
-      </div>
+      <div class="custom-leaf-grid"><select class="select" data-custom-path="${path}" data-custom-field="phase" aria-label="Step phase">${customPhaseOptions(node.phase || 'work')}</select><label class="custom-number-label">${manual ? 'Cap source' : 'Duration source'}<select class="select" data-custom-path="${path}" data-custom-field="${manual ? 'timeCapParamId' : 'durationParamId'}">${customParameterOptions('duration', bound, manual ? 'Fixed / no cap' : 'Fixed duration')}</select></label></div>
+      ${bound ? `<div class="binding-value">Uses <strong>${esc(customParameterById(bound)?.label || 'missing parameter')}</strong></div>` : `<label class="custom-number-label">${manual ? 'Cap seconds (0 = none)' : 'Seconds'}<input class="input" type="number" min="0" step="1" value="${secondsValue}" data-custom-path="${path}" data-custom-field="${manual ? 'timeCapMs' : 'durationMs'}" data-custom-unit="seconds"></label>`}
       <input class="input" value="${esc(node.target || '')}" data-custom-path="${path}" data-custom-field="target" placeholder="Target / note (optional)" aria-label="Step target">
     </div>`;
   }).join('');
@@ -446,6 +581,8 @@ function showCustomAddSheet(parentPath = '') {
     <button class="sheet-item" data-action="custom-add-kind" data-parent="${esc(parentPath)}" data-kind="manual"><div><strong>Manual step</strong><div class="small muted">Continue when you tap Done</div></div></button>
     <button class="sheet-item" data-action="custom-add-kind" data-parent="${esc(parentPath)}" data-kind="repeat"><div><strong>Repeat block</strong><div class="small muted">Nested repeated sequence</div></div></button>
     <button class="sheet-item" data-action="custom-add-kind" data-parent="${esc(parentPath)}" data-kind="section"><div><strong>Section</strong><div class="small muted">Named group for structure</div></div></button>
+    ${state.blocks.length ? `<button class="sheet-item" data-action="custom-block-picker" data-parent="${esc(parentPath)}" data-mode="linked"><div><strong>Linked reusable block</strong><div class="small muted">Future block revisions flow into this routine</div></div></button><button class="sheet-item" data-action="custom-block-picker" data-parent="${esc(parentPath)}" data-mode="copy"><div><strong>Copy reusable block</strong><div class="small muted">Insert independent concrete steps</div></div></button>` : ''}
+    ${state.customClipboard ? `<button class="sheet-item" data-action="custom-paste" data-parent="${esc(parentPath)}"><div><strong>Paste copied item</strong><div class="small muted">Insert an independent copy</div></div></button>` : ''}
   </div>`);
 }
 
@@ -455,6 +592,96 @@ function addCustomNode(parentPath, kind) {
   collection.push(createCustomNode(kind));
   closeSheet();
   renderBuilder();
+}
+
+function freshenCustomNodeIds(node) {
+  const copy = structuredClone(node);
+  const walk = (item) => {
+    item.id = uid('node');
+    if (item.type === 'repeat' || item.type === 'section') (item.children || []).forEach(walk);
+  };
+  walk(copy);
+  return copy;
+}
+
+function materializeNodesWithValues(nodes, values) {
+  const output = structuredClone(nodes || []);
+  walkCustomNodes(output, (node) => {
+    if (node.durationParamId) { node.durationMs = Number(values[node.durationParamId]); node.durationParamId = undefined; }
+    if (node.timeCapParamId) { node.timeCapMs = Number(values[node.timeCapParamId]); node.timeCapParamId = undefined; }
+    if (node.countParamId) { node.count = Number(values[node.countParamId]); node.countParamId = undefined; }
+  });
+  return output;
+}
+
+function showBlockPicker(parentPath, mode) {
+  closeSheet();
+  showSheet(mode === 'copy' ? 'Copy Reusable Block' : 'Link Reusable Block', `<div class="sheet-list">${state.blocks.map((block) => `<button class="sheet-item" data-action="custom-insert-block" data-parent="${esc(parentPath)}" data-mode="${esc(mode)}" data-id="${esc(block.id)}"><div><strong>${esc(block.title)}</strong><div class="small muted">Revision ${block.revision || 1}${block.parameters?.length ? ` · ${block.parameters.length} parameter${block.parameters.length === 1 ? '' : 's'}` : ''}</div></div></button>`).join('')}</div>`);
+}
+
+function insertCustomBlock(parentPath, blockId, mode) {
+  const collection = customChildrenAt(parentPath || '');
+  const block = state.blocks.find((item) => item.id === blockId);
+  if (!collection || !block) return toast('Reusable block not found.');
+  if (mode === 'copy') {
+    const values = defaultParameterValues(block.parameters || []);
+    const materialized = materializeNodesWithValues(block.nodes, values).map(freshenCustomNodeIds);
+    collection.push(...materialized);
+  } else {
+    collection.push({ id: uid('node'), type: 'block', blockId: block.id, parameterValues: defaultParameterValues(block.parameters || []) });
+  }
+  closeSheet();
+  renderBuilder();
+}
+
+function copyCustomNode(path) {
+  const node = customNodeAt(path);
+  if (!node) return;
+  const refs = new Set(collectCustomParameterRefs([node]));
+  const parameters = (state.builder.config.parameters || []).filter((parameter) => refs.has(parameter.id)).map((parameter) => structuredClone(parameter));
+  state.customClipboard = { node: structuredClone(node), parameters };
+  toast('Routine item copied.');
+}
+
+function pasteCustomNode(parentPath) {
+  const collection = customChildrenAt(parentPath || '');
+  if (!collection || !state.customClipboard?.node) return;
+  state.builder.config.parameters ||= [];
+  for (const parameter of state.customClipboard.parameters || []) {
+    if (!state.builder.config.parameters.some((existing) => existing.id === parameter.id)) state.builder.config.parameters.push(structuredClone(parameter));
+  }
+  collection.push(freshenCustomNodeIds(state.customClipboard.node));
+  closeSheet();
+  renderBuilder();
+}
+
+async function extractCustomBlock(path) {
+  const info = customParentCollection(path);
+  const node = customNodeAt(path);
+  if (!info || !node || node.type === 'block') return;
+  const title = prompt('Reusable block name', node.label || (node.type === 'repeat' ? 'Repeat Block' : node.type === 'section' ? 'Section Block' : 'Workout Block'));
+  if (!title?.trim()) return;
+  const refs = new Set(collectCustomParameterRefs([node]));
+  const parameters = (state.builder.config.parameters || []).filter((parameter) => refs.has(parameter.id)).map((parameter) => structuredClone(parameter));
+  const block = { id: uid('block'), title: title.trim(), revision: 1, parameters, nodes: [structuredClone(node)] };
+  await state.db.saveBlock(block);
+  await loadCollections();
+  info.collection[info.index] = { id: uid('node'), type: 'block', blockId: block.id, parameterValues: defaultParameterValues(parameters) };
+  renderBuilder();
+  toast('Reusable block created and linked.');
+}
+
+function unlinkCustomBlock(path) {
+  const info = customParentCollection(path);
+  const node = customNodeAt(path);
+  const block = state.blocks.find((item) => item.id === node?.blockId);
+  if (!info || !node || !block) return toast('Reusable block not found.');
+  try {
+    const values = resolveCustomParameterValues(block.parameters || [], node.parameterValues || {});
+    const nodes = materializeNodesWithValues(block.nodes, values).map(freshenCustomNodeIds);
+    info.collection.splice(info.index, 1, ...nodes);
+    renderBuilder();
+  } catch (error) { toast(error.message || 'Block could not be unlinked.'); }
 }
 
 function moveCustomNode(path, direction) {
@@ -479,7 +706,7 @@ function refreshBuilderSummary() {
   if (!summary || !state.builder) return;
   const cfg = state.builder.config;
   let estimate;
-  try { estimate = estimatePlanDuration(planFromType(state.builder.type, cfg)); } catch {}
+  try { estimate = estimatePlanDuration(planFromType(state.builder.type, cfg, { blocks: blocksForCurrentBuilder() })); } catch {}
   summary.innerHTML = `<span>${esc(typeSummary(state.builder.type, cfg))}</span><strong>${estimate != null ? durationLabel(estimate) : 'Varies'}</strong>`;
 }
 
@@ -490,7 +717,10 @@ function updateCustomInput(target) {
   if (path == null || !fieldName) return;
   const node = customNodeAt(path);
   if (!node) return;
-  if (fieldName === 'durationMs' || fieldName === 'timeCapMs') {
+  if (fieldName === 'durationParamId' || fieldName === 'timeCapParamId' || fieldName === 'countParamId') {
+    node[fieldName] = target.value || undefined;
+    return renderBuilder();
+  } else if (fieldName === 'durationMs' || fieldName === 'timeCapMs') {
     const value = Number(target.value);
     node[fieldName] = value > 0 ? ms(value) : (fieldName === 'timeCapMs' ? undefined : 0);
   } else if (fieldName === 'count') {
@@ -501,43 +731,72 @@ function updateCustomInput(target) {
   refreshBuilderSummary();
 }
 
+function updateBlockParameterInput(target) {
+  if (!state.builder || state.builder.type !== 'custom') return;
+  const path = target.dataset.blockParamPath;
+  const id = target.dataset.blockParamId;
+  if (path == null || !id) return;
+  const node = customNodeAt(path);
+  const block = state.blocks.find((item) => item.id === node?.blockId);
+  const parameter = block?.parameters?.find((item) => item.id === id);
+  if (!node || !parameter) return;
+  node.parameterValues ||= {};
+  node.parameterValues[id] = target.dataset.paramUnit === 'seconds' ? ms(target.value) : parameter.type === 'number' ? Number(target.value) : target.value;
+  refreshBuilderSummary();
+}
+
 function showCustomPreview() {
   if (!state.builder || state.builder.type !== 'custom') return;
   const config = state.builder.config;
-  const issues = validateCustomRoutine({ title: config.title, nodes: config.nodes || [] });
-  if (issues.length) {
-    return showSheet('Routine issues', `<div class="stack">${issues.map((issue) => `<div class="card card-pad"><strong>${esc(issue.message)}</strong><div class="tiny">${esc(customPathLabel(issue.path || []))}</div></div>`).join('')}</div>`);
-  }
+  const issues = validateCustomRoutine({ title: config.title, nodes: config.nodes || [], parameters: config.parameters || [], blocks: blocksForCurrentBuilder() });
+  if (issues.length) return showSheet('Routine issues', `<div class="stack">${issues.slice(0, 30).map((issue) => `<div class="card card-pad"><strong>${esc(issue.message)}</strong><div class="tiny">${esc(issue.blockId ? `Reusable block · ${state.blocks.find((block) => block.id === issue.blockId)?.title || issue.blockId}` : customPathLabel(issue.path || []))}</div></div>`).join('')}</div>`);
   try {
-    const plan = planFromType('custom', config);
+    const plan = planFromType('custom', config, { blocks: blocksForCurrentBuilder() });
     const estimate = estimatePlanDuration(plan);
-    const manualCount = plan.steps.filter((step) => step.manual).length;
+    const manualCount = plan.steps.filter((item) => item.manual).length;
     const previewRows = plan.steps.slice(0, 120).map((item, index) => {
       const section = item.sectionPath?.length ? item.sectionPath.map((part) => part.label).join(' › ') : '';
+      const blocks = item.blockPath?.length ? item.blockPath.map((part) => part.title).join(' › ') : '';
       const round = item.repeatPath?.length ? item.repeatPath.map((part) => `${part.current}/${part.total}`).join(' · ') : '';
       const timing = item.manual ? (item.timeCapMs ? `Manual · cap ${durationLabel(item.timeCapMs)}` : 'Manual') : durationLabel(item.durationMs);
-      return `<div class="preview-row"><span>${index + 1}</span><div><strong>${esc(item.label)}</strong>${section ? `<div class="tiny">${esc(section)}</div>` : ''}</div><div class="preview-meta">${round ? `<div>${esc(round)}</div>` : ''}<span>${esc(timing)}</span></div></div>`;
+      const trail = [blocks, section].filter(Boolean).join(' › ');
+      return `<div class="preview-row"><span>${index + 1}</span><div><strong>${esc(item.label)}</strong>${trail ? `<div class="tiny">${esc(trail)}</div>` : ''}</div><div class="preview-meta">${round ? `<div>${esc(round)}</div>` : ''}<span>${esc(timing)}</span></div></div>`;
     }).join('');
-    showSheet('Compiled Preview', `<div class="stack">
-      <div class="analytics-grid"><div class="metric"><strong>${plan.steps.length}</strong><span>Executable steps</span></div><div class="metric"><strong>${manualCount}</strong><span>Manual</span></div><div class="metric"><strong>${estimate == null ? 'Varies' : durationLabel(estimate)}</strong><span>Duration</span></div></div>
-      <div class="preview-list">${previewRows}${plan.steps.length > 120 ? `<div class="small muted">Showing first 120 of ${plan.steps.length} steps.</div>` : ''}</div>
-    </div>`);
-  } catch (error) {
-    toast(error.message || 'Routine could not be compiled.', 4200);
-  }
+    showSheet('Compiled Preview', `<div class="stack"><div class="analytics-grid"><div class="metric"><strong>${plan.steps.length}</strong><span>Executable steps</span></div><div class="metric"><strong>${manualCount}</strong><span>Manual</span></div><div class="metric"><strong>${estimate == null ? 'Varies' : durationLabel(estimate)}</strong><span>Duration</span></div></div>${(config.parameters || []).length ? `<div class="card card-pad"><strong>Default launch parameters</strong><div class="small muted" style="margin-top:6px">${(config.parameters || []).map((parameter) => `${esc(parameter.label)}: ${parameter.type === 'duration' ? durationLabel(parameter.defaultMs) : esc(parameter.defaultValue)}`).join(' · ')}</div></div>` : ''}<div class="preview-list">${previewRows}${plan.steps.length > 120 ? `<div class="small muted">Showing first 120 of ${plan.steps.length} steps.</div>` : ''}</div></div>`);
+  } catch (error) { toast(error.message || 'Routine could not be compiled.', 4200); }
 }
 
 async function saveBuilder() {
   const { type, config } = state.builder;
-  try { planFromType(type, config); } catch (error) { return toast(error.issues?.[0]?.message || error.message || 'This routine is not valid.', 4200); }
+  const validationBlocks = blocksForCurrentBuilder();
+  try { planFromType(type, config, { blocks: validationBlocks }); } catch (error) { return toast(error.issues?.[0]?.message || error.message || 'This routine is not valid.', 4200); }
+
+  if (state.builderEditingBlockId) {
+    const current = state.blocks.find((block) => block.id === state.builderEditingBlockId);
+    const saved = await state.db.saveBlock({
+      id: state.builderEditingBlockId,
+      title: config.title?.trim() || 'Reusable Block',
+      revision: current?.revision || 1,
+      parameters: structuredClone(config.parameters || []),
+      nodes: structuredClone(config.nodes || []),
+      createdAt: current?.createdAt
+    });
+    await loadCollections();
+    state.builderEditingBlockId = saved.id;
+    toast(`Reusable block saved as revision ${saved.revision}.`);
+    return renderBuilder();
+  }
+
+  const previous = state.routines.find((r) => r.id === state.builderEditingId);
   const routine = {
     id: state.builderEditingId || uid('routine'),
     type,
     title: config.title?.trim() || BUILDER_META[type].name,
     config: structuredClone(config),
-    favorite: state.routines.find((r) => r.id === state.builderEditingId)?.favorite || false,
-    createdAt: state.routines.find((r) => r.id === state.builderEditingId)?.createdAt || Date.now(),
-    useCount: state.routines.find((r) => r.id === state.builderEditingId)?.useCount || 0
+    favorite: previous?.favorite || false,
+    createdAt: previous?.createdAt || Date.now(),
+    useCount: previous?.useCount || 0,
+    lastParameterValues: previous?.lastParameterValues || undefined
   };
   await state.db.saveRoutine(routine);
   await loadCollections();
@@ -545,22 +804,71 @@ async function saveBuilder() {
   toast('Routine saved.');
 }
 
+function showParameterizedStart({ type, config, routineId, title, savedValues, source }) {
+  const parameters = config.parameters || [];
+  const defaults = defaultParameterValues(parameters);
+  const values = { ...defaults, ...(savedValues || {}) };
+  state.pendingStart = { type, config: structuredClone(config), routineId, title, source, blocks: structuredClone(blocksForCurrentBuilder()) };
+  showSheet(`Start ${title || config.title || 'Routine'}`, `<div class="stack"><div class="small muted">Adjust this run without changing the saved routine.</div>${parameters.map((parameter) => `<label class="field"><span>${esc(parameter.label)}</span>${renderParameterValueInput(parameter, values[parameter.id], `data-launch-param="${esc(parameter.id)}"`)}</label>`).join('')}<button class="btn primary big" data-action="confirm-param-start">Start</button></div>`);
+}
+
+async function confirmParameterizedStart() {
+  const pending = state.pendingStart;
+  if (!pending) return;
+  const parameters = pending.config.parameters || [];
+  const values = {};
+  for (const parameter of parameters) {
+    const input = $$('[data-launch-param]', $('#sheet-root')).find((element) => element.dataset.launchParam === parameter.id);
+    if (!input) continue;
+    values[parameter.id] = input.dataset.paramUnit === 'seconds' ? ms(input.value) : parameter.type === 'number' ? Number(input.value) : input.value;
+  }
+  let resolved;
+  try { resolved = resolveCustomParameterValues(parameters, values); }
+  catch (error) { return toast(error.message || 'Parameter values are invalid.', 4200); }
+  let plan;
+  try { plan = planFromType(pending.type, pending.config, { parameterValues: resolved, blocks: pending.blocks || state.blocks }); }
+  catch (error) { return toast(error.issues?.[0]?.message || error.message || 'Routine could not be compiled.', 4200); }
+
+  if (pending.routineId) {
+    const routine = state.routines.find((item) => item.id === pending.routineId);
+    if (routine) {
+      routine.useCount = (routine.useCount || 0) + 1;
+      routine.lastUsedAt = Date.now();
+      routine.lastParameterValues = structuredClone(resolved);
+      await state.db.saveRoutine(routine);
+    }
+  }
+  state.pendingStart = null;
+  closeSheet();
+  await loadCollections();
+  await startSession(plan, { ...metaForType(pending.type, pending.config), title: pending.title || pending.config.title, routineId: pending.routineId, parameterValues: resolved });
+}
+
 async function startBuilder() {
   const { type, config } = state.builder;
+  if (type === 'custom' && (config.parameters || []).length) {
+    const routine = state.routines.find((item) => item.id === state.builderEditingId);
+    return showParameterizedStart({ type, config, routineId: state.builderEditingId || undefined, title: config.title, savedValues: routine?.lastParameterValues, source: 'builder' });
+  }
   let plan;
-  try { plan = planFromType(type, config); }
-  catch (e) { return toast(e.message || 'This timer could not be created.'); }
+  try { plan = planFromType(type, config, { blocks: blocksForCurrentBuilder() }); }
+  catch (e) { return toast(e.issues?.[0]?.message || e.message || 'This timer could not be created.'); }
   await startSession(plan, { ...metaForType(type, config), routineId: state.builderEditingId || undefined });
 }
 
 async function startRoutine(id) {
   const routine = state.routines.find((r) => r.id === id);
   if (!routine) return toast('Routine not found.');
-  const plan = planFromType(routine.type, routine.config);
+  if (routine.type === 'custom' && (routine.config?.parameters || []).length) {
+    return showParameterizedStart({ type: routine.type, config: routine.config, routineId: routine.id, title: routine.title, savedValues: routine.lastParameterValues, source: 'library' });
+  }
+  let plan;
+  try { plan = planFromType(routine.type, routine.config); }
+  catch (error) { return toast(error.issues?.[0]?.message || error.message || 'Routine could not be compiled.', 4200); }
   routine.useCount = (routine.useCount || 0) + 1;
   routine.lastUsedAt = Date.now();
   await state.db.saveRoutine(routine);
-  loadCollections();
+  await loadCollections();
   await startSession(plan, { ...metaForType(routine.type, routine.config), title: routine.title, routineId: routine.id });
 }
 
@@ -700,8 +1008,9 @@ function updateLiveView(force = false) {
   $('#live-label').textContent = current.label || v.title;
   $('#live-target').textContent = current.target ? String(current.target) : '';
   const round = current.round;
+  const blockLabel = current.blockPath?.at(-1)?.title;
   const sectionLabel = current.sectionPath?.at(-1)?.label;
-  const contextLabel = [sectionLabel, round ? `Round ${round.current} / ${round.total}` : ''].filter(Boolean).join(' · ');
+  const contextLabel = [blockLabel, sectionLabel, round ? `Round ${round.current} / ${round.total}` : ''].filter(Boolean).join(' · ');
   $('#live-round').textContent = contextLabel || (v.mode === 'stopwatch' ? 'Stopwatch' : v.title);
   const next = v.next;
   $('#live-next').innerHTML = next ? `Next<br><strong>${esc(next.label)}${next.durationMs ? ` · ${formatClock(next.durationMs)}` : ''}</strong>` : '';
@@ -787,12 +1096,15 @@ function renderCompletion() {
 function renderLibrary() {
   const query = state.libraryQuery.trim().toLowerCase();
   const matches = (r) => !query || `${r.title || ''} ${BUILDER_META[r.type]?.name || r.type || ''} ${typeSummary(r.type, r.config || {})}`.toLowerCase().includes(query);
+  const blockMatches = (block) => !query || `${block.title || ''} reusable block ${(block.parameters || []).map((parameter) => parameter.label).join(' ')}`.toLowerCase().includes(query);
   const favorites = state.routines.filter((r) => r.favorite && matches(r));
   const routines = [...state.routines].filter(matches).sort((a, b) => (b.lastUsedAt || b.updatedAt || 0) - (a.lastUsedAt || a.updatedAt || 0));
-  main.innerHTML = `<div class="page-head"><div><h1>Library</h1><p>Saved timers and routines.</p></div><button class="btn primary" data-action="create">＋ Create</button></div>
-    <div class="field"><label for="library-search">Search routines</label><input id="library-search" class="input" type="search" data-library-search value="${esc(state.libraryQuery)}" placeholder="Search by name or type"></div>
+  const blocks = [...state.blocks].filter(blockMatches).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  main.innerHTML = `<div class="page-head"><div><h1>Library</h1><p>Saved timers, routines, and reusable blocks.</p></div><button class="btn primary" data-action="create">＋ Create</button></div>
+    <div class="field"><label for="library-search">Search library</label><input id="library-search" class="input" type="search" data-library-search value="${esc(state.libraryQuery)}" placeholder="Search routines or blocks"></div>
     ${favorites.length ? `<section class="section"><h2 class="section-title">Favorites</h2><div class="list">${favorites.map(routineRow).join('')}</div></section>` : ''}
-    <section class="section"><div class="row-between"><h2 class="section-title" style="margin:0">My Routines</h2><span class="pill">${routines.length}</span></div><div class="list" style="margin-top:12px">${routines.length ? routines.map(routineRow).join('') : `<div class="card empty"><p>${query ? 'No routines match your search.' : 'No saved routines yet.'}</p>${query ? '' : '<button class="btn primary" data-action="create">Create timer</button>'}</div>`}</div></section>`;
+    <section class="section"><div class="row-between"><h2 class="section-title" style="margin:0">My Routines</h2><span class="pill">${routines.length}</span></div><div class="list" style="margin-top:12px">${routines.length ? routines.map(routineRow).join('') : `<div class="card empty"><p>${query ? 'No routines match your search.' : 'No saved routines yet.'}</p>${query ? '' : '<button class="btn primary" data-action="create">Create timer</button>'}</div>`}</div></section>
+    ${(blocks.length || (!query && state.blocks.length === 0)) ? `<section class="section"><div class="row-between"><div><h2 class="section-title" style="margin:0">Reusable Blocks</h2><div class="small muted" style="margin-top:5px">Linked building blocks for Custom Routines.</div></div><span class="pill">${blocks.length}</span></div><div class="list" style="margin-top:12px">${blocks.length ? blocks.map(blockRow).join('') : `<div class="card empty">Create a Custom Routine, then use ▣ on an item to extract it as a reusable block.</div>`}</div></section>` : ''}`;
   if (state.librarySearchActive) {
     requestAnimationFrame(() => {
       const input = $('#library-search');
@@ -805,7 +1117,38 @@ function renderLibrary() {
 }
 
 function routineRow(r) {
-  return `<div class="list-row"><button class="favorite-btn ${r.favorite ? 'on' : ''}" data-action="favorite-routine" data-id="${esc(r.id)}" aria-label="${r.favorite ? 'Remove from' : 'Add to'} favorites">★</button><button class="list-row-main" data-action="edit-routine" data-id="${esc(r.id)}"><div class="list-row-title">${esc(r.title)}</div><div class="list-row-meta">${esc(BUILDER_META[r.type]?.name || r.type)} · ${esc(typeSummary(r.type, r.config))}</div></button><button class="play-btn" data-action="start-routine" data-id="${esc(r.id)}" aria-label="Start ${esc(r.title)}">▶</button></div>`;
+  const params = r.type === 'custom' && r.config?.parameters?.length ? ` · ${r.config.parameters.length} parameter${r.config.parameters.length === 1 ? '' : 's'}` : '';
+  return `<div class="list-row"><button class="favorite-btn ${r.favorite ? 'on' : ''}" data-action="favorite-routine" data-id="${esc(r.id)}" aria-label="${r.favorite ? 'Remove from' : 'Add to'} favorites">★</button><button class="list-row-main" data-action="edit-routine" data-id="${esc(r.id)}"><div class="list-row-title">${esc(r.title)}</div><div class="list-row-meta">${esc(BUILDER_META[r.type]?.name || r.type)} · ${esc(typeSummary(r.type, r.config))}${params}</div></button><button class="play-btn" data-action="start-routine" data-id="${esc(r.id)}" aria-label="Start ${esc(r.title)}">▶</button></div>`;
+}
+
+function nodesReferenceBlock(nodes, blockId) {
+  let found = false;
+  walkCustomNodes(nodes, (node) => { if (node?.type === 'block' && node.blockId === blockId) found = true; });
+  return found;
+}
+
+function blockUsageCount(blockId) {
+  const routines = state.routines.filter((routine) => routine.type === 'custom' && nodesReferenceBlock(routine.config?.nodes, blockId)).length;
+  const blocks = state.blocks.filter((block) => block.id !== blockId && nodesReferenceBlock(block.nodes, blockId)).length;
+  return routines + blocks;
+}
+
+function blockRow(block) {
+  const usage = blockUsageCount(block.id);
+  return `<div class="list-row"><div class="block-icon" aria-hidden="true">▣</div><button class="list-row-main" data-action="edit-block" data-id="${esc(block.id)}"><div class="list-row-title">${esc(block.title)}</div><div class="list-row-meta">Revision ${block.revision || 1} · ${(block.parameters || []).length} parameter${(block.parameters || []).length === 1 ? '' : 's'} · used ${usage} time${usage === 1 ? '' : 's'}</div></button><button class="icon-btn danger-text" data-action="delete-block" data-id="${esc(block.id)}" aria-label="Delete ${esc(block.title)}">×</button></div>`;
+}
+
+async function deleteReusableBlock(id) {
+  const block = state.blocks.find((item) => item.id === id);
+  if (!block) return;
+  const usage = blockUsageCount(id);
+  if (usage) return toast(`“${block.title}” is still linked from ${usage} saved item${usage === 1 ? '' : 's'}. Unlink those references first.`, 4800);
+  if (!confirm(`Delete reusable block “${block.title}”?`)) return;
+  await state.db.delete('blocks', id);
+  if (state.builderEditingBlockId === id) { state.builder = null; state.builderEditingBlockId = null; state.route = 'library'; }
+  await loadCollections();
+  render();
+  toast('Reusable block deleted.');
 }
 
 function renderHistory() {
@@ -875,7 +1218,7 @@ function renderSettings() {
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">App</h2>
       <button class="btn" data-action="install">Install PWA</button>
-      <div class="small muted">Timer v1.1.0 · local-first · offline capable</div>
+      <div class="small muted">Timer v1.2.0 · local-first · offline capable</div>
     </section>`;
 }
 
@@ -928,10 +1271,16 @@ async function importBackupFile(file) {
   try {
     if (!file || file.size > 25 * 1024 * 1024) throw new Error('Backup file is too large.');
     const data = JSON.parse(await file.text());
-    if (!data || data.format !== 'thiepn-timer-backup' || data.version !== 1 || !Array.isArray(data.routines) || !Array.isArray(data.sessions)) throw new Error('Unsupported or incomplete backup.');
+    if (!data || data.format !== 'thiepn-timer-backup' || ![1, 2].includes(data.version) || !Array.isArray(data.routines) || !Array.isArray(data.sessions)) throw new Error('Unsupported or incomplete backup.');
+    const blocks = data.version >= 2 && Array.isArray(data.blocks) ? data.blocks : [];
+    for (const block of blocks) {
+      if (!block?.id || !block?.title || !Array.isArray(block.nodes)) throw new Error('Backup contains an invalid reusable block.');
+      try { buildCustomRoutine({ title: block.title, nodes: block.nodes, parameters: block.parameters || [], blocks }); }
+      catch (error) { throw new Error(`Invalid reusable block “${block.title || block.id}”: ${error.issues?.[0]?.message || error.message || 'cannot compile'}`); }
+    }
     for (const routine of data.routines) {
       if (!routine?.id || !routine?.type || !routine?.config || !BUILDER_META[routine.type]) throw new Error('Backup contains an unsupported routine.');
-      try { planFromType(routine.type, routine.config); }
+      try { planFromType(routine.type, routine.config, { blocks }); }
       catch (error) { throw new Error(`Invalid routine “${routine.title || routine.id}”: ${error.issues?.[0]?.message || error.message || 'cannot compile'}`); }
     }
     if (!confirm('Import this backup and merge it with current data? Existing matching IDs may be replaced.')) return;
@@ -955,6 +1304,7 @@ async function installApp() {
 
 async function loadCollections() {
   state.routines = await state.db.all('routines').catch(() => []);
+  state.blocks = await state.db.all('blocks').catch(() => []);
   state.sessions = await state.db.recentSessions(500).catch(() => []);
 }
 
@@ -1061,8 +1411,10 @@ document.addEventListener('input', (e) => {
   updateBuilderInput(e.target);
   updateCircuitInput(e.target);
   updateCustomInput(e.target);
+  updateCustomParameterInput(e.target);
+  updateBlockParameterInput(e.target);
 });
-document.addEventListener('change', (e) => { updateBuilderInput(e.target); updateCircuitInput(e.target); updateCustomInput(e.target); if (e.target.dataset.setting) { const key = e.target.dataset.setting; state.settings[key] = key === 'adjustmentMs' ? Number(e.target.value) : e.target.value; saveSettings(); } });
+document.addEventListener('change', (e) => { updateBuilderInput(e.target); updateCircuitInput(e.target); updateCustomInput(e.target); updateCustomParameterInput(e.target); updateBlockParameterInput(e.target); if (e.target.dataset.setting) { const key = e.target.dataset.setting; state.settings[key] = key === 'adjustmentMs' ? Number(e.target.value) : e.target.value; saveSettings(); } });
 
 document.addEventListener('click', async (e) => {
   const routeBtn = e.target.closest('[data-route]');
@@ -1073,9 +1425,9 @@ document.addEventListener('click', async (e) => {
 
   if (action === 'home') return setRoute('timer');
   if (action === 'create') return showCreateSheet();
-  if (action === 'close-sheet') return closeSheet();
+  if (action === 'close-sheet') { state.pendingStart = null; return closeSheet(); }
   if (action === 'open-builder') return openBuilder(btn.dataset.type);
-  if (action === 'builder-back') { state.builder = null; state.builderEditingId = null; return render(); }
+  if (action === 'builder-back') { state.builder = null; state.builderEditingId = null; state.builderEditingBlockId = null; return render(); }
   if (action === 'builder-toggle') { const k = btn.dataset.key; state.builder.config[k] = !state.builder.config[k]; return renderBuilder(); }
   if (action === 'save-builder') return saveBuilder();
   if (action === 'start-builder') return startBuilder();
@@ -1083,9 +1435,19 @@ document.addEventListener('click', async (e) => {
   if (action === 'remove-circuit-step') { state.builder.config.items.splice(Number(btn.dataset.index), 1); return renderBuilder(); }
   if (action === 'custom-add') return showCustomAddSheet(btn.dataset.parent || '');
   if (action === 'custom-add-kind') return addCustomNode(btn.dataset.parent || '', btn.dataset.kind);
+  if (action === 'custom-add-param') return showCustomParameterSheet();
+  if (action === 'custom-add-param-kind') return addCustomParameter(btn.dataset.kind);
+  if (action === 'custom-delete-param') return deleteCustomParameter(btn.dataset.id);
+  if (action === 'custom-block-picker') return showBlockPicker(btn.dataset.parent || '', btn.dataset.mode || 'linked');
+  if (action === 'custom-insert-block') return insertCustomBlock(btn.dataset.parent || '', btn.dataset.id, btn.dataset.mode || 'linked');
+  if (action === 'custom-copy') return copyCustomNode(btn.dataset.path);
+  if (action === 'custom-paste') return pasteCustomNode(btn.dataset.parent || '');
+  if (action === 'custom-extract-block') return extractCustomBlock(btn.dataset.path);
+  if (action === 'custom-unlink-block') return unlinkCustomBlock(btn.dataset.path);
   if (action === 'custom-move') return moveCustomNode(btn.dataset.path, btn.dataset.dir);
   if (action === 'custom-delete') return deleteCustomNode(btn.dataset.path);
   if (action === 'custom-preview') return showCustomPreview();
+  if (action === 'confirm-param-start') return confirmParameterizedStart();
 
   if (action === 'quick-preset') { state.quickMs = Number(btn.dataset.ms); renderTimerHome(); if (state.settings.startPresetImmediately) startSession(buildCountdown({ durationMs: state.quickMs, label: `${durationLabel(state.quickMs)} Timer` }), { mode: 'countdown', title: `${durationLabel(state.quickMs)} Timer`, config: { durationMs: state.quickMs } }); return; }
   if (action === 'quick-adjust') { state.quickMs = clamp(state.quickMs + Number(btn.dataset.delta), 1000, 24 * 3600000); return renderTimerHome(); }
@@ -1098,6 +1460,7 @@ document.addEventListener('click', async (e) => {
 
   if (action === 'start-routine') return startRoutine(btn.dataset.id);
   if (action === 'edit-routine') { const r = state.routines.find((x) => x.id === btn.dataset.id); if (r) return openBuilder(r.type, r); }
+  if (action === 'edit-block') { const block = state.blocks.find((item) => item.id === btn.dataset.id); if (block) return openBlockEditor(block); }
   if (action === 'favorite-routine') { const r = state.routines.find((x) => x.id === btn.dataset.id); if (r) { r.favorite = !r.favorite; await state.db.saveRoutine(r); await loadCollections(); renderLibrary(); } return; }
   if (action === 'delete-routine') {
     const r = state.routines.find((x) => x.id === btn.dataset.id);
@@ -1111,6 +1474,7 @@ document.addEventListener('click', async (e) => {
   if (action === 'session-detail') return showSessionDetail(btn.dataset.id);
   if (action === 'repeat-session') return repeatSession(btn.dataset.id);
   if (action === 'delete-session') { if (confirm('Delete this session?')) { await state.db.delete('sessions', btn.dataset.id); closeSheet(); await loadCollections(); render(); } return; }
+  if (action === 'delete-block') return deleteReusableBlock(btn.dataset.id);
 
   if (action === 'setting-toggle') { const k = btn.dataset.key; state.settings[k] = !state.settings[k]; if (k === 'notifications' && state.settings[k]) { const p = await requestNotificationPermission(); if (p !== 'granted') state.settings[k] = false; } await saveSettings(); return renderSettings(); }
   if (action === 'test-cues') { await cue.init(); cue.pattern('work'); setTimeout(() => cue.pattern('rest'), 500); setTimeout(() => cue.pattern('finish'), 1000); return; }

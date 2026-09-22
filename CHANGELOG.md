@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.0
+
+### Added
+- Launch parameters for Custom Routines, including duration and whole-number parameters.
+- Parameter bindings for timed-step duration, manual-step time caps, and repeat counts.
+- Reusable linked blocks with per-instance parameter overrides and source/revision metadata.
+- Reusable-block editing from Library with revision increments on save.
+- Linked-vs-copied block insertion, subtree copy/paste, block extraction, and explicit unlinking.
+- Circular reusable-block detection and missing-block validation.
+- Backup format v2 with reusable-block portability and backward-compatible v1 restore.
+
+### Improved
+- Custom compiled previews now show reusable-block source context and default launch parameters.
+- Saved parameterized routines remember their most recently used launch values.
+- Library search includes reusable blocks and their parameter names.
+- Expanded deterministic tests for parameter resolution, block expansion, circular references, backup compatibility, and block revisions.
+
+### Fixed
+- Corrected the in-memory database fallback clone path used when IndexedDB is unavailable.
+
 ## 1.1.0
 
 ### Added

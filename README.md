@@ -1,6 +1,6 @@
 # Timer
 
-Current app version: **1.1.0**.
+Current app version: **1.2.0**.
 
 A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 
@@ -16,7 +16,7 @@ A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 - Boxing rounds with correct optional final-rest behavior
 - Run / Walk intervals
 - Ladder and pyramid generators
-- Custom routines with nested sections and repeat blocks, timed/manual steps, deterministic compilation and plan preview
+- Custom routines with nested sections and repeat blocks, timed/manual steps, launch parameters, reusable linked blocks, deterministic compilation and plan preview
 - Saved routine library + favorites + search + routine deletion
 - Session history with actual observed work/rest time, including pauses, skips and early endings
 - Focus, Classic, Strength and Wall live layouts
@@ -24,7 +24,7 @@ A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 - Sound countdown/transition cues, optional speech and haptics
 - Screen Wake Lock where supported
 - Active-session persistence and reload recovery
-- Full JSON backup/import
+- Versioned JSON backup/import including reusable blocks (v1 backups remain supported)
 - Offline service worker + installable PWA manifest
 - Launcher shortcuts for Quick Timer, Stopwatch, Favorites and Last Routine
 - Keyboard controls during live sessions
@@ -83,3 +83,14 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 - Compiled custom steps preserve source-node, section-path and repeat-path metadata for debugging/history.
 - Custom routine compilation is deterministic for persisted node IDs and rejects duplicate IDs, empty containers, excessive nesting and invalid durations.
 - Backup import now validates every saved routine through the real compiler before modifying local data.
+
+## v1.2.0 parameterized routines and reusable blocks
+
+- Custom Routines can expose duration and number parameters at launch without mutating the saved template.
+- Parameterized repeat counts, timed durations, and manual-step caps compile deterministically into the existing runtime.
+- Added reusable linked blocks with local parameter overrides, revision metadata, and circular-reference protection.
+- Any custom subtree can be extracted into a reusable block; blocks can be inserted linked or as independent copies.
+- Linked blocks can be edited from Library; every save increments the block revision for future sessions while existing session snapshots remain immutable.
+- Added subtree copy/paste with parameter dependency preservation and explicit unlinking back to concrete steps.
+- Backup format v2 carries reusable blocks while restore remains backward-compatible with v1 backups.
+- Fixed the in-memory database fallback cloning path exposed by the expanded backup tests.

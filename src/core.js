@@ -19,7 +19,7 @@ export class FakeClock {
   set(wall, mono = wall) { this.wall = wall; this.mono = mono; }
 }
 
-export function step({ id, label, phase = 'work', durationMs, manual = false, timeCapMs, completionBehavior = 'advance', round, target, sourceNodeId, sectionPath, repeatPath }) {
+export function step({ id, label, phase = 'work', durationMs, manual = false, timeCapMs, completionBehavior = 'advance', round, target, sourceNodeId, sectionPath, repeatPath, blockPath }) {
   return {
     id: id || uid('step'),
     label: String(label || (phase === 'rest' ? 'Rest' : 'Work')),
@@ -32,7 +32,8 @@ export function step({ id, label, phase = 'work', durationMs, manual = false, ti
     target,
     sourceNodeId,
     sectionPath: sectionPath ? structuredClone(sectionPath) : undefined,
-    repeatPath: repeatPath ? structuredClone(repeatPath) : undefined
+    repeatPath: repeatPath ? structuredClone(repeatPath) : undefined,
+    blockPath: blockPath ? structuredClone(blockPath) : undefined
   };
 }
 
@@ -151,14 +152,115 @@ export function buildPyramid({ title = 'Pyramid', startMs = 20000, peakMs = 6000
   return { kind: 'timeline', title, steps, meta: { mode: 'pyramid' } };
 }
 
-export function validateCustomRoutine({ title = 'Custom Routine', nodes = [] } = {}) {
+export function validateCustomParameters(parameters = [], { scope = 'Routine' } = {}) {
   const issues = [];
-  const seenIds = new Set();
-  const add = (code, message, path = []) => issues.push({ code, message, path });
+  const ids = new Set();
+  const labels = new Set();
+  const add = (code, message, parameterId) => issues.push({ code, message, parameterId });
+  if (!Array.isArray(parameters)) return [{ code: 'INVALID_PARAMETERS', message: `${scope} parameters are invalid.` }];
 
-  if (!String(title || '').trim()) add('MISSING_TITLE', 'Routine name is required.');
+  for (const parameter of parameters) {
+    if (!parameter || typeof parameter !== 'object') {
+      add('INVALID_PARAMETER', `${scope} contains an invalid parameter.`);
+      continue;
+    }
+    if (!parameter.id || typeof parameter.id !== 'string') add('MISSING_PARAMETER_ID', `${scope} parameter is missing an ID.`);
+    else if (ids.has(parameter.id)) add('DUPLICATE_PARAMETER_ID', `${scope} contains duplicate parameter ID ${parameter.id}.`, parameter.id);
+    else ids.add(parameter.id);
+
+    const label = String(parameter.label || '').trim();
+    if (!label) add('MISSING_PARAMETER_LABEL', `${scope} parameter needs a name.`, parameter.id);
+    else if (labels.has(label.toLowerCase())) add('DUPLICATE_PARAMETER_LABEL', `${scope} contains duplicate parameter name “${label}”.`, parameter.id);
+    else labels.add(label.toLowerCase());
+
+    if (!['duration', 'number', 'choice'].includes(parameter.type)) {
+      add('INVALID_PARAMETER_TYPE', `${label || 'Parameter'} has an unsupported type.`, parameter.id);
+      continue;
+    }
+
+    if (parameter.type === 'duration') {
+      if (!Number.isFinite(parameter.defaultMs) || parameter.defaultMs <= 0) add('INVALID_PARAMETER_DEFAULT', `${label || 'Duration parameter'} needs a positive default duration.`, parameter.id);
+      if (parameter.minMs != null && (!Number.isFinite(parameter.minMs) || parameter.minMs <= 0)) add('INVALID_PARAMETER_MIN', `${label || 'Duration parameter'} has an invalid minimum.`, parameter.id);
+      if (parameter.maxMs != null && (!Number.isFinite(parameter.maxMs) || parameter.maxMs <= 0)) add('INVALID_PARAMETER_MAX', `${label || 'Duration parameter'} has an invalid maximum.`, parameter.id);
+      if (Number.isFinite(parameter.minMs) && Number.isFinite(parameter.maxMs) && parameter.minMs > parameter.maxMs) add('INVALID_PARAMETER_RANGE', `${label || 'Duration parameter'} minimum exceeds its maximum.`, parameter.id);
+    } else if (parameter.type === 'number') {
+      if (!Number.isFinite(parameter.defaultValue)) add('INVALID_PARAMETER_DEFAULT', `${label || 'Number parameter'} needs a numeric default.`, parameter.id);
+      if (parameter.min != null && !Number.isFinite(parameter.min)) add('INVALID_PARAMETER_MIN', `${label || 'Number parameter'} has an invalid minimum.`, parameter.id);
+      if (parameter.max != null && !Number.isFinite(parameter.max)) add('INVALID_PARAMETER_MAX', `${label || 'Number parameter'} has an invalid maximum.`, parameter.id);
+      if (Number.isFinite(parameter.min) && Number.isFinite(parameter.max) && parameter.min > parameter.max) add('INVALID_PARAMETER_RANGE', `${label || 'Number parameter'} minimum exceeds its maximum.`, parameter.id);
+      if (parameter.integer !== false && Number.isFinite(parameter.defaultValue) && !Number.isInteger(parameter.defaultValue)) add('INVALID_PARAMETER_DEFAULT', `${label || 'Number parameter'} default must be an integer.`, parameter.id);
+    } else if (parameter.type === 'choice') {
+      if (!Array.isArray(parameter.options) || parameter.options.length < 1) add('EMPTY_PARAMETER_OPTIONS', `${label || 'Choice parameter'} needs at least one option.`, parameter.id);
+      else if (!parameter.options.some((option) => option?.value === parameter.defaultValue)) add('INVALID_PARAMETER_DEFAULT', `${label || 'Choice parameter'} default must match one of its options.`, parameter.id);
+    }
+  }
+  return issues;
+}
+
+export function resolveCustomParameterValues(parameters = [], values = {}) {
+  const issues = validateCustomParameters(parameters);
+  if (issues.length) {
+    const error = new Error(issues[0].message);
+    error.name = 'CustomParameterValidationError';
+    error.issues = issues;
+    throw error;
+  }
+  const resolved = {};
+  for (const parameter of parameters) {
+    let value = Object.prototype.hasOwnProperty.call(values || {}, parameter.id)
+      ? values[parameter.id]
+      : parameter.type === 'duration' ? parameter.defaultMs : parameter.defaultValue;
+
+    if (parameter.type === 'duration') {
+      value = Number(value);
+      if (!Number.isFinite(value) || value <= 0) throw new Error(`${parameter.label} must be a positive duration.`);
+      if (parameter.minMs != null && value < parameter.minMs) throw new Error(`${parameter.label} must be at least ${Math.round(parameter.minMs / 1000)} seconds.`);
+      if (parameter.maxMs != null && value > parameter.maxMs) throw new Error(`${parameter.label} must be at most ${Math.round(parameter.maxMs / 1000)} seconds.`);
+    } else if (parameter.type === 'number') {
+      value = Number(value);
+      if (!Number.isFinite(value)) throw new Error(`${parameter.label} must be a number.`);
+      if (parameter.integer !== false && !Number.isInteger(value)) throw new Error(`${parameter.label} must be a whole number.`);
+      if (parameter.min != null && value < parameter.min) throw new Error(`${parameter.label} must be at least ${parameter.min}.`);
+      if (parameter.max != null && value > parameter.max) throw new Error(`${parameter.label} must be at most ${parameter.max}.`);
+    } else if (parameter.type === 'choice') {
+      if (!parameter.options.some((option) => option?.value === value)) throw new Error(`${parameter.label} has an invalid selection.`);
+    }
+    resolved[parameter.id] = value;
+  }
+  return resolved;
+}
+
+export function collectCustomParameterRefs(nodes = []) {
+  const refs = new Set();
+  const walk = (children) => {
+    for (const node of children || []) {
+      if (!node || typeof node !== 'object') continue;
+      if (node.durationParamId) refs.add(node.durationParamId);
+      if (node.timeCapParamId) refs.add(node.timeCapParamId);
+      if (node.countParamId) refs.add(node.countParamId);
+      if (node.type === 'repeat' || node.type === 'section') walk(node.children);
+    }
+  };
+  walk(nodes);
+  return [...refs];
+}
+
+function validateCustomSource({ title, nodes, parameters, blocksById, scope = 'Routine' }) {
+  const issues = validateCustomParameters(parameters, { scope });
+  const seenIds = new Set();
+  const parameterMap = new Map((parameters || []).map((parameter) => [parameter.id, parameter]));
+  const add = (code, message, path = []) => issues.push({ code, message, path });
+  const requireParameter = (id, type, label, path) => {
+    if (!id) return false;
+    const parameter = parameterMap.get(id);
+    if (!parameter) add('UNKNOWN_PARAMETER', `${label} references a missing parameter.`, path);
+    else if (parameter.type !== type) add('PARAMETER_TYPE_MISMATCH', `${label} requires a ${type} parameter.`, path);
+    return Boolean(parameter && parameter.type === type);
+  };
+
+  if (!String(title || '').trim()) add('MISSING_TITLE', `${scope} name is required.`);
   if (!Array.isArray(nodes) || nodes.length === 0) {
-    add('EMPTY_ROUTINE', 'Custom routine must contain at least one step.');
+    add('EMPTY_ROUTINE', `${scope} must contain at least one step.`);
     return issues;
   }
 
@@ -182,17 +284,23 @@ export function validateCustomRoutine({ title = 'Custom Routine', nodes = [] } =
       else seenIds.add(node.id);
 
       if (node.type === 'timed') {
-        if (!Number.isFinite(node.durationMs) || node.durationMs <= 0) add('INVALID_DURATION', `${node.label || 'Timed step'} must have a positive duration.`, nodePath);
+        if (node.durationParamId) requireParameter(node.durationParamId, 'duration', `${node.label || 'Timed step'} duration`, nodePath);
+        else if (!Number.isFinite(node.durationMs) || node.durationMs <= 0) add('INVALID_DURATION', `${node.label || 'Timed step'} must have a positive duration.`, nodePath);
       } else if (node.type === 'manual') {
-        if (node.timeCapMs != null && (!Number.isFinite(node.timeCapMs) || node.timeCapMs <= 0)) add('INVALID_CAP', `${node.label || 'Manual step'} has an invalid time cap.`, nodePath);
+        if (node.timeCapParamId) requireParameter(node.timeCapParamId, 'duration', `${node.label || 'Manual step'} time cap`, nodePath);
+        else if (node.timeCapMs != null && (!Number.isFinite(node.timeCapMs) || node.timeCapMs <= 0)) add('INVALID_CAP', `${node.label || 'Manual step'} has an invalid time cap.`, nodePath);
       } else if (node.type === 'repeat') {
-        if (!Number.isInteger(node.count) || node.count < 1 || node.count > 1000) add('INVALID_REPEAT', 'Repeat count must be an integer from 1 to 1000.', nodePath);
+        if (node.countParamId) requireParameter(node.countParamId, 'number', 'Repeat count', nodePath);
+        else if (!Number.isInteger(node.count) || node.count < 1 || node.count > 1000) add('INVALID_REPEAT', 'Repeat count must be an integer from 1 to 1000.', nodePath);
         if (!Array.isArray(node.children) || node.children.length === 0) add('EMPTY_REPEAT', 'Repeat block must contain at least one item.', nodePath);
         else walk(node.children, nodePath, depth + 1);
       } else if (node.type === 'section') {
         if (!String(node.label || '').trim()) add('MISSING_SECTION_NAME', 'Section name is required.', nodePath);
         if (!Array.isArray(node.children) || node.children.length === 0) add('EMPTY_SECTION', `${node.label || 'Section'} must contain at least one item.`, nodePath);
         else walk(node.children, nodePath, depth + 1);
+      } else if (node.type === 'block') {
+        if (!node.blockId || typeof node.blockId !== 'string') add('MISSING_BLOCK', 'Linked block is missing its block ID.', nodePath);
+        else if (blocksById && !blocksById.has(node.blockId)) add('UNKNOWN_BLOCK', 'Linked block no longer exists.', nodePath);
       } else {
         add('UNKNOWN_NODE', `Unsupported custom routine item type: ${String(node.type)}.`, nodePath);
       }
@@ -203,13 +311,70 @@ export function validateCustomRoutine({ title = 'Custom Routine', nodes = [] } =
   return issues;
 }
 
-function customRuntimeId(nodeId, repeatPath) {
-  const suffix = repeatPath.length ? repeatPath.map((r) => `${r.nodeId}:${r.current}`).join('/') : 'base';
-  return `${nodeId}@${suffix}`;
+function validateBlockLibrary(blocks = []) {
+  const issues = [];
+  const blocksById = new Map();
+  for (const block of blocks || []) {
+    if (!block?.id || typeof block.id !== 'string') {
+      issues.push({ code: 'MISSING_BLOCK_ID', message: 'A reusable block is missing an ID.' });
+      continue;
+    }
+    if (blocksById.has(block.id)) issues.push({ code: 'DUPLICATE_BLOCK_ID', message: `Duplicate reusable block ID: ${block.id}.` });
+    else blocksById.set(block.id, block);
+  }
+
+  for (const block of blocksById.values()) {
+    issues.push(...validateCustomSource({
+      title: block.title || 'Reusable Block',
+      nodes: block.nodes || [],
+      parameters: block.parameters || [],
+      blocksById,
+      scope: `Block “${block.title || block.id}”`
+    }).map((issue) => ({ ...issue, blockId: block.id })));
+  }
+
+  const visiting = new Set();
+  const visited = new Set();
+  const walkRefs = (nodes, stack) => {
+    for (const node of nodes || []) {
+      if (node?.type === 'block' && node.blockId) visit(node.blockId, stack);
+      if (node?.type === 'repeat' || node?.type === 'section') walkRefs(node.children, stack);
+    }
+  };
+  const visit = (id, stack = []) => {
+    if (visiting.has(id)) {
+      const chain = [...stack, id].map((blockId) => blocksById.get(blockId)?.title || blockId).join(' → ');
+      issues.push({ code: 'BLOCK_CYCLE', message: `Circular reusable block reference detected: ${chain}.`, blockId: id });
+      return;
+    }
+    if (visited.has(id)) return;
+    const block = blocksById.get(id);
+    if (!block) return;
+    visiting.add(id);
+    walkRefs(block.nodes, [...stack, id]);
+    visiting.delete(id);
+    visited.add(id);
+  };
+  for (const id of blocksById.keys()) visit(id, []);
+  return { issues, blocksById };
 }
 
-export function buildCustomRoutine({ title = 'Custom Routine', nodes = [] } = {}) {
-  const issues = validateCustomRoutine({ title, nodes });
+export function validateCustomRoutine({ title = 'Custom Routine', nodes = [], parameters = [], blocks = [] } = {}) {
+  const { issues: blockIssues, blocksById } = validateBlockLibrary(blocks);
+  return [
+    ...validateCustomSource({ title, nodes, parameters, blocksById, scope: 'Routine' }),
+    ...blockIssues
+  ];
+}
+
+function customRuntimeId(nodeId, repeatPath, blockPath) {
+  const blockSuffix = blockPath.length ? blockPath.map((part) => `${part.refNodeId}:${part.blockId}@${part.revision}`).join('/') : 'root';
+  const repeatSuffix = repeatPath.length ? repeatPath.map((r) => `${r.nodeId}:${r.current}`).join('/') : 'base';
+  return `${blockSuffix}|${nodeId}@${repeatSuffix}`;
+}
+
+export function buildCustomRoutine({ title = 'Custom Routine', nodes = [], parameters = [], parameterValues = {}, blocks = [] } = {}) {
+  const issues = validateCustomRoutine({ title, nodes, parameters, blocks });
   if (issues.length) {
     const error = new Error(issues.map((issue) => issue.message).join(' '));
     error.name = 'CustomRoutineValidationError';
@@ -217,50 +382,84 @@ export function buildCustomRoutine({ title = 'Custom Routine', nodes = [] } = {}
     throw error;
   }
 
+  const rootValues = resolveCustomParameterValues(parameters, parameterValues);
+  const blocksById = new Map((blocks || []).map((block) => [block.id, block]));
   const steps = [];
   const MAX_STEPS = 50000;
-  const compileNodes = (children, context = { sectionPath: [], repeatPath: [] }) => {
+  const blockRevisions = {};
+
+  const resolveCount = (node, values) => {
+    const count = node.countParamId ? Number(values[node.countParamId]) : Number(node.count);
+    if (!Number.isInteger(count) || count < 1 || count > 1000) throw new Error('Resolved repeat count must be an integer from 1 to 1000.');
+    return count;
+  };
+  const resolveDuration = (node, values, key, paramKey) => {
+    const value = node[paramKey] ? Number(values[node[paramKey]]) : Number(node[key]);
+    if (!Number.isFinite(value) || value <= 0) throw new Error(`${node.label || 'Step'} resolved to an invalid duration.`);
+    return value;
+  };
+
+  const compileNodes = (children, context, values, blockStack = []) => {
     for (const node of children) {
-      if (steps.length > MAX_STEPS) throw new Error('Custom routine expands to too many steps.');
+      if (steps.length >= MAX_STEPS) throw new Error('Custom routine expands to too many steps.');
       if (node.type === 'section') {
         compileNodes(node.children, {
           ...context,
           sectionPath: [...context.sectionPath, { id: node.id, label: node.label }]
-        });
+        }, values, blockStack);
         continue;
       }
       if (node.type === 'repeat') {
-        for (let r = 1; r <= node.count; r++) {
+        const count = resolveCount(node, values);
+        for (let r = 1; r <= count; r++) {
           compileNodes(node.children, {
             ...context,
-            repeatPath: [...context.repeatPath, { nodeId: node.id, current: r, total: node.count }]
-          });
+            repeatPath: [...context.repeatPath, { nodeId: node.id, current: r, total: count }]
+          }, values, blockStack);
         }
+        continue;
+      }
+      if (node.type === 'block') {
+        const block = blocksById.get(node.blockId);
+        if (!block) throw new Error('Linked reusable block is missing.');
+        if (blockStack.includes(block.id)) throw new Error(`Circular reusable block reference detected at ${block.title || block.id}.`);
+        const blockValues = resolveCustomParameterValues(block.parameters || [], node.parameterValues || {});
+        blockRevisions[block.id] = block.revision || 1;
+        compileNodes(block.nodes || [], {
+          ...context,
+          blockPath: [...context.blockPath, { refNodeId: node.id, blockId: block.id, title: block.title || 'Block', revision: block.revision || 1 }]
+        }, blockValues, [...blockStack, block.id]);
         continue;
       }
 
       const innerRound = context.repeatPath.at(-1);
       const common = {
-        id: customRuntimeId(node.id, context.repeatPath),
+        id: customRuntimeId(node.id, context.repeatPath, context.blockPath),
         sourceNodeId: node.id,
         label: node.label,
         phase: PHASES.includes(node.phase) ? node.phase : 'custom',
         target: node.target,
         sectionPath: context.sectionPath,
         repeatPath: context.repeatPath,
+        blockPath: context.blockPath,
         round: innerRound ? { current: innerRound.current, total: innerRound.total } : undefined
       };
       if (node.type === 'manual') {
-        steps.push(step({ ...common, manual: true, timeCapMs: node.timeCapMs }));
+        const timeCapMs = node.timeCapParamId ? resolveDuration(node, values, 'timeCapMs', 'timeCapParamId') : node.timeCapMs;
+        steps.push(step({ ...common, manual: true, timeCapMs }));
       } else {
-        steps.push(step({ ...common, durationMs: node.durationMs }));
+        steps.push(step({ ...common, durationMs: resolveDuration(node, values, 'durationMs', 'durationParamId') }));
       }
     }
   };
 
-  compileNodes(nodes);
-  if (steps.length > MAX_STEPS) throw new Error('Custom routine expands to too many steps.');
-  return { kind: 'timeline', title: String(title || 'Custom Routine'), steps, meta: { mode: 'custom' } };
+  compileNodes(nodes, { sectionPath: [], repeatPath: [], blockPath: [] }, rootValues, []);
+  return {
+    kind: 'timeline',
+    title: String(title || 'Custom Routine'),
+    steps,
+    meta: { mode: 'custom', parameterValues: structuredClone(rootValues), blockRevisions }
+  };
 }
 
 export function estimatePlanDuration(plan) {

@@ -154,3 +154,63 @@ test('custom routine expansion is deterministic for persisted source IDs', () =>
   const b = buildCustomRoutine(config);
   assert.deepEqual(a.steps.map((x) => x.id), b.steps.map((x) => x.id));
 });
+
+test('custom routine resolves duration and repeat parameters at launch', () => {
+  const parameters = [
+    { id: 'work', type: 'duration', label: 'Work', defaultMs: 40000, minMs: 10000, maxMs: 120000 },
+    { id: 'rounds', type: 'number', label: 'Rounds', defaultValue: 3, min: 1, max: 10, integer: true }
+  ];
+  const plan = buildCustomRoutine({
+    title: 'Parameterized',
+    parameters,
+    parameterValues: { work: 55000, rounds: 2 },
+    nodes: [{ id: 'repeat', type: 'repeat', countParamId: 'rounds', count: 3, children: [
+      { id: 'work-step', type: 'timed', label: 'Work', phase: 'work', durationParamId: 'work', durationMs: 40000 }
+    ] }]
+  });
+  assert.deepEqual(plan.steps.map((item) => item.durationMs), [55000, 55000]);
+  assert.deepEqual(plan.steps.map((item) => item.round.current), [1, 2]);
+  assert.equal(plan.meta.parameterValues.work, 55000);
+  assert.equal(plan.meta.parameterValues.rounds, 2);
+});
+
+test('custom parameter values enforce configured bounds', () => {
+  assert.throws(() => buildCustomRoutine({
+    title: 'Bounded',
+    parameters: [{ id: 'rounds', type: 'number', label: 'Rounds', defaultValue: 3, min: 1, max: 5, integer: true }],
+    parameterValues: { rounds: 8 },
+    nodes: [{ id: 'repeat', type: 'repeat', countParamId: 'rounds', count: 3, children: [
+      { id: 'work', type: 'timed', label: 'Work', phase: 'work', durationMs: 1000 }
+    ] }]
+  }), /at most 5/);
+});
+
+test('linked reusable blocks expand with local parameter overrides', () => {
+  const blocks = [{
+    id: 'block-a', title: 'Work Block', revision: 4,
+    parameters: [{ id: 'duration', type: 'duration', label: 'Duration', defaultMs: 30000, minMs: 1000, maxMs: 120000 }],
+    nodes: [{ id: 'block-work', type: 'timed', label: 'Block Work', phase: 'work', durationParamId: 'duration', durationMs: 30000 }]
+  }];
+  const plan = buildCustomRoutine({
+    title: 'Blocks', blocks,
+    nodes: [
+      { id: 'ref-one', type: 'block', blockId: 'block-a', parameterValues: { duration: 45000 } },
+      { id: 'ref-two', type: 'block', blockId: 'block-a', parameterValues: { duration: 60000 } }
+    ]
+  });
+  assert.deepEqual(plan.steps.map((item) => item.durationMs), [45000, 60000]);
+  assert.notEqual(plan.steps[0].id, plan.steps[1].id);
+  assert.equal(plan.steps[0].blockPath[0].revision, 4);
+  assert.equal(plan.meta.blockRevisions['block-a'], 4);
+});
+
+test('circular reusable blocks are rejected', () => {
+  const blocks = [
+    { id: 'a', title: 'A', revision: 1, nodes: [{ id: 'a-ref', type: 'block', blockId: 'b' }] },
+    { id: 'b', title: 'B', revision: 1, nodes: [{ id: 'b-ref', type: 'block', blockId: 'a' }] }
+  ];
+  assert.throws(() => buildCustomRoutine({
+    title: 'Cycle', blocks,
+    nodes: [{ id: 'root-ref', type: 'block', blockId: 'a' }]
+  }), /Circular reusable block reference/);
+});
