@@ -1,6 +1,6 @@
 # Timer
 
-Current app version: **1.5.0**.
+Current app version: **1.6.0**.
 
 A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 
@@ -24,7 +24,7 @@ A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 - Advanced cue profiles, six sound packs, warning/halfway/custom cue points, configurable speech/haptics, per-routine/per-step overrides and uploaded local cue sounds
 - Screen Wake Lock where supported
 - Active-session persistence and reload recovery
-- Versioned JSON backup/import including reusable blocks (v1 backups remain supported)
+- Versioned SHA-256-verified backup archives with selective export/restore, merge/replace preview, recovery snapshots, quarantine, optional password encryption, portable routine packages, and backward-compatible legacy restore
 - Offline service worker + installable PWA manifest
 - Launcher shortcuts for Quick Timer, Stopwatch, Favorites and Last Routine
 - Keyboard controls during live sessions
@@ -133,3 +133,18 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 - Added AMRAP normalized rep totals when movement targets are numeric, EMOM early-completion/rest summaries, and stopwatch average/median/range statistics.
 - Added History List / Calendar / Stats views, search, mode filters, weekly/monthly factual summaries, and local JSON/CSV history export.
 - Older session records remain readable; detailed event timelines simply appear when the source version recorded them.
+
+
+## v1.6.0 backup, portability and data resilience
+
+- Full backups now use a canonical `thiepn-timer-archive` wrapper with SHA-256 integrity verification before restore.
+- Optional password encryption uses PBKDF2-SHA-256 key derivation and AES-256-GCM; forgotten passwords cannot be recovered.
+- Restore opens a preview first and supports Merge or Replace for selected data categories.
+- Every restore/recovery operation creates a pre-restore local snapshot and rolls back automatically if application fails part-way through.
+- Automatic daily local recovery snapshots plus manual snapshots are retained with bounded pruning.
+- Invalid imported records are retained in Quarantine rather than silently discarded or allowed to corrupt primary stores.
+- Portable routine packages include dependent reusable blocks, custom cue assets, and custom cue profiles where required.
+- IndexedDB schema v4 adds recovery, quarantine, change-journal, tombstone, and device-metadata stores.
+- Mutable entities carry sync revision/device metadata and create deterministic change journal entries; deletions emit tombstones for future multi-device sync.
+- Data & Backup settings expose storage usage, recovery count, quarantine count, device identity, journal size, and tombstone count.
+- Raw v1-v4 legacy backups remain importable.

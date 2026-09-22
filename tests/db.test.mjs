@@ -2,12 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TimerDB } from '../src/db.js';
 
-test('backup v3 round-trips reusable blocks and still accepts v1 backups', async () => {
+test('backup v4 round-trips reusable blocks and still accepts v1 backups', async () => {
   const db = new TimerDB();
   await db.open();
   await db.saveBlock({ id: 'block-1', title: 'Block', revision: 1, parameters: [], nodes: [{ id: 'w', type: 'timed', label: 'Work', phase: 'work', durationMs: 1000 }] });
   const exported = await db.exportData();
-  assert.equal(exported.version, 3);
+  assert.equal(exported.version, 4);
   assert.equal(exported.blocks.length, 1);
 
   const other = new TimerDB();
@@ -45,14 +45,14 @@ test('backup preserves advanced generator and formula routine configuration', as
   assert.deepEqual(routine.config, config);
 });
 
-test('backup v3 round-trips cue profiles and custom audio bytes', async () => {
+test('backup v4 round-trips cue profiles and custom audio bytes', async () => {
   const db = new TimerDB();
   await db.open();
   await db.saveCueProfile({ id: 'cue-x', title: 'Gym Voice', sound: true, voice: true, soundPack: 'gym', warningSeconds: 10 });
   const bytes = new Uint8Array([1,2,3,4,5]).buffer;
   await db.saveCustomSound({ id: 'sound-x', title: 'Bell', mimeType: 'audio/wav', size: 5, durationMs: 400, data: bytes });
   const backup = await db.exportData();
-  assert.equal(backup.version, 3);
+  assert.equal(backup.version, 4);
   assert.equal(backup.cueProfiles.length, 1);
   assert.equal(backup.customSounds.length, 1);
   assert.equal(typeof backup.customSounds[0].dataBase64, 'string');
@@ -72,4 +72,53 @@ test('v1 and v2 backups remain accepted after cue schema upgrade', async () => {
   await db.importData({ format: 'thiepn-timer-backup', version: 2, routines: [], blocks: [], sessions: [], settings: {} }, { replace: true });
   assert.equal((await db.all('cueProfiles')).length, 0);
   assert.equal((await db.all('customSounds')).length, 0);
+});
+
+
+test('recovery snapshots can roll the local database back', async () => {
+  const db = new TimerDB();
+  await db.open();
+  await db.saveRoutine({ id: 'r1', type: 'interval', title: 'Before', config: { work: 40, rest: 20, rounds: 3, prepare: 0 } });
+  const snap = await db.createRecoverySnapshot({ kind: 'manual', label: 'Before edit' });
+  await db.saveRoutine({ id: 'r2', type: 'interval', title: 'After', config: { work: 30, rest: 30, rounds: 5, prepare: 0 } });
+  assert.equal((await db.all('routines')).length, 2);
+  await db.restoreRecoverySnapshot(snap.id);
+  assert.deepEqual((await db.all('routines')).map((item) => item.id), ['r1']);
+});
+
+test('sync-ready journal and tombstones preserve mutation ancestry', async () => {
+  const db = new TimerDB();
+  await db.open();
+  const one = await db.saveRoutine({ id: 'journal-r', type: 'interval', title: 'One', config: { work: 40, rest: 20, rounds: 3, prepare: 0 } });
+  const two = await db.saveRoutine({ ...one, title: 'Two' });
+  assert.equal(one.syncRevision, 1);
+  assert.equal(two.syncRevision, 2);
+  await db.delete('routines', 'journal-r');
+  const changes = await db.all('changes');
+  assert.deepEqual(changes.map((item) => item.operation), ['create','update','delete']);
+  const tombstones = await db.all('tombstones');
+  assert.equal(tombstones.length, 1);
+  assert.equal(tombstones[0].entityId, 'journal-r');
+});
+
+test('quarantine retains invalid source records without placing them in primary stores', async () => {
+  const db = new TimerDB();
+  await db.open();
+  await db.quarantineRecord({ source: 'test', entityType: 'routine', entityId: 'bad', reason: 'Broken', record: { id: 'bad' } });
+  const rows = await db.listQuarantine();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].record.id, 'bad');
+  assert.equal((await db.all('routines')).length, 0);
+});
+
+test('selective backups only carry requested categories', async () => {
+  const db = new TimerDB();
+  await db.open();
+  await db.saveRoutine({ id: 'only-r', type: 'interval', title: 'Routine', config: { work: 40, rest: 20, rounds: 3, prepare: 0 } });
+  await db.put('sessions', { id: 'only-s', startedAt: 1, title: 'Session' });
+  const backup = await db.exportData({ selection: { routines: true, blocks: false, cueProfiles: false, customSounds: false, sessions: false, settings: false } });
+  assert.equal(backup.routines.length, 1);
+  assert.equal(backup.sessions.length, 0);
+  assert.equal(backup.settings, null);
+  assert.equal(backup.selection.sessions, false);
 });

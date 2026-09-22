@@ -1,10 +1,10 @@
 {
   "name": "thiepn-timer",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check src/core.js && node --check src/db.js && node --check src/audio.js && node --check src/analytics.js && node --check src/app.js && node --check sw.js"
+    "check": "node --check src/core.js && node --check src/db.js && node --check src/audio.js && node --check src/analytics.js && node --check src/resilience.js && node --check src/app.js && node --check sw.js"
   }
 }

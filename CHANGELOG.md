@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.6.0
+
+### Added
+- Canonical versioned Timer backup archives with SHA-256 integrity verification.
+- Optional password-encrypted backups using PBKDF2-SHA-256 and AES-256-GCM.
+- Restore preview with selective categories plus Merge or Replace strategy.
+- Automatic pre-restore rollback snapshots and immediate Undo Restore support.
+- Daily and manual local recovery snapshots with bounded retention.
+- Quarantine storage for invalid imported records.
+- Dependency-aware portable routine packages containing linked blocks and required cue assets.
+- Data health panel with local storage, recovery, quarantine, device, journal, and tombstone diagnostics.
+- Sync-ready device identity, per-entity sync revisions, change journal, and deletion tombstones.
+
+### Improved
+- Backup payload format moved to v4 while raw v1-v3 backups remain accepted.
+- Selective backup/restore can independently include routines, blocks, cue profiles, custom sounds, history, and settings.
+- Restore failures automatically roll the local database back to the pre-restore snapshot.
+- Service-worker cache includes the resilience module for offline restore/export support.
+
+### Compatibility
+- IndexedDB schema upgraded to v4. Existing v3 data is migrated in-place by adding resilience stores; user timer data is unchanged.
+- Service-worker cache generation bumped for v1.6.0 assets.
+
 ## 1.5.0
 
 ### Added

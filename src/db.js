@@ -1,5 +1,11 @@
+import { canonicalStringify, hashCanonical } from './resilience.js';
+
 const DB_NAME = 'thiepn-timer';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
+const SYNC_STORES = new Set(['routines', 'blocks', 'cueProfiles', 'customSounds', 'sessions']);
+const ALL_STORES = ['routines', 'blocks', 'cueProfiles', 'customSounds', 'sessions', 'settings', 'active', 'recovery', 'quarantine', 'changes', 'tombstones', 'meta'];
+
+const uid = (prefix = 'id') => `${prefix}_${globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`}`;
 
 const request = (req) => new Promise((resolve, reject) => {
   req.onsuccess = () => resolve(req.result);
@@ -30,6 +36,17 @@ function base64ToArrayBuffer(value) {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes.buffer;
+}
+
+function normalizeSelection(selection = {}) {
+  return {
+    routines: selection.routines !== false,
+    blocks: selection.blocks !== false,
+    cueProfiles: selection.cueProfiles !== false,
+    customSounds: selection.customSounds !== false,
+    sessions: selection.sessions !== false,
+    settings: selection.settings !== false
+  };
 }
 
 export const defaultSettings = {
@@ -63,11 +80,13 @@ export class TimerDB {
   constructor() {
     this.db = null;
     this.memory = null;
+    this.deviceId = null;
   }
 
   async open() {
     if (!('indexedDB' in globalThis)) {
-      this.memory = { routines: new Map(), blocks: new Map(), cueProfiles: new Map(), customSounds: new Map(), sessions: new Map(), settings: new Map(), active: new Map() };
+      this.memory = Object.fromEntries(ALL_STORES.map((name) => [name, new Map()]));
+      await this.ensureDeviceIdentity();
       return this;
     }
     const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -101,8 +120,31 @@ export class TimerDB {
       }
       if (!db.objectStoreNames.contains('settings')) db.createObjectStore('settings', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('active')) db.createObjectStore('active', { keyPath: 'id' });
+      if (!db.objectStoreNames.contains('recovery')) {
+        const s = db.createObjectStore('recovery', { keyPath: 'id' });
+        s.createIndex('createdAt', 'createdAt');
+        s.createIndex('kind', 'kind');
+      }
+      if (!db.objectStoreNames.contains('quarantine')) {
+        const s = db.createObjectStore('quarantine', { keyPath: 'id' });
+        s.createIndex('createdAt', 'createdAt');
+        s.createIndex('entityType', 'entityType');
+      }
+      if (!db.objectStoreNames.contains('changes')) {
+        const s = db.createObjectStore('changes', { keyPath: 'id' });
+        s.createIndex('changedAt', 'changedAt');
+        s.createIndex('entityId', 'entityId');
+        s.createIndex('storeName', 'storeName');
+      }
+      if (!db.objectStoreNames.contains('tombstones')) {
+        const s = db.createObjectStore('tombstones', { keyPath: 'id' });
+        s.createIndex('deletedAt', 'deletedAt');
+        s.createIndex('storeName', 'storeName');
+      }
+      if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta', { keyPath: 'id' });
     };
     this.db = await request(req);
+    await this.ensureDeviceIdentity();
     return this;
   }
 
@@ -111,13 +153,13 @@ export class TimerDB {
     return { tx, store: tx.objectStore(name) };
   }
 
-  async get(name, key) {
-    if (this.memory) return structuredClone(this.memory[name].get(key));
+  async _getRaw(name, key) {
+    if (this.memory) return structuredClone(this.memory[name]?.get(key));
     const { store } = this.store(name);
     return request(store.get(key));
   }
 
-  async put(name, value) {
+  async _putRaw(name, value) {
     if (this.memory) { this.memory[name].set(value.id, structuredClone(value)); return value; }
     const { tx, store } = this.store(name, 'readwrite');
     store.put(value);
@@ -125,18 +167,55 @@ export class TimerDB {
     return value;
   }
 
-  async delete(name, key) {
+  async _deleteRaw(name, key) {
     if (this.memory) { this.memory[name].delete(key); return; }
     const { tx, store } = this.store(name, 'readwrite');
     store.delete(key);
     await transactionDone(tx);
   }
 
-  async clear(name) {
+  async _clearRaw(name) {
     if (this.memory) { this.memory[name].clear(); return; }
     const { tx, store } = this.store(name, 'readwrite');
     store.clear();
     await transactionDone(tx);
+  }
+
+  async get(name, key) { return this._getRaw(name, key); }
+
+  async put(name, value, { journal = true } = {}) {
+    if (!value?.id) throw new Error(`Cannot save ${name} record without id.`);
+    if (!journal || !SYNC_STORES.has(name)) return this._putRaw(name, value);
+    const previous = await this._getRaw(name, value.id).catch(() => null);
+    const baseRevision = Math.max(0, Number(previous?.syncRevision) || 0);
+    const incomingRevision = Math.max(0, Number(value.syncRevision) || 0);
+    const syncRevision = previous ? Math.max(baseRevision + 1, incomingRevision) : Math.max(1, incomingRevision);
+    const normalized = { ...value, syncRevision, syncDeviceId: this.deviceId || undefined };
+    await this._putRaw(name, normalized);
+    await this._deleteRaw('tombstones', `${name}:${value.id}`).catch(() => {});
+    await this.appendChange({ storeName: name, entityId: value.id, operation: previous ? 'update' : 'create', baseRevision, resultingRevision: syncRevision, content: normalized });
+    return normalized;
+  }
+
+  async delete(name, key, { journal = true } = {}) {
+    const previous = await this._getRaw(name, key).catch(() => null);
+    await this._deleteRaw(name, key);
+    if (journal && SYNC_STORES.has(name) && previous) {
+      const deletedAt = Date.now();
+      const baseRevision = Math.max(0, Number(previous.syncRevision) || 0);
+      const tombstone = { id: `${name}:${key}`, storeName: name, entityId: key, deletedAt, deviceId: this.deviceId, baseRevision };
+      await this._putRaw('tombstones', tombstone);
+      await this.appendChange({ storeName: name, entityId: key, operation: 'delete', baseRevision, resultingRevision: baseRevision + 1, content: tombstone });
+    }
+  }
+
+  async clear(name, { journal = true } = {}) {
+    if (journal && SYNC_STORES.has(name)) {
+      const rows = await this.all(name);
+      for (const row of rows) await this.delete(name, row.id, { journal: true });
+      return;
+    }
+    return this._clearRaw(name);
   }
 
   async all(name) {
@@ -145,21 +224,41 @@ export class TimerDB {
     return request(store.getAll());
   }
 
+  async ensureDeviceIdentity() {
+    const existing = await this._getRaw('meta', 'device').catch(() => null);
+    if (existing?.deviceId) { this.deviceId = existing.deviceId; return existing; }
+    const record = { id: 'device', deviceId: uid('device'), createdAt: Date.now(), displayName: 'This device' };
+    await this._putRaw('meta', record);
+    this.deviceId = record.deviceId;
+    return record;
+  }
+
+  async appendChange({ storeName, entityId, operation, baseRevision = 0, resultingRevision = 0, content }) {
+    if (!this.deviceId) await this.ensureDeviceIdentity();
+    const changedAt = Date.now();
+    let contentHash = '';
+    try { contentHash = await hashCanonical(content); } catch {}
+    return this._putRaw('changes', {
+      id: uid('change'), storeName, entityId, operation, baseRevision, resultingRevision,
+      changedAt, deviceId: this.deviceId, contentHash
+    });
+  }
+
   async loadSettings() {
     const saved = await this.get('settings', 'settings').catch(() => null);
     return { ...defaultSettings, ...(saved?.value || {}) };
   }
 
   async saveSettings(value) {
-    return this.put('settings', { id: 'settings', value: { ...defaultSettings, ...value }, updatedAt: Date.now() });
+    return this._putRaw('settings', { id: 'settings', value: { ...defaultSettings, ...value }, updatedAt: Date.now() });
   }
 
   async saveActive(snapshot, meta = {}) {
-    return this.put('active', { id: 'current', snapshot, meta, updatedAt: Date.now(), sequence: snapshot?.sequence ?? 0 });
+    return this._putRaw('active', { id: 'current', snapshot, meta, updatedAt: Date.now(), sequence: snapshot?.sequence ?? 0 });
   }
 
   async getActive() { return this.get('active', 'current'); }
-  async clearActive() { return this.delete('active', 'current'); }
+  async clearActive() { return this._deleteRaw('active', 'current'); }
 
   async recentSessions(limit = 50) {
     const rows = await this.all('sessions');
@@ -168,10 +267,11 @@ export class TimerDB {
 
   async saveRoutine(routine) {
     const now = Date.now();
+    const previous = routine?.id ? await this.get('routines', routine.id).catch(() => null) : null;
     return this.put('routines', {
       favorite: false,
-      createdAt: now,
-      useCount: 0,
+      createdAt: previous?.createdAt || routine?.createdAt || now,
+      useCount: previous?.useCount || 0,
       ...routine,
       updatedAt: now
     });
@@ -208,9 +308,15 @@ export class TimerDB {
     });
   }
 
-  async exportData() {
+  async exportData({ selection } = {}) {
+    const selected = normalizeSelection(selection);
     const [routines, blocks, cueProfiles, customSounds, sessions, settings] = await Promise.all([
-      this.all('routines'), this.all('blocks'), this.all('cueProfiles'), this.all('customSounds'), this.all('sessions'), this.loadSettings()
+      selected.routines ? this.all('routines') : Promise.resolve([]),
+      selected.blocks ? this.all('blocks') : Promise.resolve([]),
+      selected.cueProfiles ? this.all('cueProfiles') : Promise.resolve([]),
+      selected.customSounds ? this.all('customSounds') : Promise.resolve([]),
+      selected.sessions ? this.all('sessions') : Promise.resolve([]),
+      selected.settings ? this.loadSettings() : Promise.resolve(null)
     ]);
     const portableSounds = customSounds.map((sound) => ({
       ...sound,
@@ -219,8 +325,9 @@ export class TimerDB {
     }));
     return {
       format: 'thiepn-timer-backup',
-      version: 3,
+      version: 4,
       exportedAt: new Date().toISOString(),
+      selection: selected,
       routines,
       blocks,
       cueProfiles,
@@ -230,37 +337,109 @@ export class TimerDB {
     };
   }
 
-  async importData(data, { replace = false } = {}) {
-    if (!data || data.format !== 'thiepn-timer-backup' || ![1, 2, 3].includes(data.version)) throw new Error('Unsupported backup format.');
-    if (!Array.isArray(data.routines) || !Array.isArray(data.sessions) || !data.settings) throw new Error('Backup is incomplete.');
+  async importData(data, { replace = false, selection = null, quarantine = [] } = {}) {
+    if (!data || data.format !== 'thiepn-timer-backup' || ![1, 2, 3, 4].includes(Number(data.version))) throw new Error('Unsupported backup format.');
+    if (!Array.isArray(data.routines) || !Array.isArray(data.sessions)) throw new Error('Backup is incomplete.');
+    const available = data.version >= 4 && data.selection ? data.selection : { routines: true, blocks: true, cueProfiles: true, customSounds: true, sessions: true, settings: true };
+    const requested = normalizeSelection(selection || available);
+    const selected = Object.fromEntries(Object.keys(requested).map((key) => [key, Boolean(requested[key] && available[key] !== false)]));
     const blocks = data.version >= 2 && Array.isArray(data.blocks) ? data.blocks : [];
     const cueProfiles = data.version >= 3 && Array.isArray(data.cueProfiles) ? data.cueProfiles : [];
     const customSounds = data.version >= 3 && Array.isArray(data.customSounds) ? data.customSounds : [];
+
     if (replace) {
-      await Promise.all(['routines', 'blocks', 'cueProfiles', 'customSounds', 'sessions'].map((store) => this.clear(store)));
+      if (selected.routines) await this._clearRaw('routines');
+      if (selected.blocks) await this._clearRaw('blocks');
+      if (selected.cueProfiles) await this._clearRaw('cueProfiles');
+      if (selected.customSounds) await this._clearRaw('customSounds');
+      if (selected.sessions) await this._clearRaw('sessions');
     }
-    for (const block of blocks) {
-      if (!block?.id || !block?.title || !Array.isArray(block?.nodes)) continue;
-      await this.put('blocks', block);
-    }
-    for (const profile of cueProfiles) {
-      if (!profile?.id || !profile?.title) continue;
-      await this.put('cueProfiles', profile);
-    }
-    for (const sound of customSounds) {
+
+    if (selected.blocks) for (const block of blocks) if (block?.id && block?.title && Array.isArray(block?.nodes)) await this.put('blocks', block);
+    if (selected.cueProfiles) for (const profile of cueProfiles) if (profile?.id && profile?.title) await this.put('cueProfiles', profile);
+    if (selected.customSounds) for (const sound of customSounds) {
       if (!sound?.id || !sound?.title || !sound?.dataBase64) continue;
       const { dataBase64, ...rest } = sound;
       await this.put('customSounds', { ...rest, data: base64ToArrayBuffer(dataBase64) });
     }
-    for (const routine of data.routines) {
-      if (!routine?.id || !routine?.type || !routine?.config) continue;
-      await this.put('routines', routine);
+    if (selected.routines) for (const routine of data.routines) if (routine?.id && routine?.type && routine?.config) await this.put('routines', routine);
+    if (selected.sessions) for (const session of data.sessions) if (session?.id && Number.isFinite(session?.startedAt)) await this.put('sessions', session);
+    if (selected.settings && data.settings) await this.saveSettings({ ...defaultSettings, ...data.settings });
+    for (const item of quarantine || []) await this.quarantineRecord(item);
+    return { selected, counts: { routines: data.routines.length, blocks: blocks.length, cueProfiles: cueProfiles.length, customSounds: customSounds.length, sessions: data.sessions.length } };
+  }
+
+  async createRecoverySnapshot({ kind = 'manual', label = '', payload = null } = {}) {
+    const data = payload || await this.exportData();
+    const record = {
+      id: uid('recovery'), kind, label: label || kind, createdAt: Date.now(),
+      payload: data,
+      counts: {
+        routines: data.routines?.length || 0, blocks: data.blocks?.length || 0,
+        cueProfiles: data.cueProfiles?.length || 0, customSounds: data.customSounds?.length || 0,
+        sessions: data.sessions?.length || 0
+      },
+      sizeEstimate: canonicalStringify(data).length
+    };
+    await this._putRaw('recovery', record);
+    await this.pruneRecoverySnapshots();
+    return record;
+  }
+
+  async listRecoverySnapshots() {
+    return (await this.all('recovery')).sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  async restoreRecoverySnapshot(id) {
+    const snapshot = await this.get('recovery', id);
+    if (!snapshot?.payload) throw new Error('Recovery snapshot was not found.');
+    await this.importData(snapshot.payload, { replace: true });
+    return snapshot;
+  }
+
+  async ensureDailyRecoverySnapshot() {
+    const day = new Date().toISOString().slice(0, 10);
+    const existing = (await this.listRecoverySnapshots()).find((item) => item.kind === 'daily' && new Date(item.createdAt).toISOString().slice(0, 10) === day);
+    if (existing) return existing;
+    return this.createRecoverySnapshot({ kind: 'daily', label: `Daily ${day}` });
+  }
+
+  async pruneRecoverySnapshots() {
+    const rows = await this.listRecoverySnapshots();
+    const limits = { daily: 7, 'pre-restore': 3, 'pre-import': 3, manual: 5 };
+    const kept = new Map();
+    for (const row of rows) {
+      const limit = limits[row.kind] ?? 3;
+      const count = kept.get(row.kind) || 0;
+      if (count < limit) kept.set(row.kind, count + 1);
+      else await this._deleteRaw('recovery', row.id);
     }
-    for (const session of data.sessions) {
-      if (!session?.id || !Number.isFinite(session?.startedAt)) continue;
-      await this.put('sessions', session);
-    }
-    await this.saveSettings({ ...defaultSettings, ...data.settings });
+  }
+
+  async quarantineRecord({ source = 'unknown', entityType = 'unknown', entityId = '', reason = 'Invalid data', record = null } = {}) {
+    return this._putRaw('quarantine', {
+      id: uid('quarantine'), source, entityType, entityId, reason, record: structuredClone(record), createdAt: Date.now()
+    });
+  }
+
+  async listQuarantine() { return (await this.all('quarantine')).sort((a, b) => b.createdAt - a.createdAt); }
+  async clearQuarantine() { return this._clearRaw('quarantine'); }
+
+  async dataHealth() {
+    const [routines, blocks, profiles, sounds, sessions, recovery, quarantine, changes, tombstones] = await Promise.all([
+      this.all('routines'), this.all('blocks'), this.all('cueProfiles'), this.all('customSounds'), this.all('sessions'),
+      this.all('recovery'), this.all('quarantine'), this.all('changes'), this.all('tombstones')
+    ]);
+    return {
+      counts: { routines: routines.length, blocks: blocks.length, cueProfiles: profiles.length, customSounds: sounds.length, sessions: sessions.length },
+      recoveryCount: recovery.length, quarantineCount: quarantine.length, pendingChanges: changes.length, tombstoneCount: tombstones.length,
+      deviceId: this.deviceId
+    };
+  }
+
+  async pruneTombstones(maxAgeMs = 90 * 86400000) {
+    const cutoff = Date.now() - maxAgeMs;
+    for (const item of await this.all('tombstones')) if (item.deletedAt < cutoff) await this._deleteRaw('tombstones', item.id);
   }
 }
 

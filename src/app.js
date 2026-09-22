@@ -7,6 +7,7 @@ import {
 import { TimerDB, defaultSettings, requestPersistentStorage, storageEstimate } from './db.js';
 import { CueManager, WakeLockManager, requestNotificationPermission, showCompletionNotification, BUILTIN_CUE_PROFILES, SOUND_PACKS, cueProfileById, profileSettings } from './audio.js';
 import { analyzeSession, comparisonFingerprint, comparableSessions, objectiveRecord, factualTrend, summarizeRange, startOfLocalDay, startOfLocalWeek, monthCalendar, sessionsToCsv } from './analytics.js';
+import { createBackupArchive, verifyBackupArchive, encryptBackupArchive, decryptBackupArchive, isLegacyBackup, isEncryptedBackup, isBackupArchive, isRoutinePackage, backupCounts } from './resilience.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -17,6 +18,7 @@ const ms = (seconds) => Math.max(0, Math.round(Number(seconds || 0) * 1000));
 const sec = (milliseconds) => Math.round(Number(milliseconds || 0) / 1000);
 const mins = (minutes) => ms(Number(minutes || 0) * 60);
 const pct = (n) => `${Math.round(clamp(n || 0, 0, 1) * 100)}%`;
+const APP_VERSION = '1.6.0';
 
 const BUILDER_META = {
   interval: { name: 'Interval', desc: 'Work / rest repetitions' },
@@ -158,7 +160,12 @@ const state = {
   historyView: 'list',
   historyQuery: '',
   historyMode: 'all',
-  historyMonth: new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime()
+  historyMonth: new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime(),
+  pendingRestore: null,
+  recoverySnapshots: [],
+  quarantineItems: [],
+  dataHealth: null,
+  lastRestoreSnapshotId: null
 };
 
 const cue = new CueManager(() => state.settings, () => state.cueProfiles, async (id) => state.db.get('customSounds', id));
@@ -385,7 +392,7 @@ function renderBuilder() {
       </section>
       ${editingBlock ? '' : renderRoutineCueOverrides(state.builderCueOverrides || {})}
       <button class="btn primary big block" data-action="start-builder">${editingBlock ? 'Test Reusable Block' : `Start ${esc(m.name)}`}</button>
-      ${state.builderEditingId ? `<button class="btn danger block" data-action="delete-routine" data-id="${esc(state.builderEditingId)}">Delete saved routine</button>` : state.builderEditingBlockId ? `<button class="btn danger block" data-action="delete-block" data-id="${esc(state.builderEditingBlockId)}">Delete reusable block</button>` : ''}
+      ${state.builderEditingId ? `<div class="row" style="flex-wrap:wrap"><button class="btn" data-action="export-routine-package" data-id="${esc(state.builderEditingId)}">Export portable routine</button><button class="btn danger" data-action="delete-routine" data-id="${esc(state.builderEditingId)}">Delete saved routine</button></div>` : state.builderEditingBlockId ? `<button class="btn danger block" data-action="delete-block" data-id="${esc(state.builderEditingBlockId)}">Delete reusable block</button>` : ''}
     </div>`;
 }
 
@@ -1505,15 +1512,22 @@ function renderSettings() {
       <button class="btn" data-action="enable-notifications">Request notification permission</button>
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">Data & Backup</h2>
-      <div class="small muted">Persistent storage: ${state.storagePersistent == null ? 'Checking…' : state.storagePersistent ? 'Enabled' : 'Browser managed'}</div>
-      <div class="small muted">Storage used: ${state.storageEstimate?.usage ? `${(state.storageEstimate.usage/1024/1024).toFixed(1)} MB` : 'Unknown'}</div>
-      <button class="btn" data-action="export-backup">Export full backup</button>
-      <button class="btn" data-action="import-backup">Import backup</button>
+      <div class="data-health-grid">
+        <div class="metric"><strong>${state.storagePersistent == null ? '…' : state.storagePersistent ? '✓' : 'Managed'}</strong><span>Persistent storage</span></div>
+        <div class="metric"><strong>${state.storageEstimate?.usage ? `${(state.storageEstimate.usage/1024/1024).toFixed(1)} MB` : '—'}</strong><span>Local storage used</span></div>
+        <div class="metric"><strong>${state.recoverySnapshots.length}</strong><span>Recovery snapshots</span></div>
+        <div class="metric"><strong>${state.quarantineItems.length}</strong><span>Quarantined items</span></div>
+      </div>
+      <div class="small muted">Last external backup: ${state.settings.lastExternalBackupAt ? new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'short'}).format(new Date(state.settings.lastExternalBackupAt)) : 'Never'}</div>
+      <div class="row" style="flex-wrap:wrap"><button class="btn primary" data-action="export-backup">Create backup</button><button class="btn" data-action="import-backup">Restore / Import</button>${state.lastRestoreSnapshotId ? '<button class="btn" data-action="undo-last-restore">Undo last restore</button>' : ''}</div>
+      <div class="row" style="flex-wrap:wrap"><button class="btn" data-action="create-recovery">Create local recovery snapshot</button><button class="btn" data-action="show-quarantine">Quarantine</button></div>
+      ${state.recoverySnapshots.length ? `<div class="recovery-list"><div class="small muted">Recent recovery snapshots</div>${state.recoverySnapshots.slice(0,4).map((snap)=>`<div class="recovery-row"><button class="list-row-main" data-action="restore-recovery" data-id="${esc(snap.id)}"><div class="list-row-title">${esc(snap.label)}</div><div class="list-row-meta">${new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'short'}).format(new Date(snap.createdAt))} · ${(snap.sizeEstimate/1024).toFixed(0)} KB</div></button></div>`).join('')}</div>` : ''}
+      <details><summary>Sync readiness</summary><div class="small muted" style="margin-top:8px">Device ID: ${esc(state.dataHealth?.deviceId || 'Unavailable')}<br>Change journal: ${state.dataHealth?.pendingChanges ?? 0} entries<br>Tombstones: ${state.dataHealth?.tombstoneCount ?? 0}</div></details>
       <button class="btn danger" data-action="clear-history">Clear history</button>
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">App</h2>
       <button class="btn" data-action="install">Install PWA</button>
-      <div class="small muted">Timer v1.5.0 · local-first · offline capable</div>
+      <div class="small muted">Timer v1.6.0 · local-first · offline capable</div>
     </section>`;
 }
 
@@ -1595,46 +1609,230 @@ function exportHistoryCsv() {
   toast(`Exported ${sessions.length} session${sessions.length === 1 ? '' : 's'}.`);
 }
 
-async function exportBackup() {
-  const data = await state.db.exportData();
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `timer-backup-${new Date().toISOString().slice(0,10)}.json`;
-  document.body.append(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  toast('Backup exported.');
+function backupSelectionFromSheet(root = document) {
+  return {
+    routines: root.querySelector('[data-backup-part="routines"]')?.checked !== false,
+    blocks: root.querySelector('[data-backup-part="blocks"]')?.checked !== false,
+    cueProfiles: root.querySelector('[data-backup-part="cueProfiles"]')?.checked !== false,
+    customSounds: root.querySelector('[data-backup-part="customSounds"]')?.checked !== false,
+    sessions: root.querySelector('[data-backup-part="sessions"]')?.checked !== false,
+    settings: root.querySelector('[data-backup-part="settings"]')?.checked !== false
+  };
+}
+
+function showBackupExportSheet() {
+  showSheet('Create Backup', `<div class="stack">
+    <div class="small muted">Choose what to include. Full backups are recommended for disaster recovery.</div>
+    <div class="backup-parts">
+      ${[['routines','Routines'],['blocks','Reusable blocks'],['cueProfiles','Cue profiles'],['customSounds','Custom sounds'],['sessions','Session history'],['settings','Settings']].map(([key,label]) => `<label class="check-row"><input type="checkbox" data-backup-part="${key}" checked> <span>${label}</span></label>`).join('')}
+    </div>
+    <div class="field"><label for="backup-password">Password encryption <span class="muted">(optional)</span></label><input id="backup-password" class="input" type="password" autocomplete="new-password" placeholder="Leave blank for normal backup"><div class="tiny">Encrypted backups cannot be recovered if the password is lost.</div></div>
+    <button class="btn primary big" data-action="confirm-export-backup">Export backup</button>
+  </div>`);
+}
+
+async function exportBackupConfigured() {
+  const sheet = $('#sheet-root');
+  const selection = backupSelectionFromSheet(sheet);
+  if (!Object.values(selection).some(Boolean)) return toast('Select at least one backup category.');
+  const password = $('#backup-password', sheet)?.value || '';
+  try {
+    const payload = await state.db.exportData({ selection });
+    const archive = await createBackupArchive(payload, { appVersion: APP_VERSION, selection, kind: 'full-backup' });
+    const output = password ? await encryptBackupArchive(archive, password) : archive;
+    const encrypted = Boolean(password);
+    const ext = encrypted ? 'timerbackup.enc.json' : 'timerbackup';
+    downloadTextFile(`timer-backup-${new Date().toISOString().slice(0,10)}.${ext}`, JSON.stringify(output, null, 2), 'application/json');
+    state.settings.lastExternalBackupAt = Date.now();
+    await saveSettings();
+    closeSheet();
+    toast(`${encrypted ? 'Encrypted b' : 'B'}ackup exported and verified.`);
+  } catch (error) { toast(error.message || 'Backup could not be created.', 5000); }
+}
+
+function collectBlockIds(nodes = [], out = new Set()) {
+  walkCustomNodes(nodes, (node) => { if (node?.type === 'block' && node.blockId) out.add(node.blockId); });
+  return out;
+}
+
+function collectSoundRefsFromObject(value, out = new Set()) {
+  if (!value || typeof value !== 'object') return out;
+  for (const current of Object.values(value)) {
+    if (typeof current === 'string' && current.startsWith('custom:')) out.add(current.slice(7));
+    else if (current && typeof current === 'object') collectSoundRefsFromObject(current, out);
+  }
+  return out;
+}
+
+async function exportRoutinePackage(routineId) {
+  const routine = state.routines.find((item) => item.id === routineId);
+  if (!routine) return toast('Routine not found.');
+  const blockIds = new Set();
+  const visitBlock = (id) => {
+    if (blockIds.has(id)) return;
+    const block = state.blocks.find((item) => item.id === id);
+    if (!block) return;
+    blockIds.add(id);
+    for (const nested of collectBlockIds(block.nodes || [])) visitBlock(nested);
+  };
+  if (routine.type === 'custom') for (const id of collectBlockIds(routine.config?.nodes || [])) visitBlock(id);
+  const blocks = state.blocks.filter((block) => blockIds.has(block.id));
+  const profileIds = new Set();
+  if (routine.cueOverrides?.profileId && !BUILTIN_CUE_PROFILES[routine.cueOverrides.profileId]) profileIds.add(routine.cueOverrides.profileId);
+  const cueProfiles = state.cueProfiles.filter((profile) => profileIds.has(profile.id));
+  const soundIds = collectSoundRefsFromObject(routine);
+  blocks.forEach((block) => collectSoundRefsFromObject(block, soundIds));
+  cueProfiles.forEach((profile) => collectSoundRefsFromObject(profile, soundIds));
+  const full = await state.db.exportData({ selection: { routines: false, blocks: false, cueProfiles: false, customSounds: true, sessions: false, settings: false } });
+  const customSounds = (full.customSounds || []).filter((sound) => soundIds.has(sound.id));
+  const pkg = { format: 'thiepn-timer-routine-package', version: 1, exportedAt: new Date().toISOString(), routine: structuredClone(routine), blocks, cueProfiles, customSounds };
+  const archive = await createBackupArchive(pkg, { appVersion: APP_VERSION, kind: 'routine-package' });
+  const safe = (routine.title || 'routine').replace(/[^a-z0-9-_]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'routine';
+  downloadTextFile(`${safe}.timer.json`, JSON.stringify(archive, null, 2), 'application/json');
+  toast('Portable routine package exported.');
+}
+
+function backupPreviewCounts(payload) {
+  if (isRoutinePackage(payload)) return { routines: payload.routine ? 1 : 0, blocks: payload.blocks?.length || 0, cueProfiles: payload.cueProfiles?.length || 0, customSounds: payload.customSounds?.length || 0, sessions: 0 };
+  return backupCounts(payload);
+}
+
+function validateIncomingPayload(payload) {
+  if (isRoutinePackage(payload)) {
+    payload = { format: 'thiepn-timer-backup', version: 4, exportedAt: payload.exportedAt, selection: { routines: true, blocks: true, cueProfiles: true, customSounds: true, sessions: false, settings: false }, routines: payload.routine ? [payload.routine] : [], blocks: payload.blocks || [], cueProfiles: payload.cueProfiles || [], customSounds: payload.customSounds || [], sessions: [], settings: null };
+  }
+  if (!payload || payload.format !== 'thiepn-timer-backup' || ![1,2,3,4].includes(Number(payload.version)) || !Array.isArray(payload.routines) || !Array.isArray(payload.sessions)) throw new Error('Unsupported or incomplete Timer backup.');
+  const quarantine = [];
+  const validSounds = [];
+  const sourceSounds = payload.version >= 3 && Array.isArray(payload.customSounds) ? payload.customSounds : [];
+  for (const sound of sourceSounds) {
+    if (!sound?.id || !sound?.title || typeof sound.dataBase64 !== 'string' || sound.dataBase64.length > 3 * 1024 * 1024) quarantine.push({ source: 'backup', entityType: 'customSound', entityId: sound?.id || '', reason: 'Invalid or oversized custom sound', record: sound });
+    else validSounds.push(sound);
+  }
+  const candidateBlocks = payload.version >= 2 && Array.isArray(payload.blocks) ? payload.blocks.filter((block) => block?.id && block?.title && Array.isArray(block.nodes)) : [];
+  const validBlocks = [];
+  for (const block of candidateBlocks) {
+    try { buildCustomRoutine({ title: block.title, nodes: block.nodes, parameters: block.parameters || [], blocks: candidateBlocks }); validBlocks.push(block); }
+    catch (error) { quarantine.push({ source: 'backup', entityType: 'block', entityId: block.id, reason: error.issues?.[0]?.message || error.message || 'Reusable block cannot compile', record: block }); }
+  }
+  const validRoutines = [];
+  for (const routine of payload.routines) {
+    if (!routine?.id || !routine?.type || !routine?.config || !BUILDER_META[routine.type]) { quarantine.push({ source: 'backup', entityType: 'routine', entityId: routine?.id || '', reason: 'Unsupported routine', record: routine }); continue; }
+    try { planFromType(routine.type, routine.config, { blocks: validBlocks }); validRoutines.push(routine); }
+    catch (error) { quarantine.push({ source: 'backup', entityType: 'routine', entityId: routine.id, reason: error.issues?.[0]?.message || error.message || 'Routine cannot compile', record: routine }); }
+  }
+  const validSessions = [];
+  for (const session of payload.sessions) {
+    if (!session?.id || !Number.isFinite(session?.startedAt)) quarantine.push({ source: 'backup', entityType: 'session', entityId: session?.id || '', reason: 'Invalid session record', record: session });
+    else validSessions.push(session);
+  }
+  const profiles = payload.version >= 3 && Array.isArray(payload.cueProfiles) ? payload.cueProfiles.filter((profile) => profile?.id && profile?.title) : [];
+  const cleaned = { ...payload, version: 4, routines: validRoutines, blocks: validBlocks, cueProfiles: profiles, customSounds: validSounds, sessions: validSessions, settings: payload.settings || null };
+  return { payload: cleaned, quarantine };
+}
+
+async function parseBackupFile(file) {
+  if (!file || file.size > 30 * 1024 * 1024) throw new Error('Backup file is too large.');
+  let parsed = JSON.parse(await file.text());
+  if (isEncryptedBackup(parsed)) {
+    const password = prompt('Backup password');
+    if (password == null) throw new Error('Import cancelled.');
+    parsed = await decryptBackupArchive(parsed, password);
+  }
+  let manifest = null;
+  if (isBackupArchive(parsed)) {
+    const verified = await verifyBackupArchive(parsed);
+    manifest = verified.manifest;
+    parsed = parsed.payload;
+  } else if (!isLegacyBackup(parsed) && !isRoutinePackage(parsed)) throw new Error('Unsupported Timer backup or routine package.');
+  const validated = validateIncomingPayload(parsed);
+  return { ...validated, manifest, fileName: file.name, packageMode: isRoutinePackage(parsed) || manifest?.kind === 'routine-package' };
+}
+
+function showRestorePreview() {
+  const pending = state.pendingRestore;
+  if (!pending) return;
+  const counts = backupPreviewCounts(pending.payload);
+  const packageMode = pending.packageMode;
+  showSheet(packageMode ? 'Import Routine Package' : 'Restore Preview', `<div class="stack">
+    <div class="backup-summary-grid">${Object.entries(counts).map(([key,value]) => `<div class="metric"><strong>${value}</strong><span>${esc(key)}</span></div>`).join('')}</div>
+    ${pending.manifest ? `<div class="data-integrity-ok">✓ SHA-256 integrity verified</div>` : `<div class="small muted">Legacy backup format · content validated before restore.</div>`}
+    ${pending.quarantine.length ? `<div class="data-warning">${pending.quarantine.length} invalid item${pending.quarantine.length === 1 ? '' : 's'} will be quarantined instead of imported.</div>` : ''}
+    <div class="backup-parts">
+      ${[['routines','Routines',counts.routines],['blocks','Reusable blocks',counts.blocks],['cueProfiles','Cue profiles',counts.cueProfiles],['customSounds','Custom sounds',counts.customSounds],['sessions','History',counts.sessions],['settings','Settings',pending.payload.settings ? 1 : 0]].map(([key,label,count]) => `<label class="check-row ${count ? '' : 'disabled'}"><input type="checkbox" data-restore-part="${key}" ${count ? 'checked' : 'disabled'}> <span>${label}</span></label>`).join('')}
+    </div>
+    ${packageMode ? '' : `<div class="field"><label>Restore strategy</label><select id="restore-strategy" class="select"><option value="merge">Merge with current data</option><option value="replace">Replace selected categories</option></select></div>`}
+    <button class="btn primary big" data-action="apply-restore">${packageMode ? 'Import package' : 'Apply restore'}</button>
+  </div>`);
 }
 
 async function importBackupFile(file) {
   try {
-    if (!file || file.size > 25 * 1024 * 1024) throw new Error('Backup file is too large.');
-    const data = JSON.parse(await file.text());
-    if (!data || data.format !== 'thiepn-timer-backup' || ![1, 2, 3].includes(data.version) || !Array.isArray(data.routines) || !Array.isArray(data.sessions)) throw new Error('Unsupported or incomplete backup.');
-    const blocks = data.version >= 2 && Array.isArray(data.blocks) ? data.blocks : [];
-    const importedSounds = data.version >= 3 && Array.isArray(data.customSounds) ? data.customSounds : [];
-    for (const sound of importedSounds) {
-      if (!sound?.id || !sound?.title || typeof sound.dataBase64 !== 'string' || sound.dataBase64.length > 3 * 1024 * 1024) throw new Error('Backup contains an invalid or oversized custom cue sound.');
-    }
-    for (const block of blocks) {
-      if (!block?.id || !block?.title || !Array.isArray(block.nodes)) throw new Error('Backup contains an invalid reusable block.');
-      try { buildCustomRoutine({ title: block.title, nodes: block.nodes, parameters: block.parameters || [], blocks }); }
-      catch (error) { throw new Error(`Invalid reusable block “${block.title || block.id}”: ${error.issues?.[0]?.message || error.message || 'cannot compile'}`); }
-    }
-    for (const routine of data.routines) {
-      if (!routine?.id || !routine?.type || !routine?.config || !BUILDER_META[routine.type]) throw new Error('Backup contains an unsupported routine.');
-      try { planFromType(routine.type, routine.config, { blocks }); }
-      catch (error) { throw new Error(`Invalid routine “${routine.title || routine.id}”: ${error.issues?.[0]?.message || error.message || 'cannot compile'}`); }
-    }
-    if (!confirm('Import this backup and merge it with current data? Existing matching IDs may be replaced.')) return;
-    await state.db.importData(data, { replace: false });
-    state.settings = await state.db.loadSettings();
-    applyTheme();
-    await loadCollections();
-    render();
-    toast('Backup imported.');
-  } catch (e) { toast(e.message || 'Backup could not be imported.', 4200); }
+    state.pendingRestore = await parseBackupFile(file);
+    showRestorePreview();
+  } catch (error) { if (error.message !== 'Import cancelled.') toast(error.message || 'Backup could not be read.', 5000); }
+}
+
+async function applyPendingRestore() {
+  const pending = state.pendingRestore;
+  if (!pending) return;
+  const root = $('#sheet-root');
+  const selection = Object.fromEntries(['routines','blocks','cueProfiles','customSounds','sessions','settings'].map((key) => [key, Boolean(root.querySelector(`[data-restore-part="${key}"]`)?.checked)]));
+  const replace = !pending.packageMode && $('#restore-strategy', root)?.value === 'replace';
+  if (!Object.values(selection).some(Boolean)) return toast('Select at least one category to restore.');
+  let snapshot = null;
+  try {
+    snapshot = await state.db.createRecoverySnapshot({ kind: 'pre-restore', label: `Before restore · ${pending.fileName || 'backup'}` });
+    state.lastRestoreSnapshotId = snapshot.id;
+    await state.db.importData(pending.payload, { replace, selection, quarantine: pending.quarantine });
+    state.pendingRestore = null;
+    state.settings = await state.db.loadSettings(); applyTheme();
+    cue.clearCustomSoundCache();
+    await loadCollections(); await refreshDataResilience();
+    closeSheet(); render();
+    toast(`Restore complete.${pending.quarantine.length ? ` ${pending.quarantine.length} item(s) quarantined.` : ''}`, 4500);
+  } catch (error) {
+    if (snapshot?.id) await state.db.restoreRecoverySnapshot(snapshot.id).catch(() => {});
+    await loadCollections().catch(() => {}); await refreshDataResilience().catch(() => {});
+    toast(error.message || 'Restore failed and the previous local snapshot was restored.', 5500);
+  }
+}
+
+async function refreshDataResilience() {
+  [state.recoverySnapshots, state.quarantineItems, state.dataHealth, state.storageEstimate] = await Promise.all([
+    state.db.listRecoverySnapshots().catch(() => []), state.db.listQuarantine().catch(() => []), state.db.dataHealth().catch(() => null), storageEstimate()
+  ]);
+}
+
+async function restoreRecoverySnapshot(id) {
+  const target = state.recoverySnapshots.find((item) => item.id === id);
+  if (!target || !confirm(`Restore recovery snapshot “${target.label}”? Current data will be snapshotted first.`)) return;
+  let before = null;
+  try {
+    before = await state.db.createRecoverySnapshot({ kind: 'pre-restore', label: `Before recovery · ${target.label}` });
+    state.lastRestoreSnapshotId = before.id;
+    await state.db.restoreRecoverySnapshot(id);
+    state.settings = await state.db.loadSettings(); applyTheme(); cue.clearCustomSoundCache();
+    await loadCollections(); await refreshDataResilience(); render(); toast('Recovery snapshot restored.');
+  } catch (error) {
+    if (before?.id) await state.db.restoreRecoverySnapshot(before.id).catch(() => {});
+    toast(error.message || 'Recovery snapshot could not be restored.', 5000);
+  }
+}
+
+async function undoLastRestore() {
+  if (!state.lastRestoreSnapshotId) return toast('No restore is available to undo.');
+  try {
+    await state.db.restoreRecoverySnapshot(state.lastRestoreSnapshotId);
+    state.settings = await state.db.loadSettings(); applyTheme(); cue.clearCustomSoundCache();
+    await loadCollections(); await refreshDataResilience();
+    state.lastRestoreSnapshotId = null; render(); toast('Last restore was undone.');
+  } catch (error) { toast(error.message || 'Undo restore failed.', 5000); }
+}
+
+async function showQuarantine() {
+  await refreshDataResilience();
+  showSheet('Quarantined Data', `<div class="stack">${state.quarantineItems.length ? state.quarantineItems.map((item) => `<div class="card card-pad"><strong>${esc(item.entityType)}</strong><div class="small muted">${esc(item.entityId || 'Unknown ID')} · ${new Date(item.createdAt).toLocaleString()}</div><div style="margin-top:6px">${esc(item.reason)}</div></div>`).join('') : '<div class="empty">No quarantined records.</div>'}${state.quarantineItems.length ? '<button class="btn danger" data-action="clear-quarantine">Clear quarantine</button>' : ''}</div>`);
 }
 
 async function installApp() {
@@ -1664,7 +1862,9 @@ async function boot() {
   applyTheme();
   await loadCollections();
   state.storagePersistent = await requestPersistentStorage();
-  state.storageEstimate = await storageEstimate();
+  await refreshDataResilience();
+  state.db.ensureDailyRecoverySnapshot().then(refreshDataResilience).catch(() => {});
+  state.db.pruneTombstones().catch(() => {});
 
   const active = await state.db.getActive().catch(() => null);
   if (active?.snapshot && !['completed','cancelled'].includes(active.snapshot.status)) {
@@ -1897,8 +2097,16 @@ document.addEventListener('click', async (e) => {
     await scrubDeletedCustomSound(sound.id); await state.db.delete('customSounds', sound.id); cue.clearCustomSoundCache(sound.id); await loadCollections(); renderSettings(); toast('Custom sound deleted.'); return;
   }
   if (action === 'enable-notifications') { const p = await requestNotificationPermission(); toast(p === 'granted' ? 'Notifications enabled.' : `Notifications: ${p}`); if (p === 'granted') { state.settings.notifications = true; await saveSettings(); renderSettings(); } return; }
-  if (action === 'export-backup') return exportBackup();
+  if (action === 'export-backup') return showBackupExportSheet();
+  if (action === 'confirm-export-backup') return exportBackupConfigured();
   if (action === 'import-backup') return importFile.click();
+  if (action === 'apply-restore') return applyPendingRestore();
+  if (action === 'undo-last-restore') return undoLastRestore();
+  if (action === 'create-recovery') { const snap = await state.db.createRecoverySnapshot({ kind: 'manual', label: 'Manual recovery snapshot' }); await refreshDataResilience(); renderSettings(); toast(`Recovery snapshot created (${snap.counts.sessions} sessions).`); return; }
+  if (action === 'restore-recovery') return restoreRecoverySnapshot(btn.dataset.id);
+  if (action === 'show-quarantine') return showQuarantine();
+  if (action === 'clear-quarantine') { if (confirm('Clear quarantined records?')) { await state.db.clearQuarantine(); closeSheet(); await refreshDataResilience(); renderSettings(); toast('Quarantine cleared.'); } return; }
+  if (action === 'export-routine-package') return exportRoutinePackage(btn.dataset.id);
   if (action === 'clear-history') { if (confirm('Clear all session history? Saved routines will remain.')) { await state.db.clear('sessions'); await loadCollections(); renderHistory(); toast('History cleared.'); } return; }
   if (action === 'install') return installApp();
 
