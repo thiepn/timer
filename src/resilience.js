@@ -1,6 +1,33 @@
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+export const BACKUP_ENTITY_LIMITS = Object.freeze({
+  routines: 5000,
+  blocks: 5000,
+  cueProfiles: 1000,
+  customSounds: 500,
+  sessions: 100000
+});
+
+export function assertBackupEntityLimits(payload = {}, limits = BACKUP_ENTITY_LIMITS) {
+  for (const [key, limit] of Object.entries(limits)) {
+    const value = payload?.[key];
+    if (Array.isArray(value) && value.length > limit) throw new Error(`Backup contains too many ${key} records.`);
+  }
+  return true;
+}
+
+const MIN_PBKDF2_ITERATIONS = 100000;
+const MAX_PBKDF2_ITERATIONS = 1000000;
+
+function validateKdfIterations(value) {
+  const iterations = Number(value);
+  if (!Number.isInteger(iterations) || iterations < MIN_PBKDF2_ITERATIONS || iterations > MAX_PBKDF2_ITERATIONS) {
+    throw new Error('Encrypted backup uses an unsupported PBKDF2 work factor.');
+  }
+  return iterations;
+}
+
 function bytesToBase64(bytes) {
   bytes = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
   if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
@@ -108,6 +135,7 @@ async function derivePasswordKey(password, salt, iterations) {
 
 export async function encryptBackupArchive(archive, password, { iterations = 250000 } = {}) {
   if (!String(password || '').length) throw new Error('Backup password is required.');
+  iterations = validateKdfIterations(iterations);
   if (!globalThis.crypto?.getRandomValues) throw new Error('Secure random generation is unavailable.');
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -131,10 +159,11 @@ export async function decryptBackupArchive(envelope, password) {
   const ciphertext = base64ToBytes(envelope.ciphertextBase64);
   const checksum = await sha256Hex(ciphertext);
   if (envelope.ciphertextSha256 && checksum !== envelope.ciphertextSha256) throw new Error('Encrypted backup is damaged.');
+  const iterations = validateKdfIterations(envelope.kdf?.iterations);
   try {
     const salt = base64ToBytes(envelope.kdf?.saltBase64);
     const iv = base64ToBytes(envelope.cipher?.ivBase64);
-    const key = await derivePasswordKey(password, salt, Number(envelope.kdf?.iterations) || 250000);
+    const key = await derivePasswordKey(password, salt, iterations);
     const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
     return JSON.parse(decoder.decode(plaintext));
   } catch {
