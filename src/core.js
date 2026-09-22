@@ -19,7 +19,7 @@ export class FakeClock {
   set(wall, mono = wall) { this.wall = wall; this.mono = mono; }
 }
 
-export function step({ id, label, phase = 'work', durationMs, manual = false, timeCapMs, completionBehavior = 'advance', round, target, sourceNodeId, sectionPath, repeatPath, blockPath }) {
+export function step({ id, label, phase = 'work', durationMs, manual = false, timeCapMs, completionBehavior = 'advance', round, target, sourceNodeId, sectionPath, repeatPath, blockPath, generatorPath }) {
   return {
     id: id || uid('step'),
     label: String(label || (phase === 'rest' ? 'Rest' : 'Work')),
@@ -33,7 +33,8 @@ export function step({ id, label, phase = 'work', durationMs, manual = false, ti
     sourceNodeId,
     sectionPath: sectionPath ? structuredClone(sectionPath) : undefined,
     repeatPath: repeatPath ? structuredClone(repeatPath) : undefined,
-    blockPath: blockPath ? structuredClone(blockPath) : undefined
+    blockPath: blockPath ? structuredClone(blockPath) : undefined,
+    generatorPath: generatorPath ? structuredClone(generatorPath) : undefined
   };
 }
 
@@ -152,10 +153,220 @@ export function buildPyramid({ title = 'Pyramid', startMs = 20000, peakMs = 6000
   return { kind: 'timeline', title, steps, meta: { mode: 'pyramid' } };
 }
 
+
+const FORMULA_FUNCTIONS = new Set(['min', 'max', 'clamp', 'round', 'floor', 'ceil', 'abs']);
+const FORMULA_BUILTINS = new Set(['round', 'rounds', 'outerRound', 'outerRounds', 'index', 'level', 'cycle', 'cycles', 'base', 'previous']);
+
+export function formulaVariableName(parameter) {
+  if (!parameter) return '';
+  const explicit = String(parameter.variable || '').trim();
+  if (explicit) return explicit;
+  const words = String(parameter.label || '').trim().replace(/[^A-Za-z0-9_ ]+/g, ' ').split(/\s+/).filter(Boolean);
+  if (!words.length) return '';
+  let value = words[0].toLowerCase() + words.slice(1).map((word) => word[0].toUpperCase() + word.slice(1).toLowerCase()).join('');
+  if (!/^[A-Za-z_]/.test(value)) value = `p_${value}`;
+  if (FORMULA_BUILTINS.has(value) || FORMULA_FUNCTIONS.has(value)) value = `${value}Value`;
+  return value;
+}
+
+function tokenizeFormula(expression) {
+  expression = String(expression ?? '').trim();
+  if (!expression) throw new Error('Formula is empty.');
+  if (expression.length > 240) throw new Error('Formula is too long.');
+  const tokens = [];
+  let i = 0;
+  while (i < expression.length) {
+    const ch = expression[i];
+    if (/\s/.test(ch)) { i += 1; continue; }
+    if (/[0-9.]/.test(ch)) {
+      const start = i;
+      let dots = 0;
+      while (i < expression.length && /[0-9.]/.test(expression[i])) {
+        if (expression[i] === '.') dots += 1;
+        i += 1;
+      }
+      const raw = expression.slice(start, i);
+      if (dots > 1 || raw === '.' || !Number.isFinite(Number(raw))) throw new Error(`Invalid number “${raw}”.`);
+      tokens.push({ type: 'number', value: Number(raw) });
+      continue;
+    }
+    if (/[A-Za-z_]/.test(ch)) {
+      const start = i++;
+      while (i < expression.length && /[A-Za-z0-9_]/.test(expression[i])) i += 1;
+      tokens.push({ type: 'identifier', value: expression.slice(start, i) });
+      continue;
+    }
+    if ('+-*/%(),'.includes(ch)) { tokens.push({ type: ch, value: ch }); i += 1; continue; }
+    throw new Error(`Unsupported formula character “${ch}”.`);
+  }
+  if (tokens.length > 180) throw new Error('Formula is too complex.');
+  return tokens;
+}
+
+export function parseFormula(expression) {
+  const tokens = tokenizeFormula(expression);
+  let pos = 0;
+  let depth = 0;
+  const peek = () => tokens[pos];
+  const take = (type) => {
+    const token = tokens[pos];
+    if (!token || token.type !== type) throw new Error(`Expected “${type}”.`);
+    pos += 1;
+    return token;
+  };
+  const parsePrimary = () => {
+    if (++depth > 32) throw new Error('Formula nesting is too deep.');
+    const token = peek();
+    let node;
+    if (!token) throw new Error('Formula ended unexpectedly.');
+    if (token.type === 'number') { pos += 1; node = { type: 'number', value: token.value }; }
+    else if (token.type === 'identifier') {
+      pos += 1;
+      const name = token.value;
+      if (peek()?.type === '(') {
+        if (!FORMULA_FUNCTIONS.has(name)) throw new Error(`Unsupported formula function “${name}”.`);
+        take('(');
+        const args = [];
+        if (peek()?.type !== ')') {
+          while (true) {
+            args.push(parseExpression());
+            if (peek()?.type !== ',') break;
+            take(',');
+          }
+        }
+        take(')');
+        node = { type: 'call', name, args };
+      } else node = { type: 'variable', name };
+    } else if (token.type === '(') {
+      take('('); node = parseExpression(); take(')');
+    } else throw new Error(`Unexpected token “${token.value}”.`);
+    depth -= 1;
+    return node;
+  };
+  const parseUnary = () => {
+    const token = peek();
+    if (token?.type === '+' || token?.type === '-') { pos += 1; return { type: 'unary', op: token.type, value: parseUnary() }; }
+    return parsePrimary();
+  };
+  const parseMul = () => {
+    let left = parseUnary();
+    while (['*','/','%'].includes(peek()?.type)) {
+      const op = tokens[pos++].type;
+      left = { type: 'binary', op, left, right: parseUnary() };
+    }
+    return left;
+  };
+  const parseExpression = () => {
+    let left = parseMul();
+    while (['+','-'].includes(peek()?.type)) {
+      const op = tokens[pos++].type;
+      left = { type: 'binary', op, left, right: parseMul() };
+    }
+    return left;
+  };
+  const ast = parseExpression();
+  if (pos !== tokens.length) throw new Error(`Unexpected token “${tokens[pos].value}”.`);
+  return ast;
+}
+
+export function formulaIdentifiers(expression) {
+  const ast = parseFormula(expression);
+  const out = new Set();
+  const walk = (node) => {
+    if (node.type === 'variable') out.add(node.name);
+    if (node.type === 'binary') { walk(node.left); walk(node.right); }
+    if (node.type === 'unary') walk(node.value);
+    if (node.type === 'call') node.args.forEach(walk);
+  };
+  walk(ast);
+  return [...out];
+}
+
+export function evaluateFormulaAst(ast, variables = {}) {
+  let ops = 0;
+  const visit = (node) => {
+    if (++ops > 500) throw new Error('Formula exceeded operation limit.');
+    if (node.type === 'number') return node.value;
+    if (node.type === 'variable') {
+      if (!Object.prototype.hasOwnProperty.call(variables, node.name)) throw new Error(`Unknown formula variable “${node.name}”.`);
+      const value = Number(variables[node.name]);
+      if (!Number.isFinite(value)) throw new Error(`Formula variable “${node.name}” is not numeric.`);
+      return value;
+    }
+    if (node.type === 'unary') return node.op === '-' ? -visit(node.value) : visit(node.value);
+    if (node.type === 'binary') {
+      const a = visit(node.left), b = visit(node.right);
+      if (node.op === '+') return a + b;
+      if (node.op === '-') return a - b;
+      if (node.op === '*') return a * b;
+      if (node.op === '/') { if (b === 0) throw new Error('Division by zero.'); return a / b; }
+      if (node.op === '%') { if (b === 0) throw new Error('Modulo by zero.'); return a % b; }
+    }
+    if (node.type === 'call') {
+      const args = node.args.map(visit);
+      if (node.name === 'min') { if (!args.length) throw new Error('min() needs a value.'); return Math.min(...args); }
+      if (node.name === 'max') { if (!args.length) throw new Error('max() needs a value.'); return Math.max(...args); }
+      if (node.name === 'clamp') { if (args.length !== 3) throw new Error('clamp() needs value, min, max.'); return clamp(args[0], args[1], args[2]); }
+      if (node.name === 'round') { if (args.length !== 1) throw new Error('round() needs one value.'); return Math.round(args[0]); }
+      if (node.name === 'floor') { if (args.length !== 1) throw new Error('floor() needs one value.'); return Math.floor(args[0]); }
+      if (node.name === 'ceil') { if (args.length !== 1) throw new Error('ceil() needs one value.'); return Math.ceil(args[0]); }
+      if (node.name === 'abs') { if (args.length !== 1) throw new Error('abs() needs one value.'); return Math.abs(args[0]); }
+    }
+    throw new Error('Invalid formula node.');
+  };
+  const value = visit(ast);
+  if (!Number.isFinite(value)) throw new Error('Formula did not produce a finite number.');
+  return value;
+}
+
+export function evaluateFormula(expression, variables = {}) {
+  return evaluateFormulaAst(parseFormula(expression), variables);
+}
+
+export function validateFormula(expression, allowedVariables = []) {
+  try {
+    const ids = formulaIdentifiers(expression);
+    const allowed = new Set([...FORMULA_BUILTINS, ...allowedVariables]);
+    const unknown = ids.filter((id) => !allowed.has(id));
+    if (unknown.length) return { ok: false, error: `Unknown formula variable “${unknown[0]}”.` };
+    return { ok: true };
+  } catch (error) { return { ok: false, error: error.message || 'Invalid formula.' }; }
+}
+
+function hashSeed(input) {
+  let h = 2166136261 >>> 0;
+  for (const ch of String(input ?? 'seed')) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+
+export function createSeededRandom(seed = 'seed') {
+  let a = hashSeed(seed) || 1;
+  return () => {
+    a += 0x6D2B79F5;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function parameterFormulaVariables(parameters = [], values = {}) {
+  const out = {};
+  for (const parameter of parameters || []) {
+    if (!['duration', 'number'].includes(parameter.type)) continue;
+    const name = formulaVariableName(parameter);
+    if (!name) continue;
+    const raw = values[parameter.id];
+    out[name] = parameter.type === 'duration' ? Number(raw) / 1000 : Number(raw);
+  }
+  return out;
+}
+
 export function validateCustomParameters(parameters = [], { scope = 'Routine' } = {}) {
   const issues = [];
   const ids = new Set();
   const labels = new Set();
+  const variables = new Set();
   const add = (code, message, parameterId) => issues.push({ code, message, parameterId });
   if (!Array.isArray(parameters)) return [{ code: 'INVALID_PARAMETERS', message: `${scope} parameters are invalid.` }];
 
@@ -172,6 +383,14 @@ export function validateCustomParameters(parameters = [], { scope = 'Routine' } 
     if (!label) add('MISSING_PARAMETER_LABEL', `${scope} parameter needs a name.`, parameter.id);
     else if (labels.has(label.toLowerCase())) add('DUPLICATE_PARAMETER_LABEL', `${scope} contains duplicate parameter name “${label}”.`, parameter.id);
     else labels.add(label.toLowerCase());
+
+    if (parameter.type !== 'choice') {
+      const variable = formulaVariableName(parameter);
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable)) add('INVALID_PARAMETER_VARIABLE', `${label || 'Parameter'} has an invalid formula variable name.`, parameter.id);
+      else if (FORMULA_BUILTINS.has(variable) || FORMULA_FUNCTIONS.has(variable)) add('RESERVED_PARAMETER_VARIABLE', `${label || 'Parameter'} uses reserved formula variable “${variable}”.`, parameter.id);
+      else if (variables.has(variable)) add('DUPLICATE_PARAMETER_VARIABLE', `${scope} contains duplicate formula variable “${variable}”.`, parameter.id);
+      else variables.add(variable);
+    }
 
     if (!['duration', 'number', 'choice'].includes(parameter.type)) {
       add('INVALID_PARAMETER_TYPE', `${label || 'Parameter'} has an unsupported type.`, parameter.id);
@@ -230,15 +449,30 @@ export function resolveCustomParameterValues(parameters = [], values = {}) {
   return resolved;
 }
 
-export function collectCustomParameterRefs(nodes = []) {
+export function collectCustomParameterRefs(nodes = [], parameters = []) {
   const refs = new Set();
+  const byVariable = new Map((parameters || []).filter((parameter) => ['duration', 'number'].includes(parameter.type)).map((parameter) => [formulaVariableName(parameter), parameter.id]));
+  const collectFormula = (expression) => {
+    if (!String(expression || '').trim()) return;
+    try {
+      for (const name of formulaIdentifiers(expression)) {
+        const id = byVariable.get(name);
+        if (id) refs.add(id);
+      }
+    } catch {}
+  };
   const walk = (children) => {
     for (const node of children || []) {
       if (!node || typeof node !== 'object') continue;
       if (node.durationParamId) refs.add(node.durationParamId);
       if (node.timeCapParamId) refs.add(node.timeCapParamId);
       if (node.countParamId) refs.add(node.countParamId);
-      if (node.type === 'repeat' || node.type === 'section') walk(node.children);
+      collectFormula(node.durationFormula);
+      collectFormula(node.timeCapFormula);
+      collectFormula(node.countFormula);
+      collectFormula(node.workFormula);
+      collectFormula(node.restFormula);
+      if (node.type === 'repeat' || node.type === 'section' || node.type === 'random') walk(node.children);
     }
   };
   walk(nodes);
@@ -249,6 +483,7 @@ function validateCustomSource({ title, nodes, parameters, blocksById, scope = 'R
   const issues = validateCustomParameters(parameters, { scope });
   const seenIds = new Set();
   const parameterMap = new Map((parameters || []).map((parameter) => [parameter.id, parameter]));
+  const formulaVars = (parameters || []).filter((parameter) => ['duration', 'number'].includes(parameter.type)).map(formulaVariableName).filter(Boolean);
   const add = (code, message, path = []) => issues.push({ code, message, path });
   const requireParameter = (id, type, label, path) => {
     if (!id) return false;
