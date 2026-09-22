@@ -19,7 +19,7 @@ export class FakeClock {
   set(wall, mono = wall) { this.wall = wall; this.mono = mono; }
 }
 
-export function step({ id, label, phase = 'work', durationMs, manual = false, timeCapMs, completionBehavior = 'advance', round, target, sourceNodeId, sectionPath, repeatPath, blockPath, generatorPath }) {
+export function step({ id, label, phase = 'work', durationMs, manual = false, timeCapMs, completionBehavior = 'advance', round, target, sourceNodeId, sectionPath, repeatPath, blockPath, generatorPath, cueOverrides }) {
   return {
     id: id || uid('step'),
     label: String(label || (phase === 'rest' ? 'Rest' : 'Work')),
@@ -34,7 +34,8 @@ export function step({ id, label, phase = 'work', durationMs, manual = false, ti
     sectionPath: sectionPath ? structuredClone(sectionPath) : undefined,
     repeatPath: repeatPath ? structuredClone(repeatPath) : undefined,
     blockPath: blockPath ? structuredClone(blockPath) : undefined,
-    generatorPath: generatorPath ? structuredClone(generatorPath) : undefined
+    generatorPath: generatorPath ? structuredClone(generatorPath) : undefined,
+    cueOverrides: cueOverrides ? structuredClone(cueOverrides) : undefined
   };
 }
 
@@ -795,7 +796,8 @@ export function buildCustomRoutine({ title = 'Custom Routine', nodes = [], param
             label: node.workLabel || 'Work',
             phase: PHASES.includes(node.workPhase) ? node.workPhase : 'work',
             durationMs: Math.round(workSeconds * 1000),
-            target: node.target || undefined
+            target: node.target || undefined,
+            cueOverrides: node.workCueOverrides || node.cueOverrides
           }));
           const hasRest = String(node.restFormula || '').trim() || Number(node.restBaseMs) > 0;
           if (hasRest && (r < count || node.finalRest)) {
@@ -811,7 +813,8 @@ export function buildCustomRoutine({ title = 'Custom Routine', nodes = [], param
               id: customRuntimeId(`${node.id}:rest`, context.repeatPath, context.blockPath, generatorPath),
               label: node.restLabel || 'Rest',
               phase: PHASES.includes(node.restPhase) ? node.restPhase : 'rest',
-              durationMs: Math.round(restSeconds * 1000)
+              durationMs: Math.round(restSeconds * 1000),
+              cueOverrides: node.restCueOverrides
             }));
           }
         }
@@ -868,6 +871,7 @@ export function buildCustomRoutine({ title = 'Custom Routine', nodes = [], param
         repeatPath: context.repeatPath,
         blockPath: context.blockPath,
         generatorPath: context.generatorPath,
+        cueOverrides: node.cueOverrides,
         round: innerRound ? { current: innerRound.current, total: innerRound.total } : undefined
       };
       if (node.type === 'manual') {
