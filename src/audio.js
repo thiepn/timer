@@ -426,15 +426,47 @@ export async function requestNotificationPermission() {
   catch { return 'denied'; }
 }
 
-export async function showCompletionNotification(title, body = 'Timer complete') {
+async function showTimerNotification(title, options = {}) {
   if (!('Notification' in globalThis) || Notification.permission !== 'granted') return false;
   try {
     const reg = await navigator.serviceWorker?.ready;
     if (reg?.showNotification) {
-      await reg.showNotification(title, { body, tag: 'timer-complete', icon: './icon.svg', badge: './icon.svg', renotify: true });
+      await reg.showNotification(title, {
+        icon: './icon.svg', badge: './icon.svg',
+        ...options,
+        data: { ...(options.data || {}) }
+      });
       return true;
     }
-    new Notification(title, { body, icon: './icon.svg' });
+    new Notification(title, options);
+    return true;
+  } catch { return false; }
+}
+
+export async function showCompletionNotification(title, body = 'Timer complete', { sessionId } = {}) {
+  return showTimerNotification(title, {
+    body,
+    tag: sessionId ? `timer-complete:${sessionId}` : 'timer-complete',
+    renotify: true,
+    data: { url: sessionId ? `./?launch=session&id=${encodeURIComponent(sessionId)}` : './?launch=active', type: 'completion', sessionId }
+  });
+}
+
+export async function showActiveSessionNotification(title, body = 'Timer is running') {
+  return showTimerNotification(title, {
+    body,
+    tag: 'timer-active',
+    silent: true,
+    renotify: false,
+    data: { url: './?launch=active', type: 'active' }
+  });
+}
+
+export async function closeTimerNotification(tag = 'timer-active') {
+  try {
+    const reg = await navigator.serviceWorker?.ready;
+    const notifications = await reg?.getNotifications?.({ tag });
+    for (const notification of notifications || []) notification.close();
     return true;
   } catch { return false; }
 }
