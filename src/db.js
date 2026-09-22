@@ -1,5 +1,5 @@
 const DB_NAME = 'thiepn-timer';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 const request = (req) => new Promise((resolve, reject) => {
   req.onsuccess = () => resolve(req.result);
@@ -12,6 +12,26 @@ const transactionDone = (tx) => new Promise((resolve, reject) => {
   tx.onerror = () => reject(tx.error || new Error('IndexedDB transaction failed'));
 });
 
+function arrayBufferToBase64(value) {
+  const bytes = value instanceof ArrayBuffer ? new Uint8Array(value) : value instanceof Uint8Array ? value : new Uint8Array(value?.buffer || []);
+  if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  return btoa(binary);
+}
+
+function base64ToArrayBuffer(value) {
+  if (typeof Buffer !== 'undefined') {
+    const buf = Buffer.from(String(value || ''), 'base64');
+    return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  }
+  const binary = atob(String(value || ''));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
 export const defaultSettings = {
   theme: 'dark',
   accent: 'blue',
@@ -22,6 +42,17 @@ export const defaultSettings = {
   voice: false,
   haptics: true,
   countdownCues: true,
+  cueProfileId: 'standard',
+  soundPack: 'clean',
+  soundWork: '', soundRest: '', soundPrepare: '', soundCountdown: '', soundWarning: '', soundHalfway: '', soundFinish: '',
+  warningSeconds: 10,
+  halfwayCue: false,
+  voiceVerbosity: 'normal',
+  voiceRate: 1.05,
+  voiceVolume: 0.9,
+  voiceURI: '',
+  masterVolume: 1,
+  profileGain: 1,
   notifications: false,
   quickPresets: [30000, 60000, 90000, 120000, 180000, 300000],
   startPresetImmediately: false,
@@ -36,7 +67,7 @@ export class TimerDB {
 
   async open() {
     if (!('indexedDB' in globalThis)) {
-      this.memory = { routines: new Map(), blocks: new Map(), sessions: new Map(), settings: new Map(), active: new Map() };
+      this.memory = { routines: new Map(), blocks: new Map(), cueProfiles: new Map(), customSounds: new Map(), sessions: new Map(), settings: new Map(), active: new Map() };
       return this;
     }
     const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -55,6 +86,16 @@ export class TimerDB {
       }
       if (!db.objectStoreNames.contains('blocks')) {
         const s = db.createObjectStore('blocks', { keyPath: 'id' });
+        s.createIndex('updatedAt', 'updatedAt');
+        s.createIndex('title', 'title');
+      }
+      if (!db.objectStoreNames.contains('cueProfiles')) {
+        const s = db.createObjectStore('cueProfiles', { keyPath: 'id' });
+        s.createIndex('updatedAt', 'updatedAt');
+        s.createIndex('title', 'title');
+      }
+      if (!db.objectStoreNames.contains('customSounds')) {
+        const s = db.createObjectStore('customSounds', { keyPath: 'id' });
         s.createIndex('updatedAt', 'updatedAt');
         s.createIndex('title', 'title');
       }
@@ -147,31 +188,69 @@ export class TimerDB {
     });
   }
 
+  async saveCueProfile(profile) {
+    const now = Date.now();
+    const previous = profile?.id ? await this.get('cueProfiles', profile.id).catch(() => null) : null;
+    return this.put('cueProfiles', {
+      ...profile,
+      createdAt: previous?.createdAt || profile?.createdAt || now,
+      updatedAt: now
+    });
+  }
+
+  async saveCustomSound(sound) {
+    const now = Date.now();
+    const previous = sound?.id ? await this.get('customSounds', sound.id).catch(() => null) : null;
+    return this.put('customSounds', {
+      ...sound,
+      createdAt: previous?.createdAt || sound?.createdAt || now,
+      updatedAt: now
+    });
+  }
+
   async exportData() {
-    const [routines, blocks, sessions, settings] = await Promise.all([
-      this.all('routines'), this.all('blocks'), this.all('sessions'), this.loadSettings()
+    const [routines, blocks, cueProfiles, customSounds, sessions, settings] = await Promise.all([
+      this.all('routines'), this.all('blocks'), this.all('cueProfiles'), this.all('customSounds'), this.all('sessions'), this.loadSettings()
     ]);
+    const portableSounds = customSounds.map((sound) => ({
+      ...sound,
+      data: undefined,
+      dataBase64: sound.data ? arrayBufferToBase64(sound.data) : ''
+    }));
     return {
       format: 'thiepn-timer-backup',
-      version: 2,
+      version: 3,
       exportedAt: new Date().toISOString(),
       routines,
       blocks,
+      cueProfiles,
+      customSounds: portableSounds,
       sessions,
       settings
     };
   }
 
   async importData(data, { replace = false } = {}) {
-    if (!data || data.format !== 'thiepn-timer-backup' || ![1, 2].includes(data.version)) throw new Error('Unsupported backup format.');
+    if (!data || data.format !== 'thiepn-timer-backup' || ![1, 2, 3].includes(data.version)) throw new Error('Unsupported backup format.');
     if (!Array.isArray(data.routines) || !Array.isArray(data.sessions) || !data.settings) throw new Error('Backup is incomplete.');
     const blocks = data.version >= 2 && Array.isArray(data.blocks) ? data.blocks : [];
+    const cueProfiles = data.version >= 3 && Array.isArray(data.cueProfiles) ? data.cueProfiles : [];
+    const customSounds = data.version >= 3 && Array.isArray(data.customSounds) ? data.customSounds : [];
     if (replace) {
-      await Promise.all(['routines', 'blocks', 'sessions'].map((s) => this.clear(s)));
+      await Promise.all(['routines', 'blocks', 'cueProfiles', 'customSounds', 'sessions'].map((store) => this.clear(store)));
     }
     for (const block of blocks) {
       if (!block?.id || !block?.title || !Array.isArray(block?.nodes)) continue;
       await this.put('blocks', block);
+    }
+    for (const profile of cueProfiles) {
+      if (!profile?.id || !profile?.title) continue;
+      await this.put('cueProfiles', profile);
+    }
+    for (const sound of customSounds) {
+      if (!sound?.id || !sound?.title || !sound?.dataBase64) continue;
+      const { dataBase64, ...rest } = sound;
+      await this.put('customSounds', { ...rest, data: base64ToArrayBuffer(dataBase64) });
     }
     for (const routine of data.routines) {
       if (!routine?.id || !routine?.type || !routine?.config) continue;
