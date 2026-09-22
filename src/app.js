@@ -567,7 +567,8 @@ function renderCustomTree(nodes = [], depth = 0, prefix = []) {
       <div class="custom-node-head"><span class="node-kind">${manual ? 'Manual' : 'Timed'}</span>${controls}</div>
       <input class="input" value="${esc(node.label || '')}" data-custom-path="${path}" data-custom-field="label" aria-label="Step label">
       <div class="custom-leaf-grid"><select class="select" data-custom-path="${path}" data-custom-field="phase" aria-label="Step phase">${customPhaseOptions(node.phase || 'work')}</select><label class="custom-number-label">${manual ? 'Cap source' : 'Duration source'}<select class="select" data-custom-path="${path}" data-custom-field="${manual ? 'timeCapParamId' : 'durationParamId'}">${customParameterOptions('duration', bound, manual ? 'Fixed / no cap' : 'Fixed duration')}</select></label></div>
-      ${bound ? `<div class="binding-value">Uses <strong>${esc(customParameterById(bound)?.label || 'missing parameter')}</strong></div>` : `<label class="custom-number-label">${manual ? 'Cap seconds (0 = none)' : 'Seconds'}<input class="input" type="number" min="0" step="1" value="${secondsValue}" data-custom-path="${path}" data-custom-field="${manual ? 'timeCapMs' : 'durationMs'}" data-custom-unit="seconds"></label>`}
+      ${bound ? `<div class="binding-value">Uses <strong>${esc(customParameterById(bound)?.label || 'missing parameter')}</strong></div>` : `<label class="custom-number-label">${manual ? 'Base cap seconds (0 = none)' : 'Base seconds'}<input class="input" type="number" min="0" step="1" value="${secondsValue}" data-custom-path="${path}" data-custom-field="${manual ? 'timeCapMs' : 'durationMs'}" data-custom-unit="seconds"></label>`}
+      <label class="custom-number-label">${manual ? 'Cap formula' : 'Duration formula'} <span class="tiny">optional; result is seconds</span><input class="input formula-input" value="${esc(formulaValue)}" data-custom-path="${path}" data-custom-field="${manual ? 'timeCapFormula' : 'durationFormula'}" placeholder="e.g. base + (round - 1) * 5"></label>
       <input class="input" value="${esc(node.target || '')}" data-custom-path="${path}" data-custom-field="target" placeholder="Target / note (optional)" aria-label="Step target">
     </div>`;
   }).join('');
@@ -581,6 +582,8 @@ function showCustomAddSheet(parentPath = '') {
     <button class="sheet-item" data-action="custom-add-kind" data-parent="${esc(parentPath)}" data-kind="manual"><div><strong>Manual step</strong><div class="small muted">Continue when you tap Done</div></div></button>
     <button class="sheet-item" data-action="custom-add-kind" data-parent="${esc(parentPath)}" data-kind="repeat"><div><strong>Repeat block</strong><div class="small muted">Nested repeated sequence</div></div></button>
     <button class="sheet-item" data-action="custom-add-kind" data-parent="${esc(parentPath)}" data-kind="section"><div><strong>Section</strong><div class="small muted">Named group for structure</div></div></button>
+    <button class="sheet-item" data-action="custom-add-kind" data-parent="${esc(parentPath)}" data-kind="progression"><div><strong>Progression generator</strong><div class="small muted">Formula-driven work/rest progression</div></div></button>
+    <button class="sheet-item" data-action="custom-add-kind" data-parent="${esc(parentPath)}" data-kind="random"><div><strong>Random generator</strong><div class="small muted">Seeded choose/shuffle pool</div></div></button>
     ${state.blocks.length ? `<button class="sheet-item" data-action="custom-block-picker" data-parent="${esc(parentPath)}" data-mode="linked"><div><strong>Linked reusable block</strong><div class="small muted">Future block revisions flow into this routine</div></div></button><button class="sheet-item" data-action="custom-block-picker" data-parent="${esc(parentPath)}" data-mode="copy"><div><strong>Copy reusable block</strong><div class="small muted">Insert independent concrete steps</div></div></button>` : ''}
     ${state.customClipboard ? `<button class="sheet-item" data-action="custom-paste" data-parent="${esc(parentPath)}"><div><strong>Paste copied item</strong><div class="small muted">Insert an independent copy</div></div></button>` : ''}
   </div>`);
@@ -598,7 +601,7 @@ function freshenCustomNodeIds(node) {
   const copy = structuredClone(node);
   const walk = (item) => {
     item.id = uid('node');
-    if (item.type === 'repeat' || item.type === 'section') (item.children || []).forEach(walk);
+    if (['repeat','section','random'].includes(item.type)) (item.children || []).forEach(walk);
   };
   walk(copy);
   return copy;
@@ -624,9 +627,14 @@ function insertCustomBlock(parentPath, blockId, mode) {
   const block = state.blocks.find((item) => item.id === blockId);
   if (!collection || !block) return toast('Reusable block not found.');
   if (mode === 'copy') {
-    const values = defaultParameterValues(block.parameters || []);
-    const materialized = materializeNodesWithValues(block.nodes, values).map(freshenCustomNodeIds);
-    collection.push(...materialized);
+    try {
+      const values = defaultParameterValues(block.parameters || []);
+      const plan = buildCustomRoutine({ title: block.title || 'Block', nodes: block.nodes || [], parameters: block.parameters || [], parameterValues: values, blocks: state.blocks, seed: 'block-copy' });
+      const materialized = plan.steps.map((item) => item.manual
+        ? { id: uid('node'), type: 'manual', label: item.label, phase: item.phase, timeCapMs: item.timeCapMs, target: item.target || '' }
+        : { id: uid('node'), type: 'timed', label: item.label, phase: item.phase, durationMs: item.durationMs, target: item.target || '' });
+      collection.push(...materialized);
+    } catch (error) { return toast(error.message || 'Reusable block could not be copied.', 4200); }
   } else {
     collection.push({ id: uid('node'), type: 'block', blockId: block.id, parameterValues: defaultParameterValues(block.parameters || []) });
   }
@@ -637,7 +645,7 @@ function insertCustomBlock(parentPath, blockId, mode) {
 function copyCustomNode(path) {
   const node = customNodeAt(path);
   if (!node) return;
-  const refs = new Set(collectCustomParameterRefs([node]));
+  const refs = new Set(collectCustomParameterRefs([node], state.builder.config.parameters || []));
   const parameters = (state.builder.config.parameters || []).filter((parameter) => refs.has(parameter.id)).map((parameter) => structuredClone(parameter));
   state.customClipboard = { node: structuredClone(node), parameters };
   toast('Routine item copied.');
@@ -661,7 +669,7 @@ async function extractCustomBlock(path) {
   if (!info || !node || node.type === 'block') return;
   const title = prompt('Reusable block name', node.label || (node.type === 'repeat' ? 'Repeat Block' : node.type === 'section' ? 'Section Block' : 'Workout Block'));
   if (!title?.trim()) return;
-  const refs = new Set(collectCustomParameterRefs([node]));
+  const refs = new Set(collectCustomParameterRefs([node], state.builder.config.parameters || []));
   const parameters = (state.builder.config.parameters || []).filter((parameter) => refs.has(parameter.id)).map((parameter) => structuredClone(parameter));
   const block = { id: uid('block'), title: title.trim(), revision: 1, parameters, nodes: [structuredClone(node)] };
   await state.db.saveBlock(block);
@@ -678,7 +686,10 @@ function unlinkCustomBlock(path) {
   if (!info || !node || !block) return toast('Reusable block not found.');
   try {
     const values = resolveCustomParameterValues(block.parameters || [], node.parameterValues || {});
-    const nodes = materializeNodesWithValues(block.nodes, values).map(freshenCustomNodeIds);
+    const plan = buildCustomRoutine({ title: block.title || 'Block', nodes: block.nodes || [], parameters: block.parameters || [], parameterValues: values, blocks: state.blocks, seed: 'block-unlink' });
+    const nodes = plan.steps.map((item) => item.manual
+      ? { id: uid('node'), type: 'manual', label: item.label, phase: item.phase, timeCapMs: item.timeCapMs, target: item.target || '' }
+      : { id: uid('node'), type: 'timed', label: item.label, phase: item.phase, durationMs: item.durationMs, target: item.target || '' });
     info.collection.splice(info.index, 1, ...nodes);
     renderBuilder();
   } catch (error) { toast(error.message || 'Block could not be unlinked.'); }
@@ -720,11 +731,13 @@ function updateCustomInput(target) {
   if (fieldName === 'durationParamId' || fieldName === 'timeCapParamId' || fieldName === 'countParamId') {
     node[fieldName] = target.value || undefined;
     return renderBuilder();
-  } else if (fieldName === 'durationMs' || fieldName === 'timeCapMs') {
+  } else if (['durationMs','timeCapMs','workBaseMs','restBaseMs'].includes(fieldName)) {
     const value = Number(target.value);
-    node[fieldName] = value > 0 ? ms(value) : (fieldName === 'timeCapMs' ? undefined : 0);
+    node[fieldName] = value > 0 ? ms(value) : (['timeCapMs','restBaseMs'].includes(fieldName) ? undefined : 0);
   } else if (fieldName === 'count') {
     node.count = Number(target.value);
+  } else if (target.type === 'checkbox') {
+    node[fieldName] = target.checked;
   } else {
     node[fieldName] = target.value;
   }
