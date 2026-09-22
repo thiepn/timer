@@ -2,12 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TimerDB } from '../src/db.js';
 
-test('backup v2 round-trips reusable blocks and still accepts v1 backups', async () => {
+test('backup v3 round-trips reusable blocks and still accepts v1 backups', async () => {
   const db = new TimerDB();
   await db.open();
   await db.saveBlock({ id: 'block-1', title: 'Block', revision: 1, parameters: [], nodes: [{ id: 'w', type: 'timed', label: 'Work', phase: 'work', durationMs: 1000 }] });
   const exported = await db.exportData();
-  assert.equal(exported.version, 2);
+  assert.equal(exported.version, 3);
   assert.equal(exported.blocks.length, 1);
 
   const other = new TimerDB();
@@ -43,4 +43,33 @@ test('backup preserves advanced generator and formula routine configuration', as
   await restored.importData(backup, { replace: true });
   const routine = (await restored.all('routines')).find((item) => item.id === 'advanced-routine');
   assert.deepEqual(routine.config, config);
+});
+
+test('backup v3 round-trips cue profiles and custom audio bytes', async () => {
+  const db = new TimerDB();
+  await db.open();
+  await db.saveCueProfile({ id: 'cue-x', title: 'Gym Voice', sound: true, voice: true, soundPack: 'gym', warningSeconds: 10 });
+  const bytes = new Uint8Array([1,2,3,4,5]).buffer;
+  await db.saveCustomSound({ id: 'sound-x', title: 'Bell', mimeType: 'audio/wav', size: 5, durationMs: 400, data: bytes });
+  const backup = await db.exportData();
+  assert.equal(backup.version, 3);
+  assert.equal(backup.cueProfiles.length, 1);
+  assert.equal(backup.customSounds.length, 1);
+  assert.equal(typeof backup.customSounds[0].dataBase64, 'string');
+  assert.equal(backup.customSounds[0].data, undefined);
+
+  const restored = new TimerDB();
+  await restored.open();
+  await restored.importData(backup, { replace: true });
+  assert.equal((await restored.all('cueProfiles'))[0].title, 'Gym Voice');
+  assert.deepEqual([...new Uint8Array((await restored.all('customSounds'))[0].data)], [1,2,3,4,5]);
+});
+
+test('v1 and v2 backups remain accepted after cue schema upgrade', async () => {
+  const db = new TimerDB();
+  await db.open();
+  await db.importData({ format: 'thiepn-timer-backup', version: 1, routines: [], sessions: [], settings: {} }, { replace: true });
+  await db.importData({ format: 'thiepn-timer-backup', version: 2, routines: [], blocks: [], sessions: [], settings: {} }, { replace: true });
+  assert.equal((await db.all('cueProfiles')).length, 0);
+  assert.equal((await db.all('customSounds')).length, 0);
 });
