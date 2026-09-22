@@ -419,6 +419,81 @@ export function buildCustomRoutine({ title = 'Custom Routine', nodes = [], param
         }
         continue;
       }
+      if (node.type === 'progression') {
+        const count = resolveCount(node, context, values, parameterDefs);
+        let previousWork = Number(node.workBaseMs || 30000) / 1000;
+        let previousRest = Number(node.restBaseMs || 0) / 1000;
+        for (let r = 1; r <= count; r++) {
+          const generatorPath = [...context.generatorPath, { nodeId: node.id, type: 'progression', current: r, total: count }];
+          const generatedContext = { ...context, generatorPath };
+          let workSeconds;
+          try { workSeconds = evalExpr(node.workFormula || 'base', generatedContext, values, parameterDefs, Number(node.workBaseMs || 30000) / 1000, previousWork); }
+          catch (error) { throw new Error(`Progression work formula failed at round ${r}: ${error.message}`); }
+          if (!Number.isFinite(workSeconds) || workSeconds <= 0 || workSeconds > 86400) throw new Error(`Progression work formula produced an invalid duration at round ${r}.`);
+          previousWork = workSeconds;
+          const common = {
+            sourceNodeId: node.id,
+            sectionPath: context.sectionPath,
+            repeatPath: context.repeatPath,
+            blockPath: context.blockPath,
+            generatorPath,
+            round: { current: r, total: count }
+          };
+          steps.push(step({
+            ...common,
+            id: customRuntimeId(`${node.id}:work`, context.repeatPath, context.blockPath, generatorPath),
+            label: node.workLabel || 'Work',
+            phase: PHASES.includes(node.workPhase) ? node.workPhase : 'work',
+            durationMs: Math.round(workSeconds * 1000),
+            target: node.target || undefined
+          }));
+          const hasRest = String(node.restFormula || '').trim() || Number(node.restBaseMs) > 0;
+          if (hasRest && (r < count || node.finalRest)) {
+            let restSeconds;
+            if (String(node.restFormula || '').trim()) {
+              try { restSeconds = evalExpr(node.restFormula, generatedContext, values, parameterDefs, Number(node.restBaseMs || 0) / 1000, previousRest); }
+              catch (error) { throw new Error(`Progression rest formula failed at round ${r}: ${error.message}`); }
+            } else restSeconds = Number(node.restBaseMs || 0) / 1000;
+            if (!Number.isFinite(restSeconds) || restSeconds < 0 || restSeconds > 86400) throw new Error(`Progression rest formula produced an invalid duration at round ${r}.`);
+            previousRest = restSeconds;
+            if (restSeconds > 0) steps.push(step({
+              ...common,
+              id: customRuntimeId(`${node.id}:rest`, context.repeatPath, context.blockPath, generatorPath),
+              label: node.restLabel || 'Rest',
+              phase: PHASES.includes(node.restPhase) ? node.restPhase : 'rest',
+              durationMs: Math.round(restSeconds * 1000)
+            }));
+          }
+        }
+        continue;
+      }
+      if (node.type === 'random') {
+        const pool = node.children || [];
+        let selected = [];
+        if ((node.mode || 'choose') === 'shuffle') selected = shuffledIndices(pool.length);
+        else {
+          const count = resolveCount(node, context, values, parameterDefs);
+          if (!node.allowRepeats) {
+            if (count > pool.length) throw new Error('Random pick count exceeds the pool size while repeats are disabled.');
+            selected = shuffledIndices(pool.length).slice(0, count);
+          } else {
+            let previous = -1;
+            for (let i = 0; i < count; i++) {
+              let pick = Math.floor(random() * pool.length);
+              if (node.avoidImmediateRepeat && pool.length > 1 && pick === previous) pick = (pick + 1 + Math.floor(random() * (pool.length - 1))) % pool.length;
+              selected.push(pick);
+              previous = pick;
+            }
+          }
+        }
+        selected.forEach((sourceIndex, pick) => {
+          compileNodes([pool[sourceIndex]], {
+            ...context,
+            generatorPath: [...context.generatorPath, { nodeId: node.id, type: 'random', current: pick + 1, total: selected.length, pick: pick + 1, sourceIndex }]
+          }, values, parameterDefs, blockStack);
+        });
+        continue;
+      }
       if (node.type === 'block') {
         const block = blocksById.get(node.blockId);
         if (!block) throw new Error('Linked reusable block is missing.');
@@ -428,13 +503,13 @@ export function buildCustomRoutine({ title = 'Custom Routine', nodes = [], param
         compileNodes(block.nodes || [], {
           ...context,
           blockPath: [...context.blockPath, { refNodeId: node.id, blockId: block.id, title: block.title || 'Block', revision: block.revision || 1 }]
-        }, blockValues, [...blockStack, block.id]);
+        }, blockValues, block.parameters || [], [...blockStack, block.id]);
         continue;
       }
 
-      const innerRound = context.repeatPath.at(-1);
+      const innerRound = context.generatorPath.at(-1) || context.repeatPath.at(-1);
       const common = {
-        id: customRuntimeId(node.id, context.repeatPath, context.blockPath),
+        id: customRuntimeId(node.id, context.repeatPath, context.blockPath, context.generatorPath),
         sourceNodeId: node.id,
         label: node.label,
         phase: PHASES.includes(node.phase) ? node.phase : 'custom',
@@ -442,23 +517,34 @@ export function buildCustomRoutine({ title = 'Custom Routine', nodes = [], param
         sectionPath: context.sectionPath,
         repeatPath: context.repeatPath,
         blockPath: context.blockPath,
+        generatorPath: context.generatorPath,
         round: innerRound ? { current: innerRound.current, total: innerRound.total } : undefined
       };
       if (node.type === 'manual') {
-        const timeCapMs = node.timeCapParamId ? resolveDuration(node, values, 'timeCapMs', 'timeCapParamId') : node.timeCapMs;
+        let timeCapMs;
+        if (String(node.timeCapFormula || '').trim() || node.timeCapParamId || node.timeCapMs != null) timeCapMs = resolveDuration(node, context, values, parameterDefs, 'timeCapMs', 'timeCapParamId', 'timeCapFormula');
         steps.push(step({ ...common, manual: true, timeCapMs }));
       } else {
-        steps.push(step({ ...common, durationMs: resolveDuration(node, values, 'durationMs', 'durationParamId') }));
+        steps.push(step({ ...common, durationMs: resolveDuration(node, context, values, parameterDefs, 'durationMs', 'durationParamId', 'durationFormula') }));
       }
     }
   };
 
-  compileNodes(nodes, { sectionPath: [], repeatPath: [], blockPath: [] }, rootValues, []);
+  compileNodes(nodes, { sectionPath: [], repeatPath: [], blockPath: [], generatorPath: [] }, rootValues, parameters, []);
+  scaleCompiledSteps(steps, durationScale);
+  if (targetDurationMs != null && Number(targetDurationMs) > 0) fitCompiledStepsToDuration(steps, targetDurationMs);
   return {
     kind: 'timeline',
     title: String(title || 'Custom Routine'),
     steps,
-    meta: { mode: 'custom', parameterValues: structuredClone(rootValues), blockRevisions }
+    meta: {
+      mode: 'custom',
+      parameterValues: structuredClone(rootValues),
+      blockRevisions,
+      randomSeed: String(seed),
+      durationScale: Number(durationScale) || 1,
+      targetDurationMs: targetDurationMs ? Number(targetDurationMs) : undefined
+    }
   };
 }
 
