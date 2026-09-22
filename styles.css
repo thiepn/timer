@@ -558,3 +558,5 @@ html[data-high-contrast="true"] .sheet, html[data-high-contrast="true"] .sheet-i
 html[data-large-controls="true"] .sheet .btn, html[data-large-controls="true"] .sheet .sheet-item { min-height: 56px; }
 .app-shell[data-large-controls="true"] .bottom-nav { height: auto; min-height: var(--nav-h); }
 .app-shell[data-large-controls="true"] #app-main { padding-bottom: calc(var(--nav-h) + 52px + env(safe-area-inset-bottom)); }
+
+.history-loading { margin-top: 12px; }
