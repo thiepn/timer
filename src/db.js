@@ -1,9 +1,9 @@
 import { canonicalStringify, hashCanonical } from './resilience.js';
 
 const DB_NAME = 'thiepn-timer';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 const SYNC_STORES = new Set(['routines', 'blocks', 'cueProfiles', 'customSounds', 'sessions']);
-const ALL_STORES = ['routines', 'blocks', 'cueProfiles', 'customSounds', 'sessions', 'settings', 'active', 'recovery', 'quarantine', 'changes', 'tombstones', 'meta'];
+const ALL_STORES = ['routines', 'blocks', 'cueProfiles', 'customSounds', 'customSoundMeta', 'sessions', 'settings', 'active', 'recovery', 'quarantine', 'changes', 'tombstones', 'meta'];
 
 const uid = (prefix = 'id') => `${prefix}_${globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`}`;
 
@@ -36,6 +36,11 @@ function base64ToArrayBuffer(value) {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes.buffer;
+}
+
+function customSoundMetadata(sound = {}) {
+  const { data, dataBase64, ...meta } = sound || {};
+  return structuredClone(meta);
 }
 
 function normalizeSelection(selection = {}) {
@@ -128,6 +133,20 @@ export class TimerDB {
         s.createIndex('updatedAt', 'updatedAt');
         s.createIndex('title', 'title');
       }
+      if (!db.objectStoreNames.contains('customSoundMeta')) {
+        const metaStore = db.createObjectStore('customSoundMeta', { keyPath: 'id' });
+        metaStore.createIndex('updatedAt', 'updatedAt');
+        metaStore.createIndex('title', 'title');
+        if (db.objectStoreNames.contains('customSounds')) {
+          const source = req.transaction.objectStore('customSounds');
+          source.openCursor().onsuccess = (event) => {
+            const cursor = event.target.result;
+            if (!cursor) return;
+            metaStore.put(customSoundMetadata(cursor.value));
+            cursor.continue();
+          };
+        }
+      }
       if (!db.objectStoreNames.contains('settings')) db.createObjectStore('settings', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('active')) db.createObjectStore('active', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('recovery')) {
@@ -195,13 +214,18 @@ export class TimerDB {
 
   async put(name, value, { journal = true } = {}) {
     if (!value?.id) throw new Error(`Cannot save ${name} record without id.`);
-    if (!journal || !SYNC_STORES.has(name)) return this._putRaw(name, value);
+    if (!journal || !SYNC_STORES.has(name)) {
+      const saved = await this._putRaw(name, value);
+      if (name === 'customSounds') await this._putRaw('customSoundMeta', customSoundMetadata(saved));
+      return saved;
+    }
     const previous = await this._getRaw(name, value.id).catch(() => null);
     const baseRevision = Math.max(0, Number(previous?.syncRevision) || 0);
     const incomingRevision = Math.max(0, Number(value.syncRevision) || 0);
     const syncRevision = previous ? Math.max(baseRevision + 1, incomingRevision) : Math.max(1, incomingRevision);
     const normalized = { ...value, syncRevision, syncDeviceId: this.deviceId || undefined };
     await this._putRaw(name, normalized);
+    if (name === 'customSounds') await this._putRaw('customSoundMeta', customSoundMetadata(normalized));
     await this._deleteRaw('tombstones', `${name}:${value.id}`).catch(() => {});
     await this.appendChange({ storeName: name, entityId: value.id, operation: previous ? 'update' : 'create', baseRevision, resultingRevision: syncRevision, content: normalized });
     return normalized;
@@ -210,6 +234,7 @@ export class TimerDB {
   async delete(name, key, { journal = true } = {}) {
     const previous = await this._getRaw(name, key).catch(() => null);
     await this._deleteRaw(name, key);
+    if (name === 'customSounds') await this._deleteRaw('customSoundMeta', key).catch(() => {});
     if (journal && SYNC_STORES.has(name) && previous) {
       const deletedAt = Date.now();
       const baseRevision = Math.max(0, Number(previous.syncRevision) || 0);
@@ -225,13 +250,24 @@ export class TimerDB {
       for (const row of rows) await this.delete(name, row.id, { journal: true });
       return;
     }
-    return this._clearRaw(name);
+    await this._clearRaw(name);
+    if (name === 'customSounds') await this._clearRaw('customSoundMeta').catch(() => {});
   }
 
   async all(name) {
     if (this.memory) return [...this.memory[name].values()].map((value) => structuredClone(value));
     const { store } = this.store(name);
     return request(store.getAll());
+  }
+
+  async count(name) {
+    if (this.memory) return this.memory[name]?.size || 0;
+    const { store } = this.store(name);
+    return request(store.count());
+  }
+
+  async listCustomSoundMetadata() {
+    return this.all('customSoundMeta');
   }
 
   async ensureDeviceIdentity() {
@@ -271,8 +307,25 @@ export class TimerDB {
   async clearActive() { return this._deleteRaw('active', 'current'); }
 
   async recentSessions(limit = 50) {
-    const rows = await this.all('sessions');
-    return rows.sort((a, b) => b.startedAt - a.startedAt).slice(0, limit);
+    limit = Math.max(0, Math.floor(Number(limit) || 0));
+    if (!limit) return [];
+    if (this.memory) {
+      const rows = [...this.memory.sessions.values()].map((value) => structuredClone(value));
+      return rows.sort((a, b) => b.startedAt - a.startedAt).slice(0, limit);
+    }
+    const { store } = this.store('sessions');
+    const index = store.index('startedAt');
+    return new Promise((resolve, reject) => {
+      const rows = [];
+      const req = index.openCursor(null, 'prev');
+      req.onerror = () => reject(req.error || new Error('IndexedDB session query failed'));
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor || rows.length >= limit) return resolve(rows);
+        rows.push(cursor.value);
+        cursor.continue();
+      };
+    });
   }
 
   async saveRoutine(routine) {
@@ -361,7 +414,10 @@ export class TimerDB {
       if (selected.routines) await this._clearRaw('routines');
       if (selected.blocks) await this._clearRaw('blocks');
       if (selected.cueProfiles) await this._clearRaw('cueProfiles');
-      if (selected.customSounds) await this._clearRaw('customSounds');
+      if (selected.customSounds) {
+        await this._clearRaw('customSounds');
+        await this._clearRaw('customSoundMeta').catch(() => {});
+      }
       if (selected.sessions) await this._clearRaw('sessions');
     }
 
@@ -437,12 +493,12 @@ export class TimerDB {
 
   async dataHealth() {
     const [routines, blocks, profiles, sounds, sessions, recovery, quarantine, changes, tombstones] = await Promise.all([
-      this.all('routines'), this.all('blocks'), this.all('cueProfiles'), this.all('customSounds'), this.all('sessions'),
-      this.all('recovery'), this.all('quarantine'), this.all('changes'), this.all('tombstones')
+      this.count('routines'), this.count('blocks'), this.count('cueProfiles'), this.count('customSounds'), this.count('sessions'),
+      this.count('recovery'), this.count('quarantine'), this.count('changes'), this.count('tombstones')
     ]);
     return {
-      counts: { routines: routines.length, blocks: blocks.length, cueProfiles: profiles.length, customSounds: sounds.length, sessions: sessions.length },
-      recoveryCount: recovery.length, quarantineCount: quarantine.length, pendingChanges: changes.length, tombstoneCount: tombstones.length,
+      counts: { routines, blocks, cueProfiles: profiles, customSounds: sounds, sessions },
+      recoveryCount: recovery, quarantineCount: quarantine, pendingChanges: changes, tombstoneCount: tombstones,
       deviceId: this.deviceId
     };
   }
