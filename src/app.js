@@ -6,6 +6,7 @@ import {
 } from './core.js';
 import { TimerDB, defaultSettings, requestPersistentStorage, storageEstimate } from './db.js';
 import { CueManager, WakeLockManager, requestNotificationPermission, showCompletionNotification, BUILTIN_CUE_PROFILES, SOUND_PACKS, cueProfileById, profileSettings } from './audio.js';
+import { analyzeSession, comparisonFingerprint, comparableSessions, objectiveRecord, factualTrend, summarizeRange, startOfLocalDay, startOfLocalWeek, monthCalendar, sessionsToCsv } from './analytics.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -153,7 +154,11 @@ const state = {
   libraryQuery: '',
   librarySearchActive: false,
   customClipboard: null,
-  pendingStart: null
+  pendingStart: null,
+  historyView: 'list',
+  historyQuery: '',
+  historyMode: 'all',
+  historyMonth: new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime()
 };
 
 const cue = new CueManager(() => state.settings, () => state.cueProfiles, async (id) => state.db.get('customSounds', id));
@@ -1023,6 +1028,7 @@ async function finalizeSession(snapshot, cancelled = false) {
       else otherMs += d;
     }
   }
+  const endedAt = snapshot.endedAt || Date.now();
   const record = {
     id: snapshot.id,
     title: snapshot.meta?.title || plan.title || 'Timer',
@@ -1032,13 +1038,19 @@ async function finalizeSession(snapshot, cancelled = false) {
     cueOverrides: snapshot.meta?.cueOverrides,
     plan,
     startedAt: snapshot.startedAt,
-    endedAt: snapshot.endedAt || Date.now(),
+    endedAt,
+    wallDurationMs: Math.max(0, endedAt - snapshot.startedAt),
     activeDurationMs,
+    plannedDurationMs: estimatePlanDuration(plan),
     pausedMs: snapshot.pausedTotalMs || 0,
     completionReason: snapshot.completionReason || (cancelled ? 'cancelled' : 'finished'),
     data: snapshot.data || {},
+    phaseTotals: structuredClone(snapshot.phaseTotals || {}),
+    events: structuredClone(snapshot.events || []),
+    eventLogTruncated: Boolean(snapshot.eventLogTruncated),
     workMs, restMs, otherMs
   };
+  record.comparisonFingerprint = comparisonFingerprint(record);
   if (!cancelled) await state.db.put('sessions', record).catch(() => toast('Session history could not be saved.'));
   await state.db.clearActive().catch(() => {});
   state.engineUnsub?.();
@@ -1262,38 +1274,149 @@ async function deleteReusableBlock(id) {
   toast('Reusable block deleted.');
 }
 
+function completionLabel(reason) {
+  return ({ finished: 'Completed', 'time-cap': 'Time cap', 'user-ended': 'Ended early', cancelled: 'Cancelled', interrupted: 'Interrupted' })[reason] || String(reason || 'Completed');
+}
+
+function filteredHistorySessions() {
+  const q = String(state.historyQuery || '').trim().toLowerCase();
+  return state.sessions.filter((session) => {
+    if (state.historyMode !== 'all' && session.mode !== state.historyMode) return false;
+    if (!q) return true;
+    const haystack = `${session.title || ''} ${session.mode || ''} ${completionLabel(session.completionReason)} ${session.notes || ''}`.toLowerCase();
+    return haystack.includes(q);
+  });
+}
+
+function historyModeOptions() {
+  const modes = [...new Set(state.sessions.map((session) => session.mode).filter(Boolean))].sort();
+  return `<option value="all" ${state.historyMode === 'all' ? 'selected' : ''}>All modes</option>${modes.map((mode) => `<option value="${esc(mode)}" ${state.historyMode === mode ? 'selected' : ''}>${esc(BUILDER_META[mode]?.name || mode)}</option>`).join('')}`;
+}
+
 function renderHistory() {
-  const sessions = state.sessions;
-  const recent30 = sessions.filter((s) => s.startedAt > Date.now() - 30 * 86400000);
-  const total = recent30.reduce((a, s) => a + (s.activeDurationMs || 0), 0);
-  const work = recent30.reduce((a, s) => a + (s.workMs || 0), 0);
-  const rest = recent30.reduce((a, s) => a + (s.restMs || 0), 0);
-  main.innerHTML = `<div class="page-head"><div><h1>History</h1><p>Your recorded timer sessions.</p></div></div>
-    <div class="analytics-grid">
-      <div class="metric"><strong>${recent30.length}</strong><span>Last 30 days</span></div>
-      <div class="metric"><strong>${durationLabel(total)}</strong><span>Timed</span></div>
-      <div class="metric"><strong>${durationLabel(work)}</strong><span>Work</span></div>
+  const sessions = filteredHistorySessions();
+  const recent30 = summarizeRange(sessions, { from: Date.now() - 30 * 86400000 });
+  main.innerHTML = `<div class="page-head"><div><h1>History</h1><p>Observed sessions, comparisons and timer-derived records.</p></div><div class="row"><button class="btn" data-action="history-export-csv">CSV</button><button class="btn" data-action="history-export-json">JSON</button></div></div>
+    <div class="history-toolbar card card-pad">
+      <input class="input" data-history-search value="${esc(state.historyQuery)}" placeholder="Search sessions" aria-label="Search history">
+      <select class="select" data-history-mode aria-label="Filter history by mode">${historyModeOptions()}</select>
     </div>
-    ${total ? `<div class="card card-pad" style="margin-top:10px"><div class="small muted" style="margin-bottom:8px">Work / Rest / Other</div><div class="bar-stack"><span class="phase-work" style="width:${pct(work / Math.max(1,total))}"></span><span class="phase-rest" style="width:${pct(rest / Math.max(1,total))}"></span><span class="phase-other" style="flex:1"></span></div></div>` : ''}
-    <section class="section"><h2 class="section-title">Sessions</h2><div class="list">${sessions.length ? sessions.map(sessionRowDetailed).join('') : `<div class="card empty">No completed sessions yet.</div>`}</div></section>`;
+    <div class="segmented" role="tablist" aria-label="History view">
+      ${['list','calendar','stats'].map((view) => `<button role="tab" aria-selected="${state.historyView === view}" class="${state.historyView === view ? 'active' : ''}" data-action="history-view" data-view="${view}">${view[0].toUpperCase()+view.slice(1)}</button>`).join('')}
+    </div>
+    <div class="analytics-grid history-summary-grid">
+      <div class="metric"><strong>${recent30.sessions}</strong><span>Last 30 days</span></div>
+      <div class="metric"><strong>${durationLabel(recent30.activeMs)}</strong><span>Timed</span></div>
+      <div class="metric"><strong>${durationLabel(recent30.workMs)}</strong><span>Observed work</span></div>
+    </div>
+    ${state.historyView === 'calendar' ? renderHistoryCalendar(sessions) : state.historyView === 'stats' ? renderHistoryStats(sessions) : renderHistoryList(sessions)}`;
+}
+
+function renderHistoryList(sessions) {
+  return `<section class="section"><div class="row-between"><h2 class="section-title" style="margin:0">Sessions</h2><span class="pill">${sessions.length}</span></div><div class="list" style="margin-top:12px">${sessions.length ? sessions.map(sessionRowDetailed).join('') : `<div class="card empty">No sessions match this filter.</div>`}</div></section>`;
+}
+
+function renderHistoryCalendar(sessions) {
+  const monthDate = new Date(state.historyMonth);
+  const cal = monthCalendar(sessions, monthDate.getFullYear(), monthDate.getMonth());
+  const monthLabel = new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' }).format(monthDate);
+  const weekday = Array.from({ length: 7 }, (_, i) => new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(new Date(2024, 0, 7 + i)));
+  const blanks = Array.from({ length: cal.firstWeekday }, () => `<div class="calendar-day empty-day" aria-hidden="true"></div>`).join('');
+  const days = Array.from({ length: cal.days }, (_, i) => {
+    const day = i + 1;
+    const count = cal.counts.get(day) || 0;
+    const timestamp = new Date(cal.year, cal.month, day).getTime();
+    return `<button class="calendar-day ${count ? 'has-sessions' : ''}" data-action="history-day" data-day="${timestamp}" ${count ? '' : 'disabled'}><span>${day}</span>${count ? `<strong>${count}</strong>` : ''}</button>`;
+  }).join('');
+  return `<section class="section"><div class="calendar-head"><button class="icon-btn" data-action="history-month" data-delta="-1" aria-label="Previous month">←</button><h2>${esc(monthLabel)}</h2><button class="icon-btn" data-action="history-month" data-delta="1" aria-label="Next month">→</button></div><div class="calendar-grid calendar-weekdays">${weekday.map((w) => `<div>${esc(w)}</div>`).join('')}</div><div class="calendar-grid">${blanks}${days}</div></section>`;
+}
+
+function renderHistoryStats(sessions) {
+  const now = Date.now();
+  const weekStart = startOfLocalWeek(now, true);
+  const monthStart = new Date(new Date(now).getFullYear(), new Date(now).getMonth(), 1).getTime();
+  const week = summarizeRange(sessions, { from: weekStart });
+  const month = summarizeRange(sessions, { from: monthStart });
+  const modeRows = Object.entries(summarizeRange(sessions).modes).sort((a,b) => b[1]-a[1]).slice(0,8);
+  const seen = new Set();
+  const records = [];
+  for (const session of sessions) {
+    if (!['for-time','amrap','stopwatch'].includes(session.mode)) continue;
+    const fp = session.comparisonFingerprint || comparisonFingerprint(session);
+    if (seen.has(fp)) continue;
+    seen.add(fp);
+    const record = objectiveRecord(sessions, session);
+    if (record) records.push({ session, record });
+    if (records.length >= 6) break;
+  }
+  return `<section class="section stack">
+    <div class="stats-two-col">
+      <div class="card card-pad"><div class="section-title">This week</div><div class="stats-big">${week.sessions} sessions</div><div class="muted">${durationLabel(week.activeMs)} timed · ${durationLabel(week.workMs)} observed work</div></div>
+      <div class="card card-pad"><div class="section-title">This month</div><div class="stats-big">${month.sessions} sessions</div><div class="muted">${durationLabel(month.activeMs)} timed · ${durationLabel(month.pausedMs)} paused</div></div>
+    </div>
+    <div class="card card-pad"><div class="section-title">Mode usage</div><div class="stats-mode-list">${modeRows.length ? modeRows.map(([mode,count]) => `<div><span>${esc(BUILDER_META[mode]?.name || mode)}</span><strong>${count}</strong></div>`).join('') : `<div class="muted">No sessions yet.</div>`}</div></div>
+    <div class="card card-pad"><div class="section-title">Objective records</div><div class="stack">${records.length ? records.map(({session,record}) => `<button class="record-row" data-action="session-detail" data-id="${esc(record.sessionId)}"><span><strong>${esc(session.title)}</strong><small>${esc(record.label)} · ${record.sampleSize} comparable attempts</small></span><b>${record.valueMs != null ? formatClock(record.valueMs,{countUp:true,tenths:record.type==='stopwatch'}) : esc(record.display)}</b></button>`).join('') : `<div class="muted">Records appear after at least two comparable For Time, AMRAP or stopwatch attempts.</div>`}</div></div>
+  </section>`;
 }
 
 function sessionRowDetailed(s) {
   const d = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(s.startedAt));
   const score = s.mode === 'amrap' ? `${s.data?.rounds || 0} + ${s.data?.reps || 0}` : formatClock(s.activeDurationMs, { countUp: true });
-  return `<div class="list-row"><button class="list-row-main" data-action="session-detail" data-id="${esc(s.id)}"><div class="list-row-title">${esc(s.title)}</div><div class="list-row-meta">${esc(d)} · ${esc(score)} · ${esc(s.completionReason)}</div></button><button class="play-btn" data-action="repeat-session" data-id="${esc(s.id)}" aria-label="Repeat ${esc(s.title)}">▶</button></div>`;
+  const analysis = analyzeSession(s);
+  const detail = [BUILDER_META[s.mode]?.name || s.mode || 'Timer', score, completionLabel(s.completionReason)];
+  if (analysis.adjustments.count) detail.push(`${analysis.adjustments.count} adjustment${analysis.adjustments.count === 1 ? '' : 's'}`);
+  return `<div class="list-row"><button class="list-row-main" data-action="session-detail" data-id="${esc(s.id)}"><div class="list-row-title">${esc(s.title)}</div><div class="list-row-meta">${esc(d)} · ${detail.map(esc).join(' · ')}</div></button><button class="play-btn" data-action="repeat-session" data-id="${esc(s.id)}" aria-label="Repeat ${esc(s.title)}">▶</button></div>`;
+}
+
+function showHistoryDay(timestamp) {
+  const from = startOfLocalDay(Number(timestamp));
+  const to = from + 86400000;
+  const sessions = filteredHistorySessions().filter((s) => s.startedAt >= from && s.startedAt < to);
+  const label = new Intl.DateTimeFormat(undefined, { dateStyle: 'full' }).format(new Date(from));
+  showSheet(label, `<div class="list">${sessions.length ? sessions.map(sessionRowDetailed).join('') : `<div class="muted">No sessions.</div>`}</div>`);
+}
+
+function formatSignedMs(msValue) {
+  const value = numSafe(msValue);
+  return `${value >= 0 ? '+' : '−'}${durationLabel(Math.abs(value))}`;
+}
+
+function numSafe(value) { return Number.isFinite(Number(value)) ? Number(value) : 0; }
+
+function sessionModeAnalysis(s, analysis) {
+  const comparable = comparableSessions(state.sessions, s, { limit: 5 });
+  const record = objectiveRecord(state.sessions, s);
+  const trend = factualTrend(state.sessions, s);
+  let body = '';
+  if (analysis.amrap) body += `<div class="card card-pad"><div class="section-title">AMRAP result</div><div class="stats-big">${esc(analysis.amrap.display)}</div>${analysis.amrap.normalized != null ? `<div class="muted">${analysis.amrap.normalized} total reps using this routine's numeric targets</div>` : ''}</div>`;
+  if (analysis.emom?.earlyDoneCount) body += `<div class="card card-pad"><div class="section-title">EMOM early completion</div><div class="stats-big">${analysis.emom.earlyDoneCount} blocks</div><div class="muted">Average remaining rest ${durationLabel(analysis.emom.averageRemainingRestMs)}</div></div>`;
+  if (analysis.laps) body += `<div class="card card-pad"><div class="section-title">Lap statistics</div><div class="analytics-grid"><div class="metric"><strong>${formatClock(analysis.laps.fastestMs,{tenths:true,countUp:true})}</strong><span>Fastest</span></div><div class="metric"><strong>${formatClock(analysis.laps.averageMs,{tenths:true,countUp:true})}</strong><span>Average</span></div><div class="metric"><strong>${formatClock(analysis.laps.medianMs,{tenths:true,countUp:true})}</strong><span>Median</span></div></div></div>`;
+  if (record) body += `<div class="record-callout"><strong>${record.isCurrent ? 'Current session matches the ' : ''}${esc(record.label)}</strong><span>${record.valueMs != null ? formatClock(record.valueMs,{countUp:true,tenths:record.type==='stopwatch'}) : esc(record.display)} · ${record.sampleSize} comparable attempts</span></div>`;
+  if (trend?.type === 'times') body += `<div class="card card-pad"><div class="section-title">Last ${trend.values.length} comparable times</div><div class="trend-values">${trend.values.map((value) => `<span>${formatClock(value,{countUp:true})}</span>`).join('<b>→</b>')}</div></div>`;
+  if (trend?.type === 'scores') body += `<div class="card card-pad"><div class="section-title">Last ${trend.values.length} comparable scores</div><div class="trend-values">${trend.values.map((value) => `<span>${esc(value)}</span>`).join('<b>→</b>')}</div></div>`;
+  if (comparable.length > 1) body += `<div class="card card-pad"><div class="section-title">Comparable attempts</div><div class="mini-history">${comparable.map((item) => `<button data-action="session-detail" data-id="${esc(item.id)}"><span>${new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric'}).format(new Date(item.startedAt))}</span><strong>${item.mode === 'amrap' ? esc(`${item.data?.rounds || 0} + ${item.data?.reps || 0}`) : formatClock(item.activeDurationMs,{countUp:true})}</strong></button>`).join('')}</div></div>`;
+  return body;
 }
 
 function showSessionDetail(id) {
   const s = state.sessions.find((x) => x.id === id);
   if (!s) return;
+  const analysis = analyzeSession(s);
   const d = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(s.startedAt));
-  showSheet(s.title, `<div class="stack">
-    <div class="muted">${esc(d)}</div>
-    <div class="analytics-grid"><div class="metric"><strong>${formatClock(s.activeDurationMs, { countUp: true })}</strong><span>Active</span></div><div class="metric"><strong>${durationLabel(s.workMs)}</strong><span>Work</span></div><div class="metric"><strong>${durationLabel(s.restMs)}</strong><span>Rest</span></div></div>
-    ${s.mode === 'amrap' ? `<div class="card card-pad"><strong>${s.data?.rounds || 0} rounds + ${s.data?.reps || 0} reps</strong></div>` : ''}
+  const planned = analysis.plannedDurationMs;
+  const actualVsPlanned = planned != null ? `${formatClock(analysis.activeDurationMs,{countUp:true})} / ${formatClock(planned,{countUp:true})}` : formatClock(analysis.activeDurationMs,{countUp:true});
+  const phaseTotal = Object.values(analysis.phaseTotals).reduce((a,b)=>a+b,0) || 1;
+  const timeline = analysis.timeline.slice(0, 120);
+  showSheet(s.title, `<div class="stack session-review">
+    <div class="row-between"><div class="muted">${esc(d)}</div><span class="pill">${esc(completionLabel(s.completionReason))}</span></div>
+    <div class="analytics-grid"><div class="metric"><strong>${actualVsPlanned}</strong><span>${planned != null ? 'Actual / planned' : 'Active time'}</span></div><div class="metric"><strong>${durationLabel(analysis.pausedMs)}</strong><span>Paused</span></div><div class="metric"><strong>${durationLabel(analysis.wallDurationMs)}</strong><span>Wall time</span></div></div>
+    <div class="card card-pad"><div class="small muted" style="margin-bottom:8px">Observed phase time</div><div class="bar-stack"><span class="phase-work" style="width:${pct(analysis.phaseTotals.work/phaseTotal)}"></span><span class="phase-rest" style="width:${pct((analysis.phaseTotals.rest+analysis.phaseTotals.recovery)/phaseTotal)}"></span><span class="phase-other" style="flex:1"></span></div><div class="phase-legend"><span>Work ${durationLabel(analysis.phaseTotals.work)}</span><span>Rest ${durationLabel(analysis.phaseTotals.rest+analysis.phaseTotals.recovery)}</span><span>Other ${durationLabel(analysis.phaseTotals.prepare+analysis.phaseTotals.cooldown+analysis.phaseTotals.custom)}</span></div></div>
+    <div class="stats-two-col"><div class="card card-pad"><div class="section-title">Actions</div><div class="stats-mode-list"><div><span>Pauses</span><strong>${analysis.pauses}</strong></div><div><span>Skips</span><strong>${analysis.skips}</strong></div><div><span>Restarts</span><strong>${analysis.restarts}</strong></div><div><span>Adjustments</span><strong>${analysis.adjustments.count}${analysis.adjustments.count ? ` · ${formatSignedMs(analysis.adjustments.netMs)}` : ''}</strong></div></div></div>${planned != null ? `<div class="card card-pad"><div class="section-title">Completion</div><div class="stats-big">${Math.round((analysis.completionPercent || 0)*100)}%</div><div class="muted">Based only on active time versus the original finite planned duration.</div></div>` : `<div class="card card-pad"><div class="section-title">Completion</div><div class="muted">No finite planned duration for this session.</div></div>`}</div>
+    ${sessionModeAnalysis(s, analysis)}
     ${s.data?.laps?.length ? `<div class="card card-pad"><strong>Laps</strong><div class="laps" style="max-height:none">${s.data.laps.map((l) => `<div class="lap-row"><span>${l.index}</span><span>${formatClock(l.lapDurationMs,{tenths:true,countUp:true})}</span><span>${formatClock(l.sessionElapsedMs,{tenths:true,countUp:true})}</span></div>`).join('')}</div></div>` : ''}
-    <button class="btn primary" data-action="repeat-session" data-id="${esc(s.id)}">Repeat timer</button>
+    <div class="card card-pad stack"><div class="section-title">Session note</div><textarea class="input" rows="3" data-session-note data-id="${esc(s.id)}" placeholder="Optional note about this attempt">${esc(s.notes || '')}</textarea><button class="btn" data-action="save-session-note" data-id="${esc(s.id)}">Save note</button></div>
+    <details class="card card-pad" ${timeline.length && timeline.length < 16 ? 'open' : ''}><summary><strong>Session timeline</strong> · ${analysis.timeline.length} events</summary><div class="event-timeline">${timeline.length ? timeline.map((entry) => `<div class="event-row"><time>${formatClock(entry.offsetMs,{countUp:true})}</time><span>${esc(entry.label)}</span></div>`).join('') : `<div class="muted">Detailed event history was not recorded by this older Timer version.</div>`}${s.eventLogTruncated ? `<div class="muted">Event log was truncated for safety.</div>` : ''}${analysis.timeline.length > timeline.length ? `<div class="muted">Showing first ${timeline.length} events.</div>` : ''}</div></details>
+    <button class="btn primary" data-action="repeat-session" data-id="${esc(s.id)}">Repeat exact timer</button>
     <button class="btn danger" data-action="delete-session" data-id="${esc(s.id)}">Delete session</button>
   </div>`);
 }
@@ -1390,7 +1513,7 @@ function renderSettings() {
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">App</h2>
       <button class="btn" data-action="install">Install PWA</button>
-      <div class="small muted">Timer v1.4.0 · local-first · offline capable</div>
+      <div class="small muted">Timer v1.5.0 · local-first · offline capable</div>
     </section>`;
 }
 
@@ -1452,6 +1575,26 @@ function layoutSheet() {
   showSheet('Live Layout', `<div class="sheet-list">${['focus','classic','strength','wall'].map((l) => `<button class="sheet-item" data-action="select-layout" data-layout="${l}">${l[0].toUpperCase()+l.slice(1)} ${state.settings.layout===l?'✓':''}</button>`).join('')}</div>`);
 }
 
+function downloadTextFile(filename, content, type = 'text/plain') {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportHistoryJson() {
+  const sessions = filteredHistorySessions();
+  downloadTextFile(`timer-history-${new Date().toISOString().slice(0,10)}.json`, JSON.stringify({ format: 'thiepn-timer-history', version: 1, exportedAt: new Date().toISOString(), sessions }, null, 2), 'application/json');
+  toast(`Exported ${sessions.length} session${sessions.length === 1 ? '' : 's'}.`);
+}
+
+function exportHistoryCsv() {
+  const sessions = filteredHistorySessions();
+  downloadTextFile(`timer-history-${new Date().toISOString().slice(0,10)}.csv`, sessionsToCsv(sessions), 'text/csv;charset=utf-8');
+  toast(`Exported ${sessions.length} session${sessions.length === 1 ? '' : 's'}.`);
+}
+
 async function exportBackup() {
   const data = await state.db.exportData();
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -1508,7 +1651,7 @@ async function loadCollections() {
   state.blocks = await state.db.all('blocks').catch(() => []);
   state.cueProfiles = await state.db.all('cueProfiles').catch(() => []);
   state.customSounds = (await state.db.all('customSounds').catch(() => [])).map(({ data, ...sound }) => sound);
-  state.sessions = await state.db.recentSessions(500).catch(() => []);
+  state.sessions = await state.db.recentSessions(10000).catch(() => []);
 }
 
 async function boot() {
@@ -1616,6 +1759,12 @@ document.addEventListener('input', (e) => {
     state.librarySearchActive = true;
     return renderLibrary();
   }
+  if (e.target.matches?.('[data-history-search]')) {
+    state.historyQuery = e.target.value;
+    renderHistory();
+    requestAnimationFrame(() => { const input = $('[data-history-search]'); if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); } });
+    return;
+  }
   updateBuilderInput(e.target);
   updateBuilderCueInput(e.target);
   updateCircuitInput(e.target);
@@ -1626,6 +1775,7 @@ document.addEventListener('input', (e) => {
 });
 document.addEventListener('change', async (e) => {
   updateBuilderInput(e.target); updateBuilderCueInput(e.target); updateCircuitInput(e.target); updateCustomInput(e.target); updateCustomCueInput(e.target); updateCustomParameterInput(e.target); updateBlockParameterInput(e.target);
+  if (e.target.matches?.('[data-history-mode]')) { state.historyMode = e.target.value || 'all'; return renderHistory(); }
   if (e.target.dataset.setting) {
     const key = e.target.dataset.setting;
     const numeric = new Set(['adjustmentMs','warningSeconds','voiceRate','voiceVolume','masterVolume','profileGain']);
@@ -1694,6 +1844,12 @@ document.addEventListener('click', async (e) => {
   if (action === 'session-detail') return showSessionDetail(btn.dataset.id);
   if (action === 'repeat-session') return repeatSession(btn.dataset.id);
   if (action === 'delete-session') { if (confirm('Delete this session?')) { await state.db.delete('sessions', btn.dataset.id); closeSheet(); await loadCollections(); render(); } return; }
+  if (action === 'save-session-note') { const session = state.sessions.find((item) => item.id === btn.dataset.id); const input = document.querySelector(`[data-session-note][data-id="${CSS.escape(btn.dataset.id)}"]`); if (session && input) { session.notes = String(input.value || '').slice(0, 10000); await state.db.put('sessions', session); await loadCollections(); toast('Session note saved.'); } return; }
+  if (action === 'history-view') { state.historyView = btn.dataset.view || 'list'; return renderHistory(); }
+  if (action === 'history-month') { const d = new Date(state.historyMonth); d.setMonth(d.getMonth() + Number(btn.dataset.delta || 0)); state.historyMonth = new Date(d.getFullYear(), d.getMonth(), 1).getTime(); return renderHistory(); }
+  if (action === 'history-day') return showHistoryDay(Number(btn.dataset.day));
+  if (action === 'history-export-json') return exportHistoryJson();
+  if (action === 'history-export-csv') return exportHistoryCsv();
   if (action === 'delete-block') return deleteReusableBlock(btn.dataset.id);
 
   if (action === 'setting-toggle') { const k = btn.dataset.key; state.settings[k] = !state.settings[k]; if (k === 'notifications' && state.settings[k]) { const p = await requestNotificationPermission(); if (p !== 'granted') state.settings[k] = false; } await saveSettings(); return renderSettings(); }

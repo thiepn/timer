@@ -1,6 +1,6 @@
 # Timer
 
-Current app version: **1.4.0**.
+Current app version: **1.5.0**.
 
 A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 
@@ -18,7 +18,7 @@ A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 - Ladder and pyramid generators
 - Custom routines with nested sections/patterns, timed/manual steps, launch parameters, safe arithmetic formulas, progression generators, seeded random pools, reusable linked blocks, duration scaling/target fitting, deterministic compilation and plan preview
 - Saved routine library + favorites + search + routine deletion
-- Session history with actual observed work/rest time, including pauses, skips and early endings
+- Session history with semantic event timelines, calendar/stats views, actual-vs-planned review, objective comparable records, mode-specific analytics, notes, filtering and CSV/JSON export
 - Focus, Classic, Strength and Wall live layouts
 - Pause/resume, skip, previous, restart, time adjustment and fullscreen
 - Advanced cue profiles, six sound packs, warning/halfway/custom cue points, configurable speech/haptics, per-routine/per-step overrides and uploaded local cue sounds
@@ -59,6 +59,7 @@ The app uses relative paths and is ready to be served from the repository root w
 - `src/core.js` — deterministic timer plans and runtime engine
 - `src/db.js` — IndexedDB persistence, settings and backups
 - `src/audio.js` — audio, speech, haptic, wake-lock and notification adapters
+- `src/analytics.js` — pure session analysis, comparisons, records, calendars and history export
 - `src/app.js` — application coordinator and UI
 - `sw.js` — offline application shell
 
@@ -121,3 +122,14 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 - Added per-cue sound mapping so work/rest/prepare/countdown/warning/halfway/finish may use different built-in or uploaded sounds.
 - Cue scheduling now invalidates stale scheduled audio on pause/skip/restart and resumes the audio context after app interruptions where the browser allows it.
 - IndexedDB/backup format v3 carries cue profiles and custom audio while v1/v2 backups remain importable.
+
+
+## v1.5.0 history, analytics and session review
+
+- Completed sessions now retain a bounded semantic event timeline covering starts, transitions, pauses, resumes, skips, restarts, time adjustments, manual completions, laps and completion. No per-tick samples are stored.
+- Session Review shows actual vs planned time, wall/paused time, observed phase totals, skips/restarts/adjustments, notes, and chronological events.
+- Added deterministic comparison fingerprints derived from resolved execution structure while ignoring title/theme/cue-only changes.
+- Added comparable-attempt history and objective records for For Time, AMRAP and stopwatch laps.
+- Added AMRAP normalized rep totals when movement targets are numeric, EMOM early-completion/rest summaries, and stopwatch average/median/range statistics.
+- Added History List / Calendar / Stats views, search, mode filters, weekly/monthly factual summaries, and local JSON/CSV history export.
+- Older session records remain readable; detailed event timelines simply appear when the source version recorded them.

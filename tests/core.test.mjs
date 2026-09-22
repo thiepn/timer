@@ -338,3 +338,15 @@ test('custom compiled steps preserve per-step cue overrides', () => {
   const plan = buildCustomRoutine({ title: 'Cue override', nodes: [{ id: 'x', type: 'timed', label: 'Sprint', phase: 'work', durationMs: 10000, cueOverrides: { transitionSound: 'off', voiceMode: 'custom', voiceText: 'Sprint now', warningSeconds: 5, halfway: 'on' } }] });
   assert.deepEqual(plan.steps[0].cueOverrides, { transitionSound: 'off', voiceMode: 'custom', voiceText: 'Sprint now', warningSeconds: 5, halfway: 'on' });
 });
+
+test('session snapshots retain bounded semantic event history and EMOM remaining rest', () => {
+  const clock = new FakeClock(0, 0);
+  const engine = new TimerEngine(clock);
+  engine.start(buildEmom({ minutes: 1, blockMs: 60000, labels: ['Work'] }));
+  clock.advance(20000);
+  engine.completeManual();
+  const events = engine.snapshot().events;
+  assert.ok(events.some((event) => event.type === 'session-started'));
+  const done = events.find((event) => event.type === 'manual-completed');
+  assert.equal(done.remainingMs, 40000);
+});

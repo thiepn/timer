@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.5.0
+
+### Added
+- Bounded semantic event history for completed sessions without per-tick logging.
+- Pure session analyzer with planned-vs-actual timing, wall/paused time, phase totals, skips, restarts and adjustment summaries.
+- List, Calendar and Stats History views with search and mode filtering.
+- Deterministic comparison fingerprints based on resolved execution structure rather than titles or cue settings.
+- Comparable-attempt history and objective records for For Time, AMRAP and stopwatch laps.
+- AMRAP normalized rep scoring when numeric movement targets are available.
+- EMOM early-completion/rest summaries and stopwatch lap average/median/range statistics.
+- Session notes and chronological event timelines.
+- Filter-aware CSV and JSON history export.
+
+### Improved
+- History now loads up to 10,000 local sessions for long-term summaries while remaining fully local/offline.
+- Automatic delayed completions retain their scheduled boundary in the event timeline.
+- Derived records and comparisons recompute from raw session records after edits/deletions instead of persisting stale analytics flags.
+- Older history remains compatible and degrades gracefully when event details were not recorded.
+
+### Compatibility
+- IndexedDB remains v3 and backup format remains v3; no migration is required.
+- Service-worker cache generation bumped for v1.5.0 assets.
+
 ## 1.4.0
 
 ### Added

@@ -949,6 +949,9 @@ export class TimerEngine {
       observedAt: this.clock.wallNow(),
       ...detail
     };
+    if (!Array.isArray(this.session.events)) this.session.events = [];
+    if (this.session.events.length < 5000) this.session.events.push(structuredClone(event));
+    else this.session.eventLogTruncated = true;
     for (const fn of [...this.listeners]) fn(event, this.snapshot());
   }
 
@@ -966,6 +969,7 @@ export class TimerEngine {
       plan: structuredClone(plan),
       meta: structuredClone(meta),
       data: structuredClone(meta.data || {}),
+      events: [],
       currentIndex: plan.kind === 'timeline' ? 0 : undefined,
       startedAt: now,
       endedAt: undefined,
@@ -1007,6 +1011,7 @@ export class TimerEngine {
     const engine = new TimerEngine(clock);
     engine.session = structuredClone(snapshot);
     if (engine.session) {
+      if (!Array.isArray(engine.session.events)) engine.session.events = [];
       if (!engine.session.phaseTotals) {
         engine.session.phaseTotals = makePhaseTotals();
         if (engine.session.plan?.kind === 'timeline') {
@@ -1167,7 +1172,7 @@ export class TimerEngine {
       this.session.currentManualResting = true;
       this.session.segmentStartedAt = now;
       this.session.segmentPhase = 'rest';
-      this.emit('manual-completed', { step: cur });
+      this.emit('manual-completed', { step: cur, remainingMs: Math.max(0, this.session.currentEndsAt - now) });
       return true;
     }
     return this.next();
@@ -1215,7 +1220,7 @@ export class TimerEngine {
     this.session.status = 'completed';
     this.session.completionReason = reason;
     this.session.endedAt = at ?? this.clock.wallNow();
-    this.emit('session-completed', { reason });
+    this.emit('session-completed', { reason, ...(Number.isFinite(at) ? { scheduledAt: at } : {}) });
     return this.view();
   }
 

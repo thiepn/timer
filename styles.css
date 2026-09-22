@@ -357,3 +357,47 @@ button { cursor: pointer; }
 @media (max-width: 520px) {
   .cue-map-grid { grid-template-columns: 1fr; }
 }
+
+/* v1.5 history & analytics */
+.history-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, 220px); gap: 10px; margin-bottom: 12px; }
+.segmented { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; margin: 12px 0; background: var(--surface-2); border: 1px solid var(--border); border-radius: 14px; }
+.segmented button { min-height: 42px; border: 0; border-radius: 10px; background: transparent; color: var(--text-2); font-weight: 800; }
+.segmented button.active { background: var(--surface); color: var(--text); box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+.history-summary-grid { margin-top: 12px; }
+.calendar-head { display: flex; align-items: center; justify-content: center; gap: 14px; margin-bottom: 12px; }
+.calendar-head h2 { margin: 0; min-width: 190px; text-align: center; font-size: 1.1rem; }
+.calendar-grid { display: grid; grid-template-columns: repeat(7, minmax(0,1fr)); gap: 6px; }
+.calendar-weekdays { margin-bottom: 6px; color: var(--text-3); font-size: .72rem; text-align: center; font-weight: 800; text-transform: uppercase; }
+.calendar-day { min-height: 58px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text); display: grid; place-items: center; align-content: center; gap: 3px; font-variant-numeric: tabular-nums; }
+.calendar-day strong { display: grid; place-items: center; min-width: 20px; min-height: 20px; padding: 0 5px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: .7rem; }
+.calendar-day.has-sessions { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.calendar-day:disabled { opacity: .36; }
+.calendar-day.empty-day { visibility: hidden; }
+.stats-two-col { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
+.stats-big { font-size: clamp(1.35rem, 5vw, 2rem); font-weight: 850; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+.stats-mode-list { display: grid; gap: 8px; }
+.stats-mode-list > div { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--border); }
+.stats-mode-list > div:last-child { border-bottom: 0; }
+.record-row { width: 100%; min-height: 58px; display: flex; justify-content: space-between; align-items: center; gap: 14px; text-align: left; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); padding: 10px 12px; }
+.record-row span { min-width: 0; display: grid; gap: 3px; }
+.record-row small { color: var(--text-2); }
+.record-row b { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.session-review { min-width: 0; }
+.phase-legend { display: flex; flex-wrap: wrap; gap: 10px 16px; margin-top: 10px; color: var(--text-2); font-size: .78rem; }
+.record-callout { display: grid; gap: 4px; padding: 13px 15px; border-radius: 13px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); background: var(--accent-soft); }
+.record-callout span { color: var(--text-2); font-size: .84rem; }
+.trend-values { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-variant-numeric: tabular-nums; }
+.trend-values b { color: var(--text-3); }
+.mini-history { display: grid; gap: 6px; }
+.mini-history button { display: flex; justify-content: space-between; gap: 12px; min-height: 42px; align-items: center; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: var(--text); padding: 5px 0; }
+.mini-history button:last-child { border-bottom: 0; }
+.event-timeline { display: grid; gap: 0; margin-top: 12px; max-height: 360px; overflow: auto; }
+.event-row { display: grid; grid-template-columns: 64px 1fr; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.event-row time { color: var(--text-3); font-variant-numeric: tabular-nums; font-size: .8rem; }
+.event-row span { overflow-wrap: anywhere; }
+
+@media (max-width: 560px) {
+  .history-toolbar, .stats-two-col { grid-template-columns: 1fr; }
+  .calendar-grid { gap: 4px; }
+  .calendar-day { min-height: 48px; border-radius: 10px; }
+}
