@@ -1264,8 +1264,33 @@ function renderSettings() {
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">App</h2>
       <button class="btn" data-action="install">Install PWA</button>
-      <div class="small muted">Timer v1.3.0 · local-first · offline capable</div>
+      <div class="small muted">Timer v1.4.0 · local-first · offline capable</div>
     </section>`;
+}
+
+function refreshVoices() {
+  try {
+    state.availableVoices = globalThis.speechSynthesis?.getVoices?.() || [];
+  } catch { state.availableVoices = []; }
+}
+
+function applySelectedCueProfile(id) {
+  const profile = cueProfileById(id, state.cueProfiles);
+  const values = profileSettings(profile);
+  state.settings = { ...state.settings, cueProfileId: profile.id, ...values };
+}
+
+function currentCueProfilePayload(title) {
+  return {
+    id: uid('cue'), title,
+    sound: state.settings.sound, voice: state.settings.voice, haptics: state.settings.haptics,
+    countdownCues: state.settings.countdownCues, soundPack: state.settings.soundPack,
+    warningSeconds: Number(state.settings.warningSeconds) || 0, halfwayCue: Boolean(state.settings.halfwayCue),
+    voiceVerbosity: state.settings.voiceVerbosity || 'normal', voiceRate: Number(state.settings.voiceRate) || 1.05,
+    soundWork: state.settings.soundWork || '', soundRest: state.settings.soundRest || '', soundPrepare: state.settings.soundPrepare || '',
+    soundCountdown: state.settings.soundCountdown || '', soundWarning: state.settings.soundWarning || '', soundHalfway: state.settings.soundHalfway || '', soundFinish: state.settings.soundFinish || '',
+    profileGain: Number(state.settings.profileGain ?? 1)
+  };
 }
 
 function settingToggle(label, key, checked, hint = '') {
@@ -1281,7 +1306,7 @@ async function repeatSession(id) {
   closeSheet();
   const s = state.sessions.find((x) => x.id === id) || (state.completion?.id === id ? state.completion : null);
   if (!s?.plan) return toast('This session cannot be repeated.');
-  await startSession(structuredClone(s.plan), { mode: s.mode, title: s.title, config: s.config, routineId: s.routineId });
+  await startSession(structuredClone(s.plan), { mode: s.mode, title: s.title, config: s.config, routineId: s.routineId, cueOverrides: structuredClone(s.cueOverrides || {}) });
 }
 
 function liveMoreSheet() {
@@ -1317,8 +1342,12 @@ async function importBackupFile(file) {
   try {
     if (!file || file.size > 25 * 1024 * 1024) throw new Error('Backup file is too large.');
     const data = JSON.parse(await file.text());
-    if (!data || data.format !== 'thiepn-timer-backup' || ![1, 2].includes(data.version) || !Array.isArray(data.routines) || !Array.isArray(data.sessions)) throw new Error('Unsupported or incomplete backup.');
+    if (!data || data.format !== 'thiepn-timer-backup' || ![1, 2, 3].includes(data.version) || !Array.isArray(data.routines) || !Array.isArray(data.sessions)) throw new Error('Unsupported or incomplete backup.');
     const blocks = data.version >= 2 && Array.isArray(data.blocks) ? data.blocks : [];
+    const importedSounds = data.version >= 3 && Array.isArray(data.customSounds) ? data.customSounds : [];
+    for (const sound of importedSounds) {
+      if (!sound?.id || !sound?.title || typeof sound.dataBase64 !== 'string' || sound.dataBase64.length > 3 * 1024 * 1024) throw new Error('Backup contains an invalid or oversized custom cue sound.');
+    }
     for (const block of blocks) {
       if (!block?.id || !block?.title || !Array.isArray(block.nodes)) throw new Error('Backup contains an invalid reusable block.');
       try { buildCustomRoutine({ title: block.title, nodes: block.nodes, parameters: block.parameters || [], blocks }); }
@@ -1351,6 +1380,8 @@ async function installApp() {
 async function loadCollections() {
   state.routines = await state.db.all('routines').catch(() => []);
   state.blocks = await state.db.all('blocks').catch(() => []);
+  state.cueProfiles = await state.db.all('cueProfiles').catch(() => []);
+  state.customSounds = (await state.db.all('customSounds').catch(() => [])).map(({ data, ...sound }) => sound);
   state.sessions = await state.db.recentSessions(500).catch(() => []);
 }
 
@@ -1358,6 +1389,8 @@ async function boot() {
   applyTheme();
   try { await state.db.open(); } catch { toast('Storage unavailable. Timers can still run, but recovery may be limited.', 5000); }
   state.settings = await state.db.loadSettings().catch(() => ({ ...defaultSettings }));
+  refreshVoices();
+  if ('speechSynthesis' in globalThis) globalThis.speechSynthesis.onvoiceschanged = () => { refreshVoices(); if (state.route === 'settings' && !state.engine) renderSettings(); };
   state.quickMs = state.settings.quickPresets?.[3] || 120000;
   applyTheme();
   await loadCollections();
@@ -1370,6 +1403,7 @@ async function boot() {
       const engine = TimerEngine.restore(active.snapshot, new BrowserClock());
       state.engine = engine;
       state.activeMeta = active.meta || active.snapshot.meta || {};
+      cue.beginSession(state.activeMeta);
       attachEngine(engine, state.activeMeta);
       if (engine.view()?.status === 'completed') await finalizeSession(engine.snapshot(), false);
       else {
@@ -1417,6 +1451,7 @@ async function onVisibilityChange() {
   } else {
     state.engine.rebaseToWall();
     state.engine.reconcile();
+    cue.init().catch(() => {});
     const status = state.engine?.view()?.status;
     if (state.settings.keepAwake && status && !['completed', 'cancelled'].includes(status)) wakeLock.acquire();
   }
@@ -1456,12 +1491,24 @@ document.addEventListener('input', (e) => {
     return renderLibrary();
   }
   updateBuilderInput(e.target);
+  updateBuilderCueInput(e.target);
   updateCircuitInput(e.target);
   updateCustomInput(e.target);
+  updateCustomCueInput(e.target);
   updateCustomParameterInput(e.target);
   updateBlockParameterInput(e.target);
 });
-document.addEventListener('change', (e) => { updateBuilderInput(e.target); updateCircuitInput(e.target); updateCustomInput(e.target); updateCustomParameterInput(e.target); updateBlockParameterInput(e.target); if (e.target.dataset.setting) { const key = e.target.dataset.setting; state.settings[key] = key === 'adjustmentMs' ? Number(e.target.value) : e.target.value; saveSettings(); } });
+document.addEventListener('change', async (e) => {
+  updateBuilderInput(e.target); updateBuilderCueInput(e.target); updateCircuitInput(e.target); updateCustomInput(e.target); updateCustomCueInput(e.target); updateCustomParameterInput(e.target); updateBlockParameterInput(e.target);
+  if (e.target.dataset.setting) {
+    const key = e.target.dataset.setting;
+    const numeric = new Set(['adjustmentMs','warningSeconds','voiceRate','voiceVolume','masterVolume','profileGain']);
+    state.settings[key] = numeric.has(key) ? Number(e.target.value) : e.target.value;
+    if (key === 'cueProfileId') applySelectedCueProfile(e.target.value);
+    await saveSettings();
+    if (key === 'cueProfileId' || key === 'voiceRate') renderSettings();
+  }
+});
 
 document.addEventListener('click', async (e) => {
   const routeBtn = e.target.closest('[data-route]');
@@ -1474,7 +1521,7 @@ document.addEventListener('click', async (e) => {
   if (action === 'create') return showCreateSheet();
   if (action === 'close-sheet') { state.pendingStart = null; return closeSheet(); }
   if (action === 'open-builder') return openBuilder(btn.dataset.type);
-  if (action === 'builder-back') { state.builder = null; state.builderEditingId = null; state.builderEditingBlockId = null; return render(); }
+  if (action === 'builder-back') { state.builder = null; state.builderEditingId = null; state.builderEditingBlockId = null; state.builderCueOverrides = {}; return render(); }
   if (action === 'builder-toggle') { const k = btn.dataset.key; state.builder.config[k] = !state.builder.config[k]; return renderBuilder(); }
   if (action === 'save-builder') return saveBuilder();
   if (action === 'start-builder') return startBuilder();
@@ -1524,7 +1571,49 @@ document.addEventListener('click', async (e) => {
   if (action === 'delete-block') return deleteReusableBlock(btn.dataset.id);
 
   if (action === 'setting-toggle') { const k = btn.dataset.key; state.settings[k] = !state.settings[k]; if (k === 'notifications' && state.settings[k]) { const p = await requestNotificationPermission(); if (p !== 'granted') state.settings[k] = false; } await saveSettings(); return renderSettings(); }
-  if (action === 'test-cues') { await cue.init(); cue.pattern('work'); setTimeout(() => cue.pattern('rest'), 500); setTimeout(() => cue.pattern('finish'), 1000); return; }
+  if (action === 'test-cue-kind') { await cue.test(btn.dataset.kind || 'work'); return; }
+  if (action === 'save-cue-profile') {
+    const title = prompt('Cue profile name', 'My Cue Profile')?.trim();
+    if (!title) return;
+    const profile = currentCueProfilePayload(title);
+    await state.db.saveCueProfile(profile);
+    await loadCollections();
+    state.settings.cueProfileId = profile.id;
+    await saveSettings();
+    renderSettings(); toast('Cue profile saved.'); return;
+  }
+  if (action === 'delete-cue-profile') {
+    const profile = state.cueProfiles.find((item) => item.id === btn.dataset.id);
+    if (!profile || !confirm(`Delete cue profile “${profile.title}”?`)) return;
+    await state.db.delete('cueProfiles', profile.id);
+    if (state.settings.cueProfileId === profile.id) { applySelectedCueProfile('standard'); await saveSettings(); }
+    for (const routine of state.routines.filter((item) => item.cueOverrides?.profileId === profile.id)) { routine.cueOverrides = { ...(routine.cueOverrides || {}) }; delete routine.cueOverrides.profileId; await state.db.saveRoutine(routine); }
+    await loadCollections(); renderSettings(); toast('Cue profile deleted.'); return;
+  }
+  if (action === 'upload-custom-sound') {
+    const picker = document.createElement('input'); picker.type = 'file'; picker.accept = 'audio/*';
+    picker.addEventListener('change', async () => {
+      const file = picker.files?.[0]; if (!file) return;
+      try {
+        const inspected = await cue.inspectAudioFile(file);
+        const title = (prompt('Sound name', file.name.replace(/\.[^.]+$/, '')) || '').trim();
+        if (!title) return;
+        await state.db.saveCustomSound({ id: uid('sound'), title, ...inspected });
+        cue.clearCustomSoundCache(); await loadCollections(); renderSettings(); toast('Custom cue sound saved.');
+      } catch (error) { toast(error.message || 'Sound could not be imported.', 4200); }
+    }, { once: true });
+    picker.click(); return;
+  }
+  if (action === 'preview-custom-sound') {
+    const sound = state.customSounds.find((item) => item.id === btn.dataset.id);
+    if (sound) await cue.play('work', { ...profileSettings(cueProfileById(state.settings.cueProfileId, state.cueProfiles)), ...state.settings, sound: true }, `custom:${sound.id}`);
+    return;
+  }
+  if (action === 'delete-custom-sound') {
+    const sound = state.customSounds.find((item) => item.id === btn.dataset.id);
+    if (!sound || !confirm(`Delete custom sound “${sound.title}”? Steps that reference it will fall back silently.`)) return;
+    await scrubDeletedCustomSound(sound.id); await state.db.delete('customSounds', sound.id); cue.clearCustomSoundCache(sound.id); await loadCollections(); renderSettings(); toast('Custom sound deleted.'); return;
+  }
   if (action === 'enable-notifications') { const p = await requestNotificationPermission(); toast(p === 'granted' ? 'Notifications enabled.' : `Notifications: ${p}`); if (p === 'granted') { state.settings.notifications = true; await saveSettings(); renderSettings(); } return; }
   if (action === 'export-backup') return exportBackup();
   if (action === 'import-backup') return importFile.click();
