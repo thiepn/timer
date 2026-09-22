@@ -5,7 +5,7 @@ import {
   buildCustomRoutine, validateCustomRoutine, collectCustomParameterRefs, resolveCustomParameterValues, formulaVariableName
 } from './core.js';
 import { TimerDB, defaultSettings, requestPersistentStorage, storageEstimate } from './db.js';
-import { CueManager, WakeLockManager, requestNotificationPermission, showCompletionNotification } from './audio.js';
+import { CueManager, WakeLockManager, requestNotificationPermission, showCompletionNotification, BUILTIN_CUE_PROFILES, SOUND_PACKS, cueProfileById, profileSettings } from './audio.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -91,8 +91,8 @@ function planFromType(type, c, options = {}) {
   }
 }
 
-function metaForType(type, config) {
-  return { mode: type, title: config.title || BUILDER_META[type]?.name || 'Timer', config: structuredClone(config) };
+function metaForType(type, config, cueOverrides = {}) {
+  return { mode: type, title: config.title || BUILDER_META[type]?.name || 'Timer', config: structuredClone(config), cueOverrides: structuredClone(cueOverrides || {}) };
 }
 
 function typeSummary(type, c) {
@@ -127,10 +127,14 @@ const state = {
   settings: { ...defaultSettings },
   routines: [],
   blocks: [],
+  cueProfiles: [],
+  customSounds: [],
+  availableVoices: [],
   sessions: [],
   builder: null,
   builderEditingId: null,
   builderEditingBlockId: null,
+  builderCueOverrides: {},
   quickMs: 120000,
   engine: null,
   engineUnsub: null,
@@ -152,7 +156,7 @@ const state = {
   pendingStart: null
 };
 
-const cue = new CueManager(() => state.settings);
+const cue = new CueManager(() => state.settings, () => state.cueProfiles, async (id) => state.db.get('customSounds', id));
 const wakeLock = new WakeLockManager();
 const main = $('#app-main');
 const appShell = $('#app');
@@ -277,6 +281,7 @@ function openBuilder(type, routine = null) {
   state.builder = { type, config: structuredClone(routine?.config || defaultConfig(type)) };
   state.builderEditingId = routine?.id || null;
   state.builderEditingBlockId = null;
+  state.builderCueOverrides = structuredClone(routine?.cueOverrides || {});
   renderBuilder();
 }
 
@@ -286,6 +291,7 @@ function openBlockEditor(block) {
   state.builder = { type: 'custom', config: { title: block.title, parameters: structuredClone(block.parameters || []), nodes: structuredClone(block.nodes || []) } };
   state.builderEditingId = null;
   state.builderEditingBlockId = block.id;
+  state.builderCueOverrides = {};
   renderBuilder();
 }
 
@@ -302,6 +308,32 @@ function field(label, key, value, opts = {}) {
 
 function toggleField(label, key, checked, hint = '') {
   return `<div class="toggle-row"><div><strong>${esc(label)}</strong>${hint ? `<div class="small muted">${esc(hint)}</div>` : ''}</div><button class="toggle" data-action="builder-toggle" data-key="${key}" aria-pressed="${checked}" aria-label="${esc(label)}"></button></div>`;
+}
+
+function cueProfileOptions(selected = '', { inherit = false } = {}) {
+  const builtins = Object.values(BUILTIN_CUE_PROFILES);
+  return `${inherit ? `<option value="" ${!selected ? 'selected' : ''}>Use global cue profile</option>` : ''}${builtins.map((profile) => `<option value="${esc(profile.id)}" ${selected === profile.id ? 'selected' : ''}>${esc(profile.title)}</option>`).join('')}${state.cueProfiles.map((profile) => `<option value="${esc(profile.id)}" ${selected === profile.id ? 'selected' : ''}>${esc(profile.title)} · Custom</option>`).join('')}`;
+}
+
+function soundPackOptions(selected = 'clean', { inherit = false } = {}) {
+  return `${inherit ? `<option value="" ${!selected ? 'selected' : ''}>Inherit</option>` : ''}${Object.entries(SOUND_PACKS).map(([id, pack]) => `<option value="${id}" ${selected === id ? 'selected' : ''}>${esc(pack.title)}</option>`).join('')}`;
+}
+
+function cueSoundOptions(selected = '') {
+  const standard = [
+    ['', 'Inherit phase sound'], ['off', 'No transition sound'], ['default', 'Default phase sound'],
+    ['work', 'Work sound'], ['rest', 'Rest sound'], ['prepare', 'Prepare sound'], ['warning', 'Warning sound'], ['halfway', 'Halfway sound'], ['finish', 'Finish sound']
+  ];
+  return `${standard.map(([value, label]) => `<option value="${value}" ${selected === value ? 'selected' : ''}>${label}</option>`).join('')}${state.customSounds.map((sound) => `<option value="custom:${esc(sound.id)}" ${selected === `custom:${sound.id}` ? 'selected' : ''}>Custom · ${esc(sound.title)}</option>`).join('')}`;
+}
+
+function renderRoutineCueOverrides(overrides = {}) {
+  return `<section class="card form-card cue-override-card"><h2 class="section-title">Routine cues</h2><div class="small muted">Optional. A routine profile overrides the global cue profile only while this routine is running.</div><div class="field"><label>Cue profile</label><select class="select" data-builder-cue-field="profileId">${cueProfileOptions(overrides.profileId || '', { inherit: true })}</select></div><div class="field"><label>Sound pack</label><select class="select" data-builder-cue-field="soundPack">${soundPackOptions(overrides.soundPack || '', { inherit: true })}</select></div><div class="generator-grid"><label class="custom-number-label">Warning seconds<input class="input" type="number" min="0" max="60" value="${overrides.warningSeconds ?? ''}" placeholder="Inherit" data-builder-cue-field="warningSeconds"></label><label class="custom-number-label">Halfway cue<select class="select" data-builder-cue-field="halfwayCue"><option value="" ${overrides.halfwayCue == null ? 'selected' : ''}>Inherit</option><option value="true" ${overrides.halfwayCue === true || overrides.halfwayCue === 'true' ? 'selected' : ''}>On</option><option value="false" ${overrides.halfwayCue === false || overrides.halfwayCue === 'false' ? 'selected' : ''}>Off</option></select></label></div></section>`;
+}
+
+function renderStepCueOverrides(node, path) {
+  const cueOverrides = node.cueOverrides || {};
+  return `<details class="step-cue-editor"><summary>Cue overrides</summary><div class="stack compact-stack"><label class="custom-number-label">Transition sound<select class="select" data-custom-cue-path="${path}" data-custom-cue-field="transitionSound">${cueSoundOptions(cueOverrides.transitionSound || '')}</select></label><label class="custom-number-label">Voice behavior<select class="select" data-custom-cue-path="${path}" data-custom-cue-field="voiceMode"><option value="inherit" ${(cueOverrides.voiceMode || 'inherit') === 'inherit' ? 'selected' : ''}>Inherit</option><option value="off" ${cueOverrides.voiceMode === 'off' ? 'selected' : ''}>No voice for this step</option><option value="label" ${cueOverrides.voiceMode === 'label' ? 'selected' : ''}>Speak step label only</option><option value="custom" ${cueOverrides.voiceMode === 'custom' ? 'selected' : ''}>Custom phrase</option></select></label>${cueOverrides.voiceMode === 'custom' ? `<label class="custom-number-label">Custom phrase<input class="input" value="${esc(cueOverrides.voiceText || '')}" data-custom-cue-path="${path}" data-custom-cue-field="voiceText"></label>` : ''}<div class="generator-grid"><label class="custom-number-label">Warning seconds<input class="input" type="number" min="0" max="60" value="${cueOverrides.warningSeconds ?? ''}" placeholder="Inherit" data-custom-cue-path="${path}" data-custom-cue-field="warningSeconds"></label><label class="custom-number-label">Halfway cue<select class="select" data-custom-cue-path="${path}" data-custom-cue-field="halfway"><option value="inherit" ${cueOverrides.halfway == null || cueOverrides.halfway === 'inherit' ? 'selected' : ''}>Inherit</option><option value="on" ${cueOverrides.halfway === true || cueOverrides.halfway === 'on' ? 'selected' : ''}>On</option><option value="off" ${cueOverrides.halfway === false || cueOverrides.halfway === 'off' ? 'selected' : ''}>Off</option></select></label></div><div class="generator-grid"><label class="custom-number-label">Custom cue at %<input class="input" type="number" min="1" max="99" value="${cueOverrides.customPercent ?? ''}" placeholder="Off" data-custom-cue-path="${path}" data-custom-cue-field="customPercent"></label><label class="custom-number-label">Custom cue sound<select class="select" data-custom-cue-path="${path}" data-custom-cue-field="customSound">${cueSoundOptions(cueOverrides.customSound || 'halfway')}</select></label></div></div></details>`;
 }
 
 function renderBuilder() {
@@ -346,6 +378,7 @@ function renderBuilder() {
         ${body}
         <div id="builder-summary" class="builder-summary"><span>${esc(typeSummary(type, c))}</span><strong>${estimate != null ? durationLabel(estimate) : 'Varies'}</strong></div>
       </section>
+      ${editingBlock ? '' : renderRoutineCueOverrides(state.builderCueOverrides || {})}
       <button class="btn primary big block" data-action="start-builder">${editingBlock ? 'Test Reusable Block' : `Start ${esc(m.name)}`}</button>
       ${state.builderEditingId ? `<button class="btn danger block" data-action="delete-routine" data-id="${esc(state.builderEditingId)}">Delete saved routine</button>` : state.builderEditingBlockId ? `<button class="btn danger block" data-action="delete-block" data-id="${esc(state.builderEditingBlockId)}">Delete reusable block</button>` : ''}
     </div>`;
@@ -599,6 +632,7 @@ function renderCustomTree(nodes = [], depth = 0, prefix = []) {
       ${bound ? `<div class="binding-value">Uses <strong>${esc(customParameterById(bound)?.label || 'missing parameter')}</strong></div>` : `<label class="custom-number-label">${manual ? 'Base cap seconds (0 = none)' : 'Base seconds'}<input class="input" type="number" min="0" step="1" value="${secondsValue}" data-custom-path="${path}" data-custom-field="${manual ? 'timeCapMs' : 'durationMs'}" data-custom-unit="seconds"></label>`}
       <label class="custom-number-label">${manual ? 'Cap formula' : 'Duration formula'} <span class="tiny">optional; result is seconds</span><input class="input formula-input" value="${esc(formulaValue)}" data-custom-path="${path}" data-custom-field="${manual ? 'timeCapFormula' : 'durationFormula'}" placeholder="e.g. base + (round - 1) * 5"></label>
       <input class="input" value="${esc(node.target || '')}" data-custom-path="${path}" data-custom-field="target" placeholder="Target / note (optional)" aria-label="Step target">
+      ${renderStepCueOverrides(node, path)}
     </div>`;
   }).join('');
 }
@@ -774,6 +808,33 @@ function updateCustomInput(target) {
   refreshBuilderSummary();
 }
 
+function updateBuilderCueInput(target) {
+  const field = target.dataset.builderCueField;
+  if (!field || !state.builder) return;
+  state.builderCueOverrides ||= {};
+  if (target.value === '') delete state.builderCueOverrides[field];
+  else if (field === 'warningSeconds') state.builderCueOverrides[field] = Number(target.value);
+  else if (field === 'halfwayCue') state.builderCueOverrides[field] = target.value === 'true';
+  else state.builderCueOverrides[field] = target.value;
+}
+
+function updateCustomCueInput(target) {
+  if (!state.builder || state.builder.type !== 'custom') return;
+  const path = target.dataset.customCuePath;
+  const field = target.dataset.customCueField;
+  if (path == null || !field) return;
+  const node = customNodeAt(path);
+  if (!node) return;
+  node.cueOverrides ||= {};
+  let value = target.value;
+  if (field === 'warningSeconds' || field === 'customPercent') value = value === '' ? undefined : Number(value);
+  if (field === 'halfway') value = value === 'inherit' ? undefined : value;
+  if (value === '' || value === undefined) delete node.cueOverrides[field];
+  else node.cueOverrides[field] = value;
+  if (field === 'voiceMode') return renderBuilder();
+  refreshBuilderSummary();
+}
+
 function updateBlockParameterInput(target) {
   if (!state.builder || state.builder.type !== 'custom') return;
   const path = target.dataset.blockParamPath;
@@ -840,7 +901,8 @@ async function saveBuilder() {
     favorite: previous?.favorite || false,
     createdAt: previous?.createdAt || Date.now(),
     useCount: previous?.useCount || 0,
-    lastParameterValues: previous?.lastParameterValues || undefined
+    lastParameterValues: previous?.lastParameterValues || undefined,
+    cueOverrides: structuredClone(state.builderCueOverrides || previous?.cueOverrides || {})
   };
   await state.db.saveRoutine(routine);
   await loadCollections();
@@ -848,11 +910,11 @@ async function saveBuilder() {
   toast('Routine saved.');
 }
 
-function showParameterizedStart({ type, config, routineId, title, savedValues, source }) {
+function showParameterizedStart({ type, config, routineId, title, savedValues, source, cueOverrides = {} }) {
   const parameters = config.parameters || [];
   const defaults = defaultParameterValues(parameters);
   const values = { ...defaults, ...(savedValues || {}) };
-  state.pendingStart = { type, config: structuredClone(config), routineId, title, source, blocks: structuredClone(blocksForCurrentBuilder()) };
+  state.pendingStart = { type, config: structuredClone(config), routineId, title, source, cueOverrides: structuredClone(cueOverrides || {}), blocks: structuredClone(blocksForCurrentBuilder()) };
   showSheet(`Start ${title || config.title || 'Routine'}`, `<div class="stack"><div class="small muted">Adjust this run without changing the saved routine.</div>${parameters.map((parameter) => `<label class="field"><span>${esc(parameter.label)}</span>${renderParameterValueInput(parameter, values[parameter.id], `data-launch-param="${esc(parameter.id)}"`)}</label>`).join('')}<button class="btn primary big" data-action="confirm-param-start">Start</button></div>`);
 }
 
@@ -885,26 +947,26 @@ async function confirmParameterizedStart() {
   state.pendingStart = null;
   closeSheet();
   await loadCollections();
-  await startSession(plan, { ...metaForType(pending.type, pending.config), title: pending.title || pending.config.title, routineId: pending.routineId, parameterValues: resolved });
+  await startSession(plan, { ...metaForType(pending.type, pending.config, pending.cueOverrides), title: pending.title || pending.config.title, routineId: pending.routineId, parameterValues: resolved });
 }
 
 async function startBuilder() {
   const { type, config } = state.builder;
   if (type === 'custom' && (config.parameters || []).length) {
     const routine = state.routines.find((item) => item.id === state.builderEditingId);
-    return showParameterizedStart({ type, config, routineId: state.builderEditingId || undefined, title: config.title, savedValues: routine?.lastParameterValues, source: 'builder' });
+    return showParameterizedStart({ type, config, routineId: state.builderEditingId || undefined, title: config.title, savedValues: routine?.lastParameterValues, source: 'builder', cueOverrides: state.builderCueOverrides });
   }
   let plan;
   try { plan = planFromType(type, config, { blocks: blocksForCurrentBuilder(), seed: type === 'custom' && config.randomMode !== 'fixed' ? uid('seed') : undefined }); }
   catch (e) { return toast(e.issues?.[0]?.message || e.message || 'This timer could not be created.'); }
-  await startSession(plan, { ...metaForType(type, config), routineId: state.builderEditingId || undefined });
+  await startSession(plan, { ...metaForType(type, config, state.builderCueOverrides), routineId: state.builderEditingId || undefined });
 }
 
 async function startRoutine(id) {
   const routine = state.routines.find((r) => r.id === id);
   if (!routine) return toast('Routine not found.');
   if (routine.type === 'custom' && (routine.config?.parameters || []).length) {
-    return showParameterizedStart({ type: routine.type, config: routine.config, routineId: routine.id, title: routine.title, savedValues: routine.lastParameterValues, source: 'library' });
+    return showParameterizedStart({ type: routine.type, config: routine.config, routineId: routine.id, title: routine.title, savedValues: routine.lastParameterValues, source: 'library', cueOverrides: routine.cueOverrides });
   }
   let plan;
   try { plan = planFromType(routine.type, routine.config, { blocks: state.blocks, seed: routine.type === 'custom' && routine.config?.randomMode !== 'fixed' ? uid('seed') : undefined }); }
@@ -913,7 +975,7 @@ async function startRoutine(id) {
   routine.lastUsedAt = Date.now();
   await state.db.saveRoutine(routine);
   await loadCollections();
-  await startSession(plan, { ...metaForType(routine.type, routine.config), title: routine.title, routineId: routine.id });
+  await startSession(plan, { ...metaForType(routine.type, routine.config, routine.cueOverrides), title: routine.title, routineId: routine.id });
 }
 
 async function startSession(plan, meta) {
@@ -921,6 +983,7 @@ async function startSession(plan, meta) {
   state.completion = null;
   state.finalized = false;
   await cue.init();
+  cue.beginSession(meta);
   const engine = new TimerEngine(new BrowserClock());
   attachEngine(engine, meta);
   engine.start(plan, meta);
@@ -934,7 +997,7 @@ async function startSession(plan, meta) {
 function attachEngine(engine, meta) {
   state.engineUnsub?.();
   state.engineUnsub = engine.subscribe((event, snapshot) => {
-    cue.onEvent(event);
+    cue.onEvent(event, snapshot);
     if (!['session-completed', 'session-cancelled'].includes(event.type)) state.db.saveActive(snapshot, meta).catch(() => {});
     if (event.type === 'session-completed' || event.type === 'session-cancelled') finalizeSession(snapshot, event.type === 'session-cancelled');
   });
@@ -945,6 +1008,7 @@ async function finalizeSession(snapshot, cancelled = false) {
   state.finalized = true;
   cancelAnimationFrame(state.liveRaf);
   await wakeLock.release();
+  cue.endSession();
   const plan = snapshot.plan;
   const activeDurationMs = Math.max(0, (snapshot.endedAt || Date.now()) - snapshot.startedAt - (snapshot.pausedTotalMs || 0));
   const totals = snapshot.phaseTotals || {};
@@ -965,6 +1029,7 @@ async function finalizeSession(snapshot, cancelled = false) {
     mode: snapshot.meta?.mode || plan.meta?.mode || 'countdown',
     routineId: snapshot.meta?.routineId,
     config: snapshot.meta?.config,
+    cueOverrides: snapshot.meta?.cueOverrides,
     plan,
     startedAt: snapshot.startedAt,
     endedAt: snapshot.endedAt || Date.now(),
@@ -1029,7 +1094,7 @@ function renderLive() {
     if (!state.engine) return;
     state.engine.reconcile();
     if (!state.engine) return;
-    cue.tick(state.engine.view());
+    cue.tick(state.engine.view(), state.engine.session);
     updateLiveView(false);
     state.liveRaf = requestAnimationFrame(loop);
   };
@@ -1233,8 +1298,49 @@ function showSessionDetail(id) {
   </div>`);
 }
 
+function scrubCustomSoundFromNodes(nodes = [], soundId) {
+  const ref = `custom:${soundId}`;
+  const cueKeys = ['transitionSound', 'customSound'];
+  for (const node of nodes || []) {
+    for (const bucket of ['cueOverrides', 'workCueOverrides', 'restCueOverrides']) {
+      const cueData = node?.[bucket];
+      if (!cueData) continue;
+      for (const key of cueKeys) if (cueData[key] === ref) delete cueData[key];
+    }
+    if (Array.isArray(node?.children)) scrubCustomSoundFromNodes(node.children, soundId);
+  }
+}
+
+async function scrubDeletedCustomSound(soundId) {
+  const ref = `custom:${soundId}`;
+  const mappingKeys = ['soundWork','soundRest','soundPrepare','soundCountdown','soundWarning','soundHalfway','soundFinish'];
+  for (const key of mappingKeys) if (state.settings[key] === ref) state.settings[key] = '';
+  await saveSettings();
+  for (const profile of state.cueProfiles) {
+    let changed = false;
+    for (const key of mappingKeys) if (profile[key] === ref) { profile[key] = ''; changed = true; }
+    if (changed) await state.db.saveCueProfile(profile);
+  }
+  for (const routine of state.routines) {
+    let changed = false;
+    if (routine.cueOverrides) for (const key of mappingKeys) if (routine.cueOverrides[key] === ref) { routine.cueOverrides[key] = ''; changed = true; }
+    if (routine.type === 'custom') { const before = JSON.stringify(routine.config.nodes || []); scrubCustomSoundFromNodes(routine.config.nodes || [], soundId); changed ||= before !== JSON.stringify(routine.config.nodes || []); }
+    if (changed) await state.db.saveRoutine(routine);
+  }
+  for (const block of state.blocks) {
+    const before = JSON.stringify(block.nodes || []);
+    scrubCustomSoundFromNodes(block.nodes || [], soundId);
+    if (before !== JSON.stringify(block.nodes || [])) await state.db.saveBlock(block);
+  }
+}
+
 function renderSettings() {
   const s = state.settings;
+  const voices = state.availableVoices || [];
+  const selectedProfile = cueProfileById(s.cueProfileId || 'standard', state.cueProfiles);
+  const voiceOptions = `<option value="" ${!s.voiceURI ? 'selected' : ''}>System default</option>${voices.map((voice) => `<option value="${esc(voice.voiceURI)}" ${s.voiceURI === voice.voiceURI ? 'selected' : ''}>${esc(voice.name)} · ${esc(voice.lang)}${voice.localService ? ' · Local' : ''}</option>`).join('')}`;
+  const customProfileRows = state.cueProfiles.length ? state.cueProfiles.map((profile) => `<div class="list-row"><div class="list-row-main"><div class="list-row-title">${esc(profile.title)}</div><div class="list-row-meta">${esc(SOUND_PACKS[profile.soundPack]?.title || profile.soundPack || 'Clean')} · ${profile.voice ? 'Voice' : 'No voice'} · ${profile.warningSeconds || 0}s warning</div></div><button class="icon-btn" data-action="delete-cue-profile" data-id="${esc(profile.id)}" aria-label="Delete ${esc(profile.title)}">×</button></div>`).join('') : `<div class="small muted">No custom cue profiles yet.</div>`;
+  const soundRows = state.customSounds.length ? state.customSounds.map((sound) => `<div class="list-row"><button class="list-row-main" data-action="preview-custom-sound" data-id="${esc(sound.id)}"><div class="list-row-title">${esc(sound.title)}</div><div class="list-row-meta">${durationLabel(sound.durationMs || 0)} · ${Math.max(1, Math.round((sound.size || 0) / 1024))} KB</div></button><button class="icon-btn" data-action="delete-custom-sound" data-id="${esc(sound.id)}" aria-label="Delete ${esc(sound.title)}">×</button></div>`).join('') : `<div class="small muted">No uploaded cue sounds.</div>`;
   main.innerHTML = `<div class="page-head"><div><h1>Settings</h1><p>Display, cues, data and device behavior.</p></div></div>
     <section class="card form-card">
       <h2 class="section-title">Appearance</h2>
@@ -1247,9 +1353,29 @@ function renderSettings() {
       ${settingToggle('Keep screen awake', 'keepAwake', s.keepAwake, 'Uses Screen Wake Lock when supported')}
       ${settingToggle('Wall layout auto-hide', 'wallAutoHide', s.wallAutoHide, 'Hide controls after a few seconds')}
     </section>
-    <section class="card form-card" style="margin-top:12px"><h2 class="section-title">Cues</h2>
-      ${settingToggle('Sound', 'sound', s.sound)}${settingToggle('3–2–1 countdown cues', 'countdownCues', s.countdownCues)}${settingToggle('Voice announcements', 'voice', s.voice)}${settingToggle('Haptics', 'haptics', s.haptics)}
-      <button class="btn" data-action="test-cues">Test cues</button>
+    <section class="card form-card cue-settings" style="margin-top:12px"><h2 class="section-title">Cue Profile</h2>
+      <div class="field"><label>Profile</label><select class="select" data-setting="cueProfileId">${cueProfileOptions(s.cueProfileId || 'standard')}</select></div>
+      <div class="small muted">${esc(selectedProfile?.title || 'Standard')} is the current baseline. You can still adjust the individual cue controls below.</div>
+      <div class="field"><label>Sound pack</label><select class="select" data-setting="soundPack">${soundPackOptions(s.soundPack || 'clean')}</select></div>
+      <div class="field"><label>Master cue volume</label><input class="input" data-setting="masterVolume" type="range" min="0" max="1" step="0.05" value="${esc(s.masterVolume ?? 1)}"></div>
+      ${settingToggle('Sound', 'sound', s.sound)}
+      ${settingToggle('3–2–1 countdown cues', 'countdownCues', s.countdownCues)}
+      ${settingToggle('Halfway cue', 'halfwayCue', s.halfwayCue)}
+      <div class="field"><label>Warning cue</label><select class="select" data-setting="warningSeconds"><option value="0" ${Number(s.warningSeconds)===0?'selected':''}>Off</option><option value="5" ${Number(s.warningSeconds)===5?'selected':''}>5 seconds</option><option value="10" ${Number(s.warningSeconds)===10?'selected':''}>10 seconds</option><option value="15" ${Number(s.warningSeconds)===15?'selected':''}>15 seconds</option><option value="30" ${Number(s.warningSeconds)===30?'selected':''}>30 seconds</option></select></div>
+      ${settingToggle('Voice announcements', 'voice', s.voice)}
+      <div class="field"><label>Voice detail</label><select class="select" data-setting="voiceVerbosity"><option value="minimal" ${s.voiceVerbosity==='minimal'?'selected':''}>Minimal · exercise only</option><option value="normal" ${s.voiceVerbosity==='normal'?'selected':''}>Normal · phase + exercise</option><option value="detailed" ${s.voiceVerbosity==='detailed'?'selected':''}>Detailed · round, duration and next</option></select></div>
+      <div class="field"><label>Voice</label><select class="select" data-setting="voiceURI">${voiceOptions}</select></div>
+      <div class="field"><label>Voice rate · ${Number(s.voiceRate || 1.05).toFixed(2)}×</label><input class="input" data-setting="voiceRate" type="range" min="0.6" max="1.6" step="0.05" value="${esc(s.voiceRate ?? 1.05)}"></div>
+      ${settingToggle('Haptics', 'haptics', s.haptics)}
+      <details class="step-cue-editor"><summary>Advanced sound mapping</summary><div class="cue-map-grid"><label class="custom-number-label">Work<select class="select" data-setting="soundWork">${cueSoundOptions(s.soundWork || '')}</select></label><label class="custom-number-label">Rest<select class="select" data-setting="soundRest">${cueSoundOptions(s.soundRest || '')}</select></label><label class="custom-number-label">Prepare<select class="select" data-setting="soundPrepare">${cueSoundOptions(s.soundPrepare || '')}</select></label><label class="custom-number-label">Countdown<select class="select" data-setting="soundCountdown">${cueSoundOptions(s.soundCountdown || '')}</select></label><label class="custom-number-label">Warning<select class="select" data-setting="soundWarning">${cueSoundOptions(s.soundWarning || '')}</select></label><label class="custom-number-label">Halfway<select class="select" data-setting="soundHalfway">${cueSoundOptions(s.soundHalfway || '')}</select></label><label class="custom-number-label">Finish<select class="select" data-setting="soundFinish">${cueSoundOptions(s.soundFinish || '')}</select></label></div></details>
+      <div class="cue-test-grid"><button class="btn" data-action="test-cue-kind" data-kind="work">Test work</button><button class="btn" data-action="test-cue-kind" data-kind="rest">Test rest</button><button class="btn" data-action="test-cue-kind" data-kind="warning">Test warning</button><button class="btn" data-action="test-cue-kind" data-kind="finish">Test finish</button></div>
+      <button class="btn" data-action="save-cue-profile">Save current settings as custom profile</button>
+      <div class="stack">${customProfileRows}</div>
+    </section>
+    <section class="card form-card" style="margin-top:12px"><h2 class="section-title">Custom Cue Sounds</h2>
+      <div class="small muted">Upload short local sounds (max 2 MB / 15 seconds). They stay offline and are included in full backups.</div>
+      <button class="btn" data-action="upload-custom-sound">Upload sound</button>
+      <div class="list">${soundRows}</div>
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">Notifications</h2>
       ${settingToggle('Completion notifications', 'notifications', s.notifications, 'Requires browser notification permission')}
@@ -1264,8 +1390,33 @@ function renderSettings() {
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">App</h2>
       <button class="btn" data-action="install">Install PWA</button>
-      <div class="small muted">Timer v1.3.0 · local-first · offline capable</div>
+      <div class="small muted">Timer v1.4.0 · local-first · offline capable</div>
     </section>`;
+}
+
+function refreshVoices() {
+  try {
+    state.availableVoices = globalThis.speechSynthesis?.getVoices?.() || [];
+  } catch { state.availableVoices = []; }
+}
+
+function applySelectedCueProfile(id) {
+  const profile = cueProfileById(id, state.cueProfiles);
+  const values = profileSettings(profile);
+  state.settings = { ...state.settings, cueProfileId: profile.id, ...values };
+}
+
+function currentCueProfilePayload(title) {
+  return {
+    id: uid('cue'), title,
+    sound: state.settings.sound, voice: state.settings.voice, haptics: state.settings.haptics,
+    countdownCues: state.settings.countdownCues, soundPack: state.settings.soundPack,
+    warningSeconds: Number(state.settings.warningSeconds) || 0, halfwayCue: Boolean(state.settings.halfwayCue),
+    voiceVerbosity: state.settings.voiceVerbosity || 'normal', voiceRate: Number(state.settings.voiceRate) || 1.05,
+    soundWork: state.settings.soundWork || '', soundRest: state.settings.soundRest || '', soundPrepare: state.settings.soundPrepare || '',
+    soundCountdown: state.settings.soundCountdown || '', soundWarning: state.settings.soundWarning || '', soundHalfway: state.settings.soundHalfway || '', soundFinish: state.settings.soundFinish || '',
+    profileGain: Number(state.settings.profileGain ?? 1)
+  };
 }
 
 function settingToggle(label, key, checked, hint = '') {
@@ -1281,7 +1432,7 @@ async function repeatSession(id) {
   closeSheet();
   const s = state.sessions.find((x) => x.id === id) || (state.completion?.id === id ? state.completion : null);
   if (!s?.plan) return toast('This session cannot be repeated.');
-  await startSession(structuredClone(s.plan), { mode: s.mode, title: s.title, config: s.config, routineId: s.routineId });
+  await startSession(structuredClone(s.plan), { mode: s.mode, title: s.title, config: s.config, routineId: s.routineId, cueOverrides: structuredClone(s.cueOverrides || {}) });
 }
 
 function liveMoreSheet() {
@@ -1317,8 +1468,12 @@ async function importBackupFile(file) {
   try {
     if (!file || file.size > 25 * 1024 * 1024) throw new Error('Backup file is too large.');
     const data = JSON.parse(await file.text());
-    if (!data || data.format !== 'thiepn-timer-backup' || ![1, 2].includes(data.version) || !Array.isArray(data.routines) || !Array.isArray(data.sessions)) throw new Error('Unsupported or incomplete backup.');
+    if (!data || data.format !== 'thiepn-timer-backup' || ![1, 2, 3].includes(data.version) || !Array.isArray(data.routines) || !Array.isArray(data.sessions)) throw new Error('Unsupported or incomplete backup.');
     const blocks = data.version >= 2 && Array.isArray(data.blocks) ? data.blocks : [];
+    const importedSounds = data.version >= 3 && Array.isArray(data.customSounds) ? data.customSounds : [];
+    for (const sound of importedSounds) {
+      if (!sound?.id || !sound?.title || typeof sound.dataBase64 !== 'string' || sound.dataBase64.length > 3 * 1024 * 1024) throw new Error('Backup contains an invalid or oversized custom cue sound.');
+    }
     for (const block of blocks) {
       if (!block?.id || !block?.title || !Array.isArray(block.nodes)) throw new Error('Backup contains an invalid reusable block.');
       try { buildCustomRoutine({ title: block.title, nodes: block.nodes, parameters: block.parameters || [], blocks }); }
@@ -1351,6 +1506,8 @@ async function installApp() {
 async function loadCollections() {
   state.routines = await state.db.all('routines').catch(() => []);
   state.blocks = await state.db.all('blocks').catch(() => []);
+  state.cueProfiles = await state.db.all('cueProfiles').catch(() => []);
+  state.customSounds = (await state.db.all('customSounds').catch(() => [])).map(({ data, ...sound }) => sound);
   state.sessions = await state.db.recentSessions(500).catch(() => []);
 }
 
@@ -1358,6 +1515,8 @@ async function boot() {
   applyTheme();
   try { await state.db.open(); } catch { toast('Storage unavailable. Timers can still run, but recovery may be limited.', 5000); }
   state.settings = await state.db.loadSettings().catch(() => ({ ...defaultSettings }));
+  refreshVoices();
+  if ('speechSynthesis' in globalThis) globalThis.speechSynthesis.onvoiceschanged = () => { refreshVoices(); if (state.route === 'settings' && !state.engine) renderSettings(); };
   state.quickMs = state.settings.quickPresets?.[3] || 120000;
   applyTheme();
   await loadCollections();
@@ -1370,6 +1529,7 @@ async function boot() {
       const engine = TimerEngine.restore(active.snapshot, new BrowserClock());
       state.engine = engine;
       state.activeMeta = active.meta || active.snapshot.meta || {};
+      cue.beginSession(state.activeMeta);
       attachEngine(engine, state.activeMeta);
       if (engine.view()?.status === 'completed') await finalizeSession(engine.snapshot(), false);
       else {
@@ -1417,6 +1577,7 @@ async function onVisibilityChange() {
   } else {
     state.engine.rebaseToWall();
     state.engine.reconcile();
+    cue.init().catch(() => {});
     const status = state.engine?.view()?.status;
     if (state.settings.keepAwake && status && !['completed', 'cancelled'].includes(status)) wakeLock.acquire();
   }
@@ -1456,12 +1617,24 @@ document.addEventListener('input', (e) => {
     return renderLibrary();
   }
   updateBuilderInput(e.target);
+  updateBuilderCueInput(e.target);
   updateCircuitInput(e.target);
   updateCustomInput(e.target);
+  updateCustomCueInput(e.target);
   updateCustomParameterInput(e.target);
   updateBlockParameterInput(e.target);
 });
-document.addEventListener('change', (e) => { updateBuilderInput(e.target); updateCircuitInput(e.target); updateCustomInput(e.target); updateCustomParameterInput(e.target); updateBlockParameterInput(e.target); if (e.target.dataset.setting) { const key = e.target.dataset.setting; state.settings[key] = key === 'adjustmentMs' ? Number(e.target.value) : e.target.value; saveSettings(); } });
+document.addEventListener('change', async (e) => {
+  updateBuilderInput(e.target); updateBuilderCueInput(e.target); updateCircuitInput(e.target); updateCustomInput(e.target); updateCustomCueInput(e.target); updateCustomParameterInput(e.target); updateBlockParameterInput(e.target);
+  if (e.target.dataset.setting) {
+    const key = e.target.dataset.setting;
+    const numeric = new Set(['adjustmentMs','warningSeconds','voiceRate','voiceVolume','masterVolume','profileGain']);
+    state.settings[key] = numeric.has(key) ? Number(e.target.value) : e.target.value;
+    if (key === 'cueProfileId') applySelectedCueProfile(e.target.value);
+    await saveSettings();
+    if (key === 'cueProfileId' || key === 'voiceRate') renderSettings();
+  }
+});
 
 document.addEventListener('click', async (e) => {
   const routeBtn = e.target.closest('[data-route]');
@@ -1474,7 +1647,7 @@ document.addEventListener('click', async (e) => {
   if (action === 'create') return showCreateSheet();
   if (action === 'close-sheet') { state.pendingStart = null; return closeSheet(); }
   if (action === 'open-builder') return openBuilder(btn.dataset.type);
-  if (action === 'builder-back') { state.builder = null; state.builderEditingId = null; state.builderEditingBlockId = null; return render(); }
+  if (action === 'builder-back') { state.builder = null; state.builderEditingId = null; state.builderEditingBlockId = null; state.builderCueOverrides = {}; return render(); }
   if (action === 'builder-toggle') { const k = btn.dataset.key; state.builder.config[k] = !state.builder.config[k]; return renderBuilder(); }
   if (action === 'save-builder') return saveBuilder();
   if (action === 'start-builder') return startBuilder();
@@ -1524,7 +1697,49 @@ document.addEventListener('click', async (e) => {
   if (action === 'delete-block') return deleteReusableBlock(btn.dataset.id);
 
   if (action === 'setting-toggle') { const k = btn.dataset.key; state.settings[k] = !state.settings[k]; if (k === 'notifications' && state.settings[k]) { const p = await requestNotificationPermission(); if (p !== 'granted') state.settings[k] = false; } await saveSettings(); return renderSettings(); }
-  if (action === 'test-cues') { await cue.init(); cue.pattern('work'); setTimeout(() => cue.pattern('rest'), 500); setTimeout(() => cue.pattern('finish'), 1000); return; }
+  if (action === 'test-cue-kind') { await cue.test(btn.dataset.kind || 'work'); return; }
+  if (action === 'save-cue-profile') {
+    const title = prompt('Cue profile name', 'My Cue Profile')?.trim();
+    if (!title) return;
+    const profile = currentCueProfilePayload(title);
+    await state.db.saveCueProfile(profile);
+    await loadCollections();
+    state.settings.cueProfileId = profile.id;
+    await saveSettings();
+    renderSettings(); toast('Cue profile saved.'); return;
+  }
+  if (action === 'delete-cue-profile') {
+    const profile = state.cueProfiles.find((item) => item.id === btn.dataset.id);
+    if (!profile || !confirm(`Delete cue profile “${profile.title}”?`)) return;
+    await state.db.delete('cueProfiles', profile.id);
+    if (state.settings.cueProfileId === profile.id) { applySelectedCueProfile('standard'); await saveSettings(); }
+    for (const routine of state.routines.filter((item) => item.cueOverrides?.profileId === profile.id)) { routine.cueOverrides = { ...(routine.cueOverrides || {}) }; delete routine.cueOverrides.profileId; await state.db.saveRoutine(routine); }
+    await loadCollections(); renderSettings(); toast('Cue profile deleted.'); return;
+  }
+  if (action === 'upload-custom-sound') {
+    const picker = document.createElement('input'); picker.type = 'file'; picker.accept = 'audio/*';
+    picker.addEventListener('change', async () => {
+      const file = picker.files?.[0]; if (!file) return;
+      try {
+        const inspected = await cue.inspectAudioFile(file);
+        const title = (prompt('Sound name', file.name.replace(/\.[^.]+$/, '')) || '').trim();
+        if (!title) return;
+        await state.db.saveCustomSound({ id: uid('sound'), title, ...inspected });
+        cue.clearCustomSoundCache(); await loadCollections(); renderSettings(); toast('Custom cue sound saved.');
+      } catch (error) { toast(error.message || 'Sound could not be imported.', 4200); }
+    }, { once: true });
+    picker.click(); return;
+  }
+  if (action === 'preview-custom-sound') {
+    const sound = state.customSounds.find((item) => item.id === btn.dataset.id);
+    if (sound) await cue.play('work', { ...profileSettings(cueProfileById(state.settings.cueProfileId, state.cueProfiles)), ...state.settings, sound: true }, `custom:${sound.id}`);
+    return;
+  }
+  if (action === 'delete-custom-sound') {
+    const sound = state.customSounds.find((item) => item.id === btn.dataset.id);
+    if (!sound || !confirm(`Delete custom sound “${sound.title}”? Steps that reference it will fall back silently.`)) return;
+    await scrubDeletedCustomSound(sound.id); await state.db.delete('customSounds', sound.id); cue.clearCustomSoundCache(sound.id); await loadCollections(); renderSettings(); toast('Custom sound deleted.'); return;
+  }
   if (action === 'enable-notifications') { const p = await requestNotificationPermission(); toast(p === 'granted' ? 'Notifications enabled.' : `Notifications: ${p}`); if (p === 'granted') { state.settings.notifications = true; await saveSettings(); renderSettings(); } return; }
   if (action === 'export-backup') return exportBackup();
   if (action === 'import-backup') return importFile.click();

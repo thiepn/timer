@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.4.0
+
+### Added
+- Five built-in cue profiles plus user-created custom cue profiles.
+- Six procedural sound packs with distinct phase/countdown/warning/halfway/finish recipes.
+- Configurable warning, halfway, and per-step percentage cue points.
+- Voice selection, speech rate, verbosity, round/duration/next-step announcements, and custom per-step phrases.
+- Routine-level cue profile/sound-pack overrides and per-step sound/voice/cue overrides for Custom Routines.
+- Uploaded local cue sounds with lazy decoding, size/duration validation, playback preview, and backup portability.
+- Advanced per-cue sound mapping for work/rest/prepare/countdown/warning/halfway/finish.
+
+### Improved
+- Cue generation invalidates stale scheduled audio on pause, skip, restart and step transitions.
+- Countdown/warning/halfway/custom cue arbitration prevents catch-up cue storms after stalls.
+- Missing/deleted custom audio gracefully falls back to the selected sound pack.
+- Audio context is resumed on foreground return when allowed by the browser.
+- Custom-sound deletion cleans active settings, profiles, routines and reusable-block references.
+
+### Compatibility
+- IndexedDB schema upgraded to v3 with `cueProfiles` and `customSounds` stores.
+- Backup format upgraded to v3; v1 and v2 backups remain importable.
+- Service-worker cache generation bumped for v1.4.0 assets.
+
 ## 1.3.0
 
 ### Added

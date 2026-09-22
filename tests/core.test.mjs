@@ -333,3 +333,8 @@ test('legacy parameter labels derive non-reserved formula variables', () => {
   assert.equal(formulaVariableName({ label: 'Rounds' }), 'roundsValue');
   assert.equal(formulaVariableName({ label: 'Work time' }), 'workTime');
 });
+
+test('custom compiled steps preserve per-step cue overrides', () => {
+  const plan = buildCustomRoutine({ title: 'Cue override', nodes: [{ id: 'x', type: 'timed', label: 'Sprint', phase: 'work', durationMs: 10000, cueOverrides: { transitionSound: 'off', voiceMode: 'custom', voiceText: 'Sprint now', warningSeconds: 5, halfway: 'on' } }] });
+  assert.deepEqual(plan.steps[0].cueOverrides, { transitionSound: 'off', voiceMode: 'custom', voiceText: 'Sprint now', warningSeconds: 5, halfway: 'on' });
+});

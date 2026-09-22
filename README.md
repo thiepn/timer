@@ -1,6 +1,6 @@
 # Timer
 
-Current app version: **1.3.0**.
+Current app version: **1.4.0**.
 
 A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 
@@ -21,7 +21,7 @@ A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 - Session history with actual observed work/rest time, including pauses, skips and early endings
 - Focus, Classic, Strength and Wall live layouts
 - Pause/resume, skip, previous, restart, time adjustment and fullscreen
-- Sound countdown/transition cues, optional speech and haptics
+- Advanced cue profiles, six sound packs, warning/halfway/custom cue points, configurable speech/haptics, per-routine/per-step overrides and uploaded local cue sounds
 - Screen Wake Lock where supported
 - Active-session persistence and reload recovery
 - Versioned JSON backup/import including reusable blocks (v1 backups remain supported)
@@ -108,3 +108,16 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 - Added explicit duration scaling and target-duration fitting for finite Custom Routines.
 - Compiled steps now preserve generator source paths in addition to node/section/repeat/block source metadata.
 - Reusable-block copy/unlink materializes formula/generator content safely into independent concrete steps.
+
+
+## v1.4.0 advanced cue system
+
+- Added Standard, Quiet, Voice Coach, Loud Gym and Silent cue profiles plus user-created custom profiles.
+- Added Clean, Gym, Boxing, Minimal, Calm and Retro procedural sound packs with distinct work/rest/prepare/countdown/warning/halfway/finish cues.
+- Added warning cues, halfway cues, one custom percentage cue point per custom step, and stale-cue suppression after skips/stalls.
+- Added voice verbosity levels, voice selection, rate control, round/duration/next-step speech, and per-step custom phrases or voice suppression.
+- Added routine-level cue profile/sound-pack overrides and Custom Routine per-step cue overrides.
+- Added short uploaded custom audio cues stored locally, lazily decoded, selectable for step transitions/cue points, and included in full backups.
+- Added per-cue sound mapping so work/rest/prepare/countdown/warning/halfway/finish may use different built-in or uploaded sounds.
+- Cue scheduling now invalidates stale scheduled audio on pause/skip/restart and resumes the audio context after app interruptions where the browser allows it.
+- IndexedDB/backup format v3 carries cue profiles and custom audio while v1/v2 backups remain importable.
