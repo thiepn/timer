@@ -1,3 +1,170 @@
+const clamp = (n, min, max) => Math.min(max, Math.max(min, Number(n) || 0));
+
+export const BUILTIN_CUE_PROFILES = Object.freeze({
+  standard: { id: 'standard', title: 'Standard', sound: true, voice: false, haptics: true, countdownCues: true, soundPack: 'clean', warningSeconds: 10, halfwayCue: false, voiceVerbosity: 'normal', voiceRate: 1.05, profileGain: 1 },
+  quiet: { id: 'quiet', title: 'Quiet', sound: true, voice: false, haptics: false, countdownCues: true, soundPack: 'minimal', warningSeconds: 0, halfwayCue: false, voiceVerbosity: 'minimal', voiceRate: 1, profileGain: 0.5 },
+  'voice-coach': { id: 'voice-coach', title: 'Voice Coach', sound: true, voice: true, haptics: true, countdownCues: true, soundPack: 'clean', warningSeconds: 10, halfwayCue: true, voiceVerbosity: 'detailed', voiceRate: 1.02, profileGain: 0.9 },
+  'loud-gym': { id: 'loud-gym', title: 'Loud Gym', sound: true, voice: false, haptics: true, countdownCues: true, soundPack: 'gym', warningSeconds: 10, halfwayCue: false, voiceVerbosity: 'normal', voiceRate: 1.05, profileGain: 1.25 },
+  silent: { id: 'silent', title: 'Silent', sound: false, voice: false, haptics: false, countdownCues: false, soundPack: 'minimal', warningSeconds: 0, halfwayCue: false, voiceVerbosity: 'minimal', voiceRate: 1, profileGain: 0 }
+});
+
+const tone = (freq, duration, delay = 0, gain = 0.08, type = 'sine') => ({ freq, duration, delay, gain, type });
+
+export const SOUND_PACKS = Object.freeze({
+  clean: {
+    title: 'Clean',
+    work: [tone(920, .09, 0, .09, 'square'), tone(1160, .1, .12, .09, 'square')],
+    rest: [tone(540, .16, 0, .075)],
+    prepare: [tone(680, .1, 0, .07)],
+    finish: [tone(740, .16, 0, .09), tone(920, .16, .15, .09), tone(1180, .19, .3, .1)],
+    countdown: [tone(820, .055, 0, .065, 'square')],
+    warning: [tone(660, .075, 0, .06), tone(660, .075, .11, .06)],
+    halfway: [tone(760, .06, 0, .055)]
+  },
+  gym: {
+    title: 'Gym',
+    work: [tone(760, .12, 0, .14, 'sawtooth'), tone(1120, .14, .13, .14, 'square')],
+    rest: [tone(430, .22, 0, .12, 'square')],
+    prepare: [tone(620, .12, 0, .1, 'square')],
+    finish: [tone(660, .18, 0, .14, 'sawtooth'), tone(880, .18, .16, .14, 'square'), tone(1240, .24, .34, .15, 'square')],
+    countdown: [tone(900, .07, 0, .11, 'square')],
+    warning: [tone(520, .09, 0, .1, 'square'), tone(780, .09, .12, .1, 'square')],
+    halfway: [tone(700, .08, 0, .09, 'square')]
+  },
+  boxing: {
+    title: 'Boxing',
+    work: [tone(1040, .18, 0, .11), tone(1320, .22, .08, .09)],
+    rest: [tone(580, .25, 0, .085), tone(470, .18, .16, .065)],
+    prepare: [tone(760, .13, 0, .075)],
+    finish: [tone(980, .25, 0, .11), tone(1260, .28, .2, .1), tone(1540, .3, .42, .09)],
+    countdown: [tone(860, .065, 0, .07)],
+    warning: [tone(690, .11, 0, .075), tone(690, .11, .14, .075)],
+    halfway: [tone(810, .09, 0, .065)]
+  },
+  minimal: {
+    title: 'Minimal',
+    work: [tone(960, .035, 0, .045, 'square')],
+    rest: [tone(560, .04, 0, .04, 'square')],
+    prepare: [tone(700, .035, 0, .04)],
+    finish: [tone(820, .05, 0, .05), tone(1040, .06, .09, .05)],
+    countdown: [tone(760, .025, 0, .035, 'square')],
+    warning: [tone(650, .03, 0, .035)],
+    halfway: [tone(720, .025, 0, .03)]
+  },
+  calm: {
+    title: 'Calm',
+    work: [tone(660, .18, 0, .055), tone(880, .2, .18, .045)],
+    rest: [tone(440, .24, 0, .045)],
+    prepare: [tone(550, .16, 0, .045)],
+    finish: [tone(550, .22, 0, .05), tone(660, .22, .2, .05), tone(880, .3, .4, .05)],
+    countdown: [tone(620, .06, 0, .04)],
+    warning: [tone(510, .08, 0, .04)],
+    halfway: [tone(590, .07, 0, .035)]
+  },
+  retro: {
+    title: 'Retro',
+    work: [tone(880, .08, 0, .08, 'square'), tone(1320, .08, .1, .08, 'square')],
+    rest: [tone(330, .14, 0, .07, 'square')],
+    prepare: [tone(660, .08, 0, .065, 'square')],
+    finish: [tone(660, .1, 0, .08, 'square'), tone(880, .1, .12, .08, 'square'), tone(1320, .16, .24, .08, 'square')],
+    countdown: [tone(990, .045, 0, .06, 'square')],
+    warning: [tone(440, .055, 0, .06, 'square'), tone(660, .055, .08, .06, 'square')],
+    halfway: [tone(770, .05, 0, .05, 'square')]
+  }
+});
+
+export function cueProfileList(customProfiles = []) {
+  return [...Object.values(BUILTIN_CUE_PROFILES), ...(customProfiles || [])];
+}
+
+export function cueProfileById(id, customProfiles = []) {
+  return (customProfiles || []).find((item) => item.id === id) || BUILTIN_CUE_PROFILES[id] || BUILTIN_CUE_PROFILES.standard;
+}
+
+export function profileSettings(profile = BUILTIN_CUE_PROFILES.standard) {
+  return {
+    sound: profile.sound !== false,
+    voice: Boolean(profile.voice),
+    haptics: profile.haptics !== false,
+    countdownCues: profile.countdownCues !== false,
+    soundPack: SOUND_PACKS[profile.soundPack] ? profile.soundPack : 'clean',
+    warningSeconds: clamp(profile.warningSeconds ?? 10, 0, 60),
+    halfwayCue: Boolean(profile.halfwayCue),
+    voiceVerbosity: ['minimal', 'normal', 'detailed'].includes(profile.voiceVerbosity) ? profile.voiceVerbosity : 'normal',
+    voiceRate: clamp(profile.voiceRate || 1.05, .6, 1.6),
+    profileGain: clamp(profile.profileGain ?? 1, 0, 2),
+    soundWork: profile.soundWork || '', soundRest: profile.soundRest || '', soundPrepare: profile.soundPrepare || '',
+    soundCountdown: profile.soundCountdown || '', soundWarning: profile.soundWarning || '', soundHalfway: profile.soundHalfway || '', soundFinish: profile.soundFinish || ''
+  };
+}
+
+export function resolveCueConfig(settings = {}, customProfiles = [], routineOverrides = {}, stepOverrides = {}) {
+  const selectedProfileId = routineOverrides.profileId || settings.cueProfileId || 'standard';
+  const profile = profileSettings(cueProfileById(selectedProfileId, customProfiles));
+  const useGlobalCurrent = !routineOverrides.profileId;
+  const globalCurrent = useGlobalCurrent ? {
+    sound: settings.sound,
+    voice: settings.voice,
+    haptics: settings.haptics,
+    countdownCues: settings.countdownCues,
+    soundPack: settings.soundPack,
+    warningSeconds: settings.warningSeconds,
+    halfwayCue: settings.halfwayCue,
+    voiceVerbosity: settings.voiceVerbosity,
+    voiceRate: settings.voiceRate,
+    profileGain: settings.profileGain,
+    soundWork: settings.soundWork, soundRest: settings.soundRest, soundPrepare: settings.soundPrepare,
+    soundCountdown: settings.soundCountdown, soundWarning: settings.soundWarning, soundHalfway: settings.soundHalfway, soundFinish: settings.soundFinish
+  } : {};
+  const merged = { ...profile };
+  for (const source of [globalCurrent, routineOverrides]) {
+    for (const [key, value] of Object.entries(source || {})) if (value !== undefined && value !== '') merged[key] = value;
+  }
+  merged.sound = merged.sound !== false;
+  merged.voice = Boolean(merged.voice);
+  merged.haptics = merged.haptics !== false;
+  merged.countdownCues = merged.countdownCues !== false;
+  merged.soundPack = SOUND_PACKS[merged.soundPack] ? merged.soundPack : 'clean';
+  merged.warningSeconds = clamp(merged.warningSeconds ?? 0, 0, 60);
+  merged.halfwayCue = Boolean(merged.halfwayCue);
+  merged.voiceVerbosity = ['minimal', 'normal', 'detailed'].includes(merged.voiceVerbosity) ? merged.voiceVerbosity : 'normal';
+  merged.voiceRate = clamp(merged.voiceRate || 1.05, .6, 1.6);
+  merged.masterVolume = clamp(settings.masterVolume ?? 1, 0, 1);
+  merged.voiceVolume = clamp(settings.voiceVolume ?? .9, 0, 1);
+  merged.voiceURI = settings.voiceURI || '';
+  merged.transitionSound = stepOverrides.transitionSound || '';
+  merged.voiceMode = stepOverrides.voiceMode || 'inherit';
+  merged.voiceText = stepOverrides.voiceText || '';
+  merged.customPercent = stepOverrides.customPercent === undefined || stepOverrides.customPercent === '' ? undefined : clamp(stepOverrides.customPercent, 1, 99);
+  merged.customSound = stepOverrides.customSound || '';
+  if (stepOverrides.warningSeconds !== undefined && stepOverrides.warningSeconds !== '') merged.warningSeconds = clamp(stepOverrides.warningSeconds, 0, 60);
+  if (stepOverrides.halfway !== undefined && stepOverrides.halfway !== 'inherit') merged.halfwayCue = stepOverrides.halfway === true || stepOverrides.halfway === 'on';
+  return merged;
+}
+
+export function soundRecipe(packId = 'clean', kind = 'work') {
+  const pack = SOUND_PACKS[packId] || SOUND_PACKS.clean;
+  return pack[kind] || pack.work || [];
+}
+
+export function speechForStep(step = {}, config = {}, nextStep) {
+  if (config.voiceMode === 'off') return '';
+  if (config.voiceMode === 'custom') return String(config.voiceText || '').trim();
+  const label = String(step.label || '').trim();
+  if (!label) return '';
+  if (config.voiceMode === 'label' || config.voiceVerbosity === 'minimal') return label;
+  const phase = String(step.phase || '').toLowerCase();
+  const phaseWord = phase === 'rest' || phase === 'recovery' || phase === 'cooldown' ? 'Rest' : phase === 'prepare' ? 'Get ready' : 'Work';
+  if (config.voiceVerbosity === 'normal') return phaseWord === label ? label : `${phaseWord}. ${label}.`;
+  const parts = [];
+  if (step.round?.current && step.round?.total) parts.push(`Round ${step.round.current} of ${step.round.total}.`);
+  parts.push(phaseWord === label ? `${label}.` : `${phaseWord}. ${label}.`);
+  if (step.durationMs) parts.push(`${Math.round(step.durationMs / 1000)} seconds.`);
+  else if (step.timeCapMs) parts.push(`Up to ${Math.round(step.timeCapMs / 1000)} seconds.`);
+  if (nextStep?.label) parts.push(`Next, ${nextStep.label}.`);
+  return parts.join(' ');
+}
+
 export class CueManager {
   constructor(getSettings, getProfiles = () => [], getCustomSound = async () => null) {
     this.getSettings = getSettings;
