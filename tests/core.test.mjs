@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FakeClock, TimerEngine, buildInterval, buildEmom, buildCountdown, buildPyramid, buildBoxing, buildCustomRoutine, validateCustomRoutine, estimatePlanDuration, evaluateFormula, validateFormula, createSeededRandom, collectCustomParameterRefs, formulaVariableName } from '../src/core.js';
+import { FakeClock, TimerEngine, buildInterval, buildEmom, buildCountdown, buildPyramid, buildBoxing, buildStopwatch, buildCustomRoutine, validateCustomRoutine, estimatePlanDuration, evaluateFormula, validateFormula, createSeededRandom, collectCustomParameterRefs, formulaVariableName } from '../src/core.js';
 
 test('interval compilation omits final rest by default', () => {
   const plan = buildInterval({ workMs: 40000, restMs: 20000, rounds: 3, prepareMs: 0 });
@@ -349,4 +349,49 @@ test('session snapshots retain bounded semantic event history and EMOM remaining
   assert.ok(events.some((event) => event.type === 'session-started'));
   const done = events.find((event) => event.type === 'manual-completed');
   assert.equal(done.remainingMs, 40000);
+});
+
+
+test('foreground wall-clock jumps do not change active countdown time', () => {
+  const clock = new FakeClock(1_000_000, 0);
+  const engine = new TimerEngine(clock);
+  engine.start(buildCountdown({ durationMs: 60000 }));
+  clock.advance(10000);
+  const before = engine.view().current.remainingMs;
+  clock.advanceWall(3 * 3600000);
+  engine.reconcile();
+  const afterForward = engine.view().current.remainingMs;
+  assert.equal(Math.round(afterForward), Math.round(before));
+  clock.advanceMono(5000);
+  engine.reconcile();
+  assert.equal(Math.round(engine.view().current.remainingMs), Math.round(before - 5000));
+  clock.advanceWall(-5 * 3600000);
+  engine.reconcile();
+  assert.equal(Math.round(engine.view().current.remainingMs), Math.round(before - 5000));
+});
+
+test('pause/resume uses monotonic pause duration when wall clock changes', () => {
+  const clock = new FakeClock(1_000_000, 0);
+  const engine = new TimerEngine(clock);
+  engine.start(buildCountdown({ durationMs: 60000 }));
+  clock.advance(10000);
+  engine.pause();
+  assert.equal(engine.elapsedMs(), 10000);
+  clock.advanceWall(2 * 3600000);
+  clock.advanceMono(30000);
+  engine.resume();
+  assert.equal(engine.elapsedMs(), 10000);
+  assert.equal(engine.snapshot().pausedTotalMs, 30000);
+  assert.equal(Math.round(engine.view().current.remainingMs), 50000);
+});
+
+test('manual finish preserves monotonic active duration across wall-clock jumps', () => {
+  const clock = new FakeClock(1_000_000, 0);
+  const engine = new TimerEngine(clock);
+  engine.start(buildStopwatch());
+  clock.advanceMono(15000);
+  clock.advanceWall(4 * 3600000);
+  engine.finish('finished');
+  assert.equal(engine.elapsedMs(), 15000);
+  assert.equal(engine.snapshot().finalElapsedMs, 15000);
 });
