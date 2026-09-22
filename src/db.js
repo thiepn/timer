@@ -96,6 +96,7 @@ export class TimerDB {
     this.db = null;
     this.memory = null;
     this.deviceId = null;
+    this.activeWriteChain = Promise.resolve();
   }
 
   async open() {
@@ -299,12 +300,41 @@ export class TimerDB {
     return this._putRaw('settings', { id: 'settings', value: { ...defaultSettings, ...value }, updatedAt: Date.now() });
   }
 
+  _queueActiveWrite(task) {
+    const run = this.activeWriteChain.then(task, task);
+    this.activeWriteChain = run.catch(() => {});
+    return run;
+  }
+
   async saveActive(snapshot, meta = {}) {
-    return this._putRaw('active', { id: 'current', snapshot, meta, updatedAt: Date.now(), sequence: snapshot?.sequence ?? 0 });
+    if (!snapshot?.id) throw new Error('Active-session snapshot is missing its session ID.');
+    const incoming = {
+      id: 'current', snapshot: structuredClone(snapshot), meta: structuredClone(meta),
+      updatedAt: Date.now(), sequence: Number(snapshot.sequence) || 0
+    };
+    return this._queueActiveWrite(async () => {
+      const current = await this._getRaw('active', 'current').catch(() => null);
+      if (current?.snapshot?.id === snapshot.id && Number(current.sequence) > incoming.sequence) return current;
+      if (current?.snapshot?.id && current.snapshot.id !== snapshot.id) {
+        const currentStart = Number(current.snapshot.startedAt) || 0;
+        const incomingStart = Number(snapshot.startedAt) || 0;
+        if (currentStart > incomingStart) return current;
+      }
+      return this._putRaw('active', incoming);
+    });
   }
 
   async getActive() { return this.get('active', 'current'); }
-  async clearActive() { return this._deleteRaw('active', 'current'); }
+  async clearActive(expectedSessionId = null) {
+    return this._queueActiveWrite(async () => {
+      if (expectedSessionId) {
+        const current = await this._getRaw('active', 'current').catch(() => null);
+        if (current?.snapshot?.id && current.snapshot.id !== expectedSessionId) return false;
+      }
+      await this._deleteRaw('active', 'current');
+      return true;
+    });
+  }
 
   async recentSessions(limit = 50) {
     limit = Math.max(0, Math.floor(Number(limit) || 0));
