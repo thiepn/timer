@@ -348,7 +348,7 @@ export class TimerDB {
     return new Promise((resolve, reject) => {
       const rows = [];
       const req = index.openCursor(null, 'prev');
-      req.onerror = () => reject(req.error || new Error('IndexedDB session query failed'));
+      req.onerror = () => reject(req.error || new Error('Session query failed'));
       req.onsuccess = () => {
         const cursor = req.result;
         if (!cursor || rows.length >= limit) return resolve(rows);
