@@ -71,6 +71,8 @@ export const defaultSettings = {
   masterVolume: 1,
   profileGain: 1,
   notifications: false,
+  activeNotifications: false,
+  mediaControls: false,
   quickPresets: [30000, 60000, 90000, 120000, 180000, 300000],
   startPresetImmediately: false,
   wallAutoHide: true
