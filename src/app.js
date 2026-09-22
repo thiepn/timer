@@ -2,7 +2,7 @@ import {
   TimerEngine, BrowserClock, formatClock, durationLabel, estimatePlanDuration,
   buildCountdown, buildInterval, buildCircuit, buildBoxing, buildRunWalk,
   buildEmom, buildAmrap, buildForTime, buildStopwatch, buildLadder, buildPyramid,
-  buildCustomRoutine, validateCustomRoutine, collectCustomParameterRefs, resolveCustomParameterValues
+  buildCustomRoutine, validateCustomRoutine, collectCustomParameterRefs, resolveCustomParameterValues, formulaVariableName
 } from './core.js';
 import { TimerDB, defaultSettings, requestPersistentStorage, storageEstimate } from './db.js';
 import { CueManager, WakeLockManager, requestNotificationPermission, showCompletionNotification } from './audio.js';
@@ -48,7 +48,7 @@ function defaultConfig(type) {
     case 'run-walk': return { title: 'Run / Walk', rounds: 10, runMinutes: 2, walkMinutes: 1, warmupMinutes: 5, cooldownMinutes: 5, finalWalk: true };
     case 'ladder': return { title: 'Ascending Ladder', start: 20, step: 10, levels: 5, rest: 10, direction: 'up' };
     case 'pyramid': return { title: 'Pyramid', start: 20, peak: 60, step: 10, rest: 10 };
-    case 'custom': return { title: 'Custom Routine', parameters: [], nodes: [{ id: uid('node'), type: 'repeat', count: 3, children: [
+    case 'custom': return { title: 'Custom Routine', parameters: [], durationScale: 1, targetDurationMinutes: 0, randomMode: 'new', fixedSeed: 'timer-seed', nodes: [{ id: uid('node'), type: 'repeat', count: 3, children: [
       { id: uid('node'), type: 'timed', label: 'Work', phase: 'work', durationMs: 40000 },
       { id: uid('node'), type: 'timed', label: 'Rest', phase: 'rest', durationMs: 20000 }
     ] }] };
@@ -85,7 +85,7 @@ function planFromType(type, c, options = {}) {
     case 'run-walk': return buildRunWalk({ rounds: c.rounds, runMs: mins(c.runMinutes), walkMs: mins(c.walkMinutes), warmupMs: mins(c.warmupMinutes), cooldownMs: mins(c.cooldownMinutes), finalWalk: !!c.finalWalk });
     case 'ladder': return buildLadder({ title: c.title || 'Ladder', startMs: ms(c.start), stepMs: ms(c.step), levels: c.levels, restMs: ms(c.rest), direction: c.direction });
     case 'pyramid': return buildPyramid({ title: c.title || 'Pyramid', startMs: ms(c.start), peakMs: ms(c.peak), stepMs: ms(c.step), restMs: ms(c.rest) });
-    case 'custom': return buildCustomRoutine({ title: c.title || 'Custom Routine', nodes: c.nodes || [], parameters: c.parameters || [], parameterValues: options.parameterValues || {}, blocks: options.blocks || state.blocks || [] });
+    case 'custom': return buildCustomRoutine({ title: c.title || 'Custom Routine', nodes: c.nodes || [], parameters: c.parameters || [], parameterValues: options.parameterValues || {}, blocks: options.blocks || state.blocks || [], seed: options.seed ?? (c.randomMode === 'fixed' ? (c.fixedSeed || 'timer-seed') : 'preview'), durationScale: Number(c.durationScale || 1), targetDurationMs: Number(c.targetDurationMinutes) > 0 ? mins(c.targetDurationMinutes) : undefined });
     case 'stopwatch': return buildStopwatch();
     default: throw new Error(`Unknown builder type: ${type}`);
   }
@@ -118,7 +118,7 @@ function typeSummary(type, c) {
 }
 
 function countCustomNodes(nodes = []) {
-  return (nodes || []).reduce((total, node) => total + 1 + ((node?.type === 'repeat' || node?.type === 'section') ? countCustomNodes(node.children || []) : 0), 0);
+  return (nodes || []).reduce((total, node) => total + 1 + ((['repeat','section','random'].includes(node?.type)) ? countCustomNodes(node.children || []) : 0), 0);
 }
 
 const state = {
@@ -331,7 +331,7 @@ function renderBuilder() {
     body = `${field('Start', 'start', c.start, { min: 1, max: 3600, suffix: 'sec' })}${field('Peak', 'peak', c.peak, { min: 1, max: 3600, suffix: 'sec' })}${field('Step', 'step', c.step, { min: 1, max: 3600, suffix: 'sec' })}${field('Rest', 'rest', c.rest, { min: 0, max: 3600, suffix: 'sec' })}`;
   } else if (type === 'custom') {
     c.parameters ||= [];
-    body = `${renderCustomParameters(c.parameters)}<div class="field"><div class="row-between"><div><div class="field-label">Routine structure</div><div class="small muted">Nest sections, repeats, and linked reusable blocks. Copy/paste and move controls work without dragging.</div></div><button class="btn" data-action="custom-add" data-parent="">＋ Add</button></div><div class="custom-tree">${renderCustomTree(c.nodes || [])}</div>${!(c.nodes || []).length ? `<div class="empty">Add a step, repeat, section, or reusable block to begin.</div>` : ''}<div class="row" style="flex-wrap:wrap"><button class="btn" data-action="custom-preview">Preview compiled plan</button>${state.blocks.length ? `<span class="pill">${state.blocks.length} reusable block${state.blocks.length === 1 ? '' : 's'}</span>` : ''}</div></div>`;
+    body = `${renderCustomParameters(c.parameters)}${editingBlock ? '' : renderCustomCompileOptions(c)}<div class="field"><div class="row-between"><div><div class="field-label">Routine structure</div><div class="small muted">Nest patterns, formulas, generators, sections and reusable blocks. Formulas resolve before the workout starts.</div></div><button class="btn" data-action="custom-add" data-parent="">＋ Add</button></div><div class="custom-tree">${renderCustomTree(c.nodes || [])}</div>${!(c.nodes || []).length ? `<div class="empty">Add a step, repeat, generator, section, or reusable block to begin.</div>` : ''}<div class="row" style="flex-wrap:wrap"><button class="btn" data-action="custom-preview">Preview compiled plan</button>${state.blocks.length ? `<span class="pill">${state.blocks.length} reusable block${state.blocks.length === 1 ? '' : 's'}</span>` : ''}</div></div>`;
   } else if (type === 'stopwatch') {
     body = `<div class="card card-pad"><strong>Stopwatch</strong><p class="muted">Open-ended timing with pause, resume and lap recording.</p></div>`;
   }
@@ -391,7 +391,7 @@ function customPathLabel(path = []) {
     const node = nodes[index];
     if (!node) break;
     const block = node.type === 'block' ? state.blocks.find((item) => item.id === node.blockId) : null;
-    labels.push(node.label || block?.title || (node.type === 'repeat' ? 'Repeat block' : node.type === 'manual' ? 'Manual step' : node.type === 'section' ? 'Section' : 'Timed step'));
+    labels.push(node.label || block?.title || (node.type === 'repeat' ? 'Repeat block' : node.type === 'manual' ? 'Manual step' : node.type === 'section' ? 'Section' : node.type === 'progression' ? 'Progression' : node.type === 'random' ? 'Random pool' : 'Timed step'));
     nodes = node.children || [];
   }
   return labels.join(' › ') || 'Routine';
@@ -401,7 +401,7 @@ function customChildrenAt(parentPath = '') {
   if (!state.builder || state.builder.type !== 'custom') return null;
   if (parentPath === '') return state.builder.config.nodes;
   const parent = customNodeAt(parentPath);
-  return parent && (parent.type === 'repeat' || parent.type === 'section') ? parent.children : null;
+  return parent && ['repeat','section','random'].includes(parent.type) ? parent.children : null;
 }
 
 function customParentCollection(path) {
