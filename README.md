@@ -1,6 +1,6 @@
 # Timer
 
-Current app version: **1.0.1**.
+Current app version: **1.1.0**.
 
 A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 
@@ -16,6 +16,7 @@ A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 - Boxing rounds with correct optional final-rest behavior
 - Run / Walk intervals
 - Ladder and pyramid generators
+- Custom routines with nested sections and repeat blocks, timed/manual steps, deterministic compilation and plan preview
 - Saved routine library + favorites + search + routine deletion
 - Session history with actual observed work/rest time, including pauses, skips and early endings
 - Focus, Classic, Strength and Wall live layouts
@@ -72,3 +73,13 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 - Added Library search and safe saved-routine deletion.
 - Exposed the existing one-tap quick-preset option in Settings.
 - Hardened wake-lock reacquisition around sessions that complete while returning to the app.
+
+## v1.1.0 custom routines
+
+- Added a full Custom Routine builder with nested `Section` and `Repeat` blocks.
+- Added timed and manual custom steps with phase, optional target text, and optional manual time caps.
+- Added accessible move-up/move-down controls so routine editing does not depend on dragging.
+- Added a compiled-plan preview with executable step count, estimated duration, section context and repeat context.
+- Compiled custom steps preserve source-node, section-path and repeat-path metadata for debugging/history.
+- Custom routine compilation is deterministic for persisted node IDs and rejects duplicate IDs, empty containers, excessive nesting and invalid durations.
+- Backup import now validates every saved routine through the real compiler before modifying local data.

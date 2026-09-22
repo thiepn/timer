@@ -1,7 +1,8 @@
 import {
   TimerEngine, BrowserClock, formatClock, durationLabel, estimatePlanDuration,
   buildCountdown, buildInterval, buildCircuit, buildBoxing, buildRunWalk,
-  buildEmom, buildAmrap, buildForTime, buildStopwatch, buildLadder, buildPyramid
+  buildEmom, buildAmrap, buildForTime, buildStopwatch, buildLadder, buildPyramid,
+  buildCustomRoutine, validateCustomRoutine
 } from './core.js';
 import { TimerDB, defaultSettings, requestPersistentStorage, storageEstimate } from './db.js';
 import { CueManager, WakeLockManager, requestNotificationPermission, showCompletionNotification } from './audio.js';
@@ -27,6 +28,7 @@ const BUILDER_META = {
   'run-walk': { name: 'Run / Walk', desc: 'Alternating running and recovery' },
   ladder: { name: 'Ladder', desc: 'Progressively changing work intervals' },
   pyramid: { name: 'Pyramid', desc: 'Ramp up and back down' },
+  custom: { name: 'Custom Routine', desc: 'Nested sections, repeats, timed and manual steps' },
   stopwatch: { name: 'Stopwatch', desc: 'Open-ended timer with laps' }
 };
 
@@ -46,6 +48,10 @@ function defaultConfig(type) {
     case 'run-walk': return { title: 'Run / Walk', rounds: 10, runMinutes: 2, walkMinutes: 1, warmupMinutes: 5, cooldownMinutes: 5, finalWalk: true };
     case 'ladder': return { title: 'Ascending Ladder', start: 20, step: 10, levels: 5, rest: 10, direction: 'up' };
     case 'pyramid': return { title: 'Pyramid', start: 20, peak: 60, step: 10, rest: 10 };
+    case 'custom': return { title: 'Custom Routine', nodes: [{ id: uid('node'), type: 'repeat', count: 3, children: [
+      { id: uid('node'), type: 'timed', label: 'Work', phase: 'work', durationMs: 40000 },
+      { id: uid('node'), type: 'timed', label: 'Rest', phase: 'rest', durationMs: 20000 }
+    ] }] };
     case 'stopwatch': return { title: 'Stopwatch' };
     default: return { title: '40 / 20 Interval', work: 40, rest: 20, rounds: 10, prepare: 10, finalRest: false };
   }
@@ -79,6 +85,7 @@ function planFromType(type, c) {
     case 'run-walk': return buildRunWalk({ rounds: c.rounds, runMs: mins(c.runMinutes), walkMs: mins(c.walkMinutes), warmupMs: mins(c.warmupMinutes), cooldownMs: mins(c.cooldownMinutes), finalWalk: !!c.finalWalk });
     case 'ladder': return buildLadder({ title: c.title || 'Ladder', startMs: ms(c.start), stepMs: ms(c.step), levels: c.levels, restMs: ms(c.rest), direction: c.direction });
     case 'pyramid': return buildPyramid({ title: c.title || 'Pyramid', startMs: ms(c.start), peakMs: ms(c.peak), stepMs: ms(c.step), restMs: ms(c.rest) });
+    case 'custom': return buildCustomRoutine({ title: c.title || 'Custom Routine', nodes: c.nodes || [] });
     case 'stopwatch': return buildStopwatch();
     default: throw new Error(`Unknown builder type: ${type}`);
   }
@@ -100,9 +107,17 @@ function typeSummary(type, c) {
     case 'run-walk': return `${c.rounds} × ${c.runMinutes}m / ${c.walkMinutes}m`;
     case 'ladder': return `${c.levels} levels · ${c.start}s +${c.step}s`;
     case 'pyramid': return `${c.start}s → ${c.peak}s → ${c.start}s`;
+    case 'custom': {
+      const count = countCustomNodes(c.nodes || []);
+      return `${count} source item${count === 1 ? '' : 's'} · nested routine`;
+    }
     case 'stopwatch': return 'Open-ended';
     default: return '';
   }
+}
+
+function countCustomNodes(nodes = []) {
+  return (nodes || []).reduce((total, node) => total + 1 + ((node?.type === 'repeat' || node?.type === 'section') ? countCustomNodes(node.children || []) : 0), 0);
 }
 
 const state = {
@@ -215,7 +230,7 @@ function renderTimerHome() {
     <section class="section">
       <div class="row-between"><h2 class="section-title" style="margin:0">More Timers</h2><button class="btn ghost" data-action="create">Browse all</button></div>
       <div class="mode-grid" style="margin-top:12px">
-        ${['tabata','circuit','boxing','run-walk','for-time','ladder','pyramid'].map(modeCard).join('')}
+        ${['tabata','circuit','boxing','run-walk','for-time','ladder','pyramid','custom'].map(modeCard).join('')}
       </div>
     </section>
 
@@ -291,6 +306,8 @@ function renderBuilder() {
     body = `${field('Start', 'start', c.start, { min: 1, max: 3600, suffix: 'sec' })}${field('Step', 'step', c.step, { min: 1, max: 3600, suffix: 'sec' })}${field('Levels', 'levels', c.levels, { min: 1, max: 1000 })}${field('Rest', 'rest', c.rest, { min: 0, max: 3600, suffix: 'sec' })}<div class="field"><label for="b-direction">Direction</label><select id="b-direction" class="select" data-builder-key="direction"><option value="up" ${c.direction === 'up' ? 'selected' : ''}>Ascending</option><option value="down" ${c.direction === 'down' ? 'selected' : ''}>Descending</option></select></div>`;
   } else if (type === 'pyramid') {
     body = `${field('Start', 'start', c.start, { min: 1, max: 3600, suffix: 'sec' })}${field('Peak', 'peak', c.peak, { min: 1, max: 3600, suffix: 'sec' })}${field('Step', 'step', c.step, { min: 1, max: 3600, suffix: 'sec' })}${field('Rest', 'rest', c.rest, { min: 0, max: 3600, suffix: 'sec' })}`;
+  } else if (type === 'custom') {
+    body = `<div class="field"><div class="row-between"><div><div class="field-label">Routine structure</div><div class="small muted">Nest sections and repeat blocks. Every item can also be moved without dragging.</div></div><button class="btn" data-action="custom-add" data-parent="">＋ Add</button></div><div class="custom-tree">${renderCustomTree(c.nodes || [])}</div>${!(c.nodes || []).length ? `<div class="empty">Add a step, repeat, or section to begin.</div>` : ''}<button class="btn block" data-action="custom-preview">Preview compiled plan</button></div>`;
   } else if (type === 'stopwatch') {
     body = `<div class="card card-pad"><strong>Stopwatch</strong><p class="muted">Open-ended timing with pause, resume and lap recording.</p></div>`;
   }
@@ -324,8 +341,195 @@ function circuitStepRow(item, i) {
   </div>`;
 }
 
+
+function customPathParts(path = '') {
+  if (path === '') return [];
+  return String(path).split('.').filter((part) => part !== '').map((part) => Number(part));
+}
+
+function customNodeAt(path) {
+  if (!state.builder || state.builder.type !== 'custom') return null;
+  let nodes = state.builder.config.nodes || [];
+  let node = null;
+  for (const index of customPathParts(path)) {
+    node = nodes[index];
+    if (!node) return null;
+    nodes = node.children || [];
+  }
+  return node;
+}
+
+function customPathLabel(path = []) {
+  if (!state.builder || state.builder.type !== 'custom' || !Array.isArray(path) || !path.length) return 'Routine';
+  let nodes = state.builder.config.nodes || [];
+  const labels = [];
+  for (const index of path) {
+    const node = nodes[index];
+    if (!node) break;
+    labels.push(node.label || (node.type === 'repeat' ? 'Repeat block' : node.type === 'manual' ? 'Manual step' : 'Timed step'));
+    nodes = node.children || [];
+  }
+  return labels.join(' › ') || 'Routine';
+}
+
+function customChildrenAt(parentPath = '') {
+  if (!state.builder || state.builder.type !== 'custom') return null;
+  if (parentPath === '') return state.builder.config.nodes;
+  const parent = customNodeAt(parentPath);
+  return parent && (parent.type === 'repeat' || parent.type === 'section') ? parent.children : null;
+}
+
+function customParentCollection(path) {
+  const parts = customPathParts(path);
+  if (!parts.length) return null;
+  const index = parts.pop();
+  const parentPath = parts.join('.');
+  const collection = customChildrenAt(parentPath);
+  return collection ? { collection, index, parentPath } : null;
+}
+
+function createCustomNode(kind) {
+  if (kind === 'rest') return { id: uid('node'), type: 'timed', label: 'Rest', phase: 'rest', durationMs: 20000 };
+  if (kind === 'manual') return { id: uid('node'), type: 'manual', label: 'Manual step', phase: 'work', target: '' };
+  if (kind === 'repeat') return { id: uid('node'), type: 'repeat', count: 3, children: [
+    { id: uid('node'), type: 'timed', label: 'Work', phase: 'work', durationMs: 40000 },
+    { id: uid('node'), type: 'timed', label: 'Rest', phase: 'rest', durationMs: 20000 }
+  ] };
+  if (kind === 'section') return { id: uid('node'), type: 'section', label: 'Section', children: [
+    { id: uid('node'), type: 'timed', label: 'Work', phase: 'work', durationMs: 40000 }
+  ] };
+  return { id: uid('node'), type: 'timed', label: 'Work', phase: 'work', durationMs: 40000 };
+}
+
+function customPhaseOptions(value) {
+  return ['work','rest','prepare','recovery','cooldown','custom'].map((phase) => `<option value="${phase}" ${value === phase ? 'selected' : ''}>${phase[0].toUpperCase() + phase.slice(1)}</option>`).join('');
+}
+
+function renderCustomTree(nodes = [], depth = 0, prefix = []) {
+  return nodes.map((node, index) => {
+    const path = [...prefix, index].join('.');
+    const controls = `<div class="custom-node-actions"><button class="mini-btn" data-action="custom-move" data-path="${path}" data-dir="-1" aria-label="Move item up">↑</button><button class="mini-btn" data-action="custom-move" data-path="${path}" data-dir="1" aria-label="Move item down">↓</button><button class="mini-btn danger-text" data-action="custom-delete" data-path="${path}" aria-label="Delete item">×</button></div>`;
+    if (node.type === 'repeat') {
+      return `<div class="custom-node custom-container" style="--depth:${depth}">
+        <div class="custom-node-head"><span class="node-kind">Repeat</span>${controls}</div>
+        <div class="custom-container-config"><label>Rounds <input class="input compact" type="number" min="1" max="1000" value="${esc(node.count)}" data-custom-path="${path}" data-custom-field="count"></label><button class="btn ghost compact-btn" data-action="custom-add" data-parent="${path}">＋ Add inside</button></div>
+        <div class="custom-children">${renderCustomTree(node.children || [], depth + 1, [...prefix, index])}</div>
+      </div>`;
+    }
+    if (node.type === 'section') {
+      return `<div class="custom-node custom-container" style="--depth:${depth}">
+        <div class="custom-node-head"><span class="node-kind">Section</span>${controls}</div>
+        <input class="input" value="${esc(node.label || '')}" data-custom-path="${path}" data-custom-field="label" aria-label="Section name">
+        <div class="custom-container-config"><span class="small muted">${(node.children || []).length} item${(node.children || []).length === 1 ? '' : 's'}</span><button class="btn ghost compact-btn" data-action="custom-add" data-parent="${path}">＋ Add inside</button></div>
+        <div class="custom-children">${renderCustomTree(node.children || [], depth + 1, [...prefix, index])}</div>
+      </div>`;
+    }
+    const manual = node.type === 'manual';
+    const secondsValue = manual ? (node.timeCapMs ? sec(node.timeCapMs) : 0) : sec(node.durationMs || 0);
+    return `<div class="custom-node custom-leaf" style="--depth:${depth}">
+      <div class="custom-node-head"><span class="node-kind">${manual ? 'Manual' : 'Timed'}</span>${controls}</div>
+      <input class="input" value="${esc(node.label || '')}" data-custom-path="${path}" data-custom-field="label" aria-label="Step label">
+      <div class="custom-leaf-grid">
+        <select class="select" data-custom-path="${path}" data-custom-field="phase" aria-label="Step phase">${customPhaseOptions(node.phase || 'work')}</select>
+        <label class="custom-number-label">${manual ? 'Cap (0 = none)' : 'Seconds'}<input class="input" type="number" min="0" step="1" value="${secondsValue}" data-custom-path="${path}" data-custom-field="${manual ? 'timeCapMs' : 'durationMs'}" data-custom-unit="seconds"></label>
+      </div>
+      <input class="input" value="${esc(node.target || '')}" data-custom-path="${path}" data-custom-field="target" placeholder="Target / note (optional)" aria-label="Step target">
+    </div>`;
+  }).join('');
+}
+
+function showCustomAddSheet(parentPath = '') {
+  const parentName = parentPath ? (customNodeAt(parentPath)?.label || 'block') : 'routine';
+  showSheet(`Add to ${parentName}`, `<div class="sheet-list">
+    <button class="sheet-item" data-action="custom-add-kind" data-parent="${esc(parentPath)}" data-kind="timed"><div><strong>Timed step</strong><div class="small muted">A normal countdown step</div></div></button>
+    <button class="sheet-item" data-action="custom-add-kind" data-parent="${esc(parentPath)}" data-kind="rest"><div><strong>Rest</strong><div class="small muted">20-second rest step</div></div></button>
+    <button class="sheet-item" data-action="custom-add-kind" data-parent="${esc(parentPath)}" data-kind="manual"><div><strong>Manual step</strong><div class="small muted">Continue when you tap Done</div></div></button>
+    <button class="sheet-item" data-action="custom-add-kind" data-parent="${esc(parentPath)}" data-kind="repeat"><div><strong>Repeat block</strong><div class="small muted">Nested repeated sequence</div></div></button>
+    <button class="sheet-item" data-action="custom-add-kind" data-parent="${esc(parentPath)}" data-kind="section"><div><strong>Section</strong><div class="small muted">Named group for structure</div></div></button>
+  </div>`);
+}
+
+function addCustomNode(parentPath, kind) {
+  const collection = customChildrenAt(parentPath || '');
+  if (!collection) return toast('This block cannot contain items.');
+  collection.push(createCustomNode(kind));
+  closeSheet();
+  renderBuilder();
+}
+
+function moveCustomNode(path, direction) {
+  const info = customParentCollection(path);
+  if (!info) return;
+  const next = info.index + Number(direction);
+  if (next < 0 || next >= info.collection.length) return;
+  const [node] = info.collection.splice(info.index, 1);
+  info.collection.splice(next, 0, node);
+  renderBuilder();
+}
+
+function deleteCustomNode(path) {
+  const info = customParentCollection(path);
+  if (!info) return;
+  info.collection.splice(info.index, 1);
+  renderBuilder();
+}
+
+function refreshBuilderSummary() {
+  const summary = $('#builder-summary');
+  if (!summary || !state.builder) return;
+  const cfg = state.builder.config;
+  let estimate;
+  try { estimate = estimatePlanDuration(planFromType(state.builder.type, cfg)); } catch {}
+  summary.innerHTML = `<span>${esc(typeSummary(state.builder.type, cfg))}</span><strong>${estimate != null ? durationLabel(estimate) : 'Varies'}</strong>`;
+}
+
+function updateCustomInput(target) {
+  if (!state.builder || state.builder.type !== 'custom') return;
+  const path = target.dataset.customPath;
+  const fieldName = target.dataset.customField;
+  if (path == null || !fieldName) return;
+  const node = customNodeAt(path);
+  if (!node) return;
+  if (fieldName === 'durationMs' || fieldName === 'timeCapMs') {
+    const value = Number(target.value);
+    node[fieldName] = value > 0 ? ms(value) : (fieldName === 'timeCapMs' ? undefined : 0);
+  } else if (fieldName === 'count') {
+    node.count = Number(target.value);
+  } else {
+    node[fieldName] = target.value;
+  }
+  refreshBuilderSummary();
+}
+
+function showCustomPreview() {
+  if (!state.builder || state.builder.type !== 'custom') return;
+  const config = state.builder.config;
+  const issues = validateCustomRoutine({ title: config.title, nodes: config.nodes || [] });
+  if (issues.length) {
+    return showSheet('Routine issues', `<div class="stack">${issues.map((issue) => `<div class="card card-pad"><strong>${esc(issue.message)}</strong><div class="tiny">${esc(customPathLabel(issue.path || []))}</div></div>`).join('')}</div>`);
+  }
+  try {
+    const plan = planFromType('custom', config);
+    const estimate = estimatePlanDuration(plan);
+    const manualCount = plan.steps.filter((step) => step.manual).length;
+    const previewRows = plan.steps.slice(0, 120).map((item, index) => {
+      const section = item.sectionPath?.length ? item.sectionPath.map((part) => part.label).join(' › ') : '';
+      const round = item.repeatPath?.length ? item.repeatPath.map((part) => `${part.current}/${part.total}`).join(' · ') : '';
+      const timing = item.manual ? (item.timeCapMs ? `Manual · cap ${durationLabel(item.timeCapMs)}` : 'Manual') : durationLabel(item.durationMs);
+      return `<div class="preview-row"><span>${index + 1}</span><div><strong>${esc(item.label)}</strong>${section ? `<div class="tiny">${esc(section)}</div>` : ''}</div><div class="preview-meta">${round ? `<div>${esc(round)}</div>` : ''}<span>${esc(timing)}</span></div></div>`;
+    }).join('');
+    showSheet('Compiled Preview', `<div class="stack">
+      <div class="analytics-grid"><div class="metric"><strong>${plan.steps.length}</strong><span>Executable steps</span></div><div class="metric"><strong>${manualCount}</strong><span>Manual</span></div><div class="metric"><strong>${estimate == null ? 'Varies' : durationLabel(estimate)}</strong><span>Duration</span></div></div>
+      <div class="preview-list">${previewRows}${plan.steps.length > 120 ? `<div class="small muted">Showing first 120 of ${plan.steps.length} steps.</div>` : ''}</div>
+    </div>`);
+  } catch (error) {
+    toast(error.message || 'Routine could not be compiled.', 4200);
+  }
+}
+
 async function saveBuilder() {
   const { type, config } = state.builder;
+  try { planFromType(type, config); } catch (error) { return toast(error.issues?.[0]?.message || error.message || 'This routine is not valid.', 4200); }
   const routine = {
     id: state.builderEditingId || uid('routine'),
     type,
@@ -496,7 +700,9 @@ function updateLiveView(force = false) {
   $('#live-label').textContent = current.label || v.title;
   $('#live-target').textContent = current.target ? String(current.target) : '';
   const round = current.round;
-  $('#live-round').textContent = round ? `Round ${round.current} / ${round.total}` : (v.mode === 'stopwatch' ? 'Stopwatch' : v.title);
+  const sectionLabel = current.sectionPath?.at(-1)?.label;
+  const contextLabel = [sectionLabel, round ? `Round ${round.current} / ${round.total}` : ''].filter(Boolean).join(' · ');
+  $('#live-round').textContent = contextLabel || (v.mode === 'stopwatch' ? 'Stopwatch' : v.title);
   const next = v.next;
   $('#live-next').innerHTML = next ? `Next<br><strong>${esc(next.label)}${next.durationMs ? ` · ${formatClock(next.durationMs)}` : ''}</strong>` : '';
   const p = current.progress ?? 0;
@@ -669,7 +875,7 @@ function renderSettings() {
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">App</h2>
       <button class="btn" data-action="install">Install PWA</button>
-      <div class="small muted">Timer v1.0.1 · local-first · offline capable</div>
+      <div class="small muted">Timer v1.1.0 · local-first · offline capable</div>
     </section>`;
 }
 
@@ -722,6 +928,12 @@ async function importBackupFile(file) {
   try {
     if (!file || file.size > 25 * 1024 * 1024) throw new Error('Backup file is too large.');
     const data = JSON.parse(await file.text());
+    if (!data || data.format !== 'thiepn-timer-backup' || data.version !== 1 || !Array.isArray(data.routines) || !Array.isArray(data.sessions)) throw new Error('Unsupported or incomplete backup.');
+    for (const routine of data.routines) {
+      if (!routine?.id || !routine?.type || !routine?.config || !BUILDER_META[routine.type]) throw new Error('Backup contains an unsupported routine.');
+      try { planFromType(routine.type, routine.config); }
+      catch (error) { throw new Error(`Invalid routine “${routine.title || routine.id}”: ${error.issues?.[0]?.message || error.message || 'cannot compile'}`); }
+    }
     if (!confirm('Import this backup and merge it with current data? Existing matching IDs may be replaced.')) return;
     await state.db.importData(data, { replace: false });
     state.settings = await state.db.loadSettings();
@@ -818,8 +1030,6 @@ document.addEventListener('visibilitychange', onVisibilityChange);
 window.addEventListener('pagehide', () => { if (state.engine) state.db.saveActive(state.engine.snapshot(), state.activeMeta).catch(() => {}); });
 window.addEventListener('resize', () => { if (state.engine) updateLiveView(true); });
 
-window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); state.installPrompt = e; $('#install-btn')?.classList.remove('hidden'); });
-
 function updateBuilderInput(target) {
   if (!state.builder) return;
   const key = target.dataset.builderKey;
@@ -827,12 +1037,7 @@ function updateBuilderInput(target) {
   const cfg = state.builder.config;
   if (target.type === 'number') cfg[key] = Number(target.value);
   else cfg[key] = target.value;
-  const summary = $('#builder-summary');
-  if (summary) {
-    let estimate;
-    try { estimate = estimatePlanDuration(planFromType(state.builder.type, cfg)); } catch {}
-    summary.innerHTML = `<span>${esc(typeSummary(state.builder.type, cfg))}</span><strong>${estimate != null ? durationLabel(estimate) : 'Varies'}</strong>`;
-  }
+  refreshBuilderSummary();
 }
 
 function updateCircuitInput(target) {
@@ -855,8 +1060,9 @@ document.addEventListener('input', (e) => {
   }
   updateBuilderInput(e.target);
   updateCircuitInput(e.target);
+  updateCustomInput(e.target);
 });
-document.addEventListener('change', (e) => { updateBuilderInput(e.target); updateCircuitInput(e.target); if (e.target.dataset.setting) { const key = e.target.dataset.setting; state.settings[key] = key === 'adjustmentMs' ? Number(e.target.value) : e.target.value; saveSettings(); } });
+document.addEventListener('change', (e) => { updateBuilderInput(e.target); updateCircuitInput(e.target); updateCustomInput(e.target); if (e.target.dataset.setting) { const key = e.target.dataset.setting; state.settings[key] = key === 'adjustmentMs' ? Number(e.target.value) : e.target.value; saveSettings(); } });
 
 document.addEventListener('click', async (e) => {
   const routeBtn = e.target.closest('[data-route]');
@@ -875,6 +1081,11 @@ document.addEventListener('click', async (e) => {
   if (action === 'start-builder') return startBuilder();
   if (action === 'add-circuit-step') { state.builder.config.items.push({ label: 'Work', seconds: 40, phase: 'work', manual: false }); return renderBuilder(); }
   if (action === 'remove-circuit-step') { state.builder.config.items.splice(Number(btn.dataset.index), 1); return renderBuilder(); }
+  if (action === 'custom-add') return showCustomAddSheet(btn.dataset.parent || '');
+  if (action === 'custom-add-kind') return addCustomNode(btn.dataset.parent || '', btn.dataset.kind);
+  if (action === 'custom-move') return moveCustomNode(btn.dataset.path, btn.dataset.dir);
+  if (action === 'custom-delete') return deleteCustomNode(btn.dataset.path);
+  if (action === 'custom-preview') return showCustomPreview();
 
   if (action === 'quick-preset') { state.quickMs = Number(btn.dataset.ms); renderTimerHome(); if (state.settings.startPresetImmediately) startSession(buildCountdown({ durationMs: state.quickMs, label: `${durationLabel(state.quickMs)} Timer` }), { mode: 'countdown', title: `${durationLabel(state.quickMs)} Timer`, config: { durationMs: state.quickMs } }); return; }
   if (action === 'quick-adjust') { state.quickMs = clamp(state.quickMs + Number(btn.dataset.delta), 1000, 24 * 3600000); return renderTimerHome(); }

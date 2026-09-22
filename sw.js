@@ -1,4 +1,4 @@
-const CACHE = 'thiepn-timer-v2';
+const CACHE = 'thiepn-timer-v3';
 const APP_SHELL = [
   './',
   './index.html',

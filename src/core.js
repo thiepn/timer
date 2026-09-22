@@ -19,9 +19,9 @@ export class FakeClock {
   set(wall, mono = wall) { this.wall = wall; this.mono = mono; }
 }
 
-export function step({ label, phase = 'work', durationMs, manual = false, timeCapMs, completionBehavior = 'advance', round, target }) {
+export function step({ id, label, phase = 'work', durationMs, manual = false, timeCapMs, completionBehavior = 'advance', round, target, sourceNodeId, sectionPath, repeatPath }) {
   return {
-    id: uid('step'),
+    id: id || uid('step'),
     label: String(label || (phase === 'rest' ? 'Rest' : 'Work')),
     phase: PHASES.includes(phase) ? phase : 'custom',
     durationMs: manual ? undefined : Math.max(1, Number(durationMs) || 1),
@@ -29,7 +29,10 @@ export function step({ label, phase = 'work', durationMs, manual = false, timeCa
     timeCapMs: manual && timeCapMs ? Math.max(1, Number(timeCapMs)) : undefined,
     completionBehavior,
     round,
-    target
+    target,
+    sourceNodeId,
+    sectionPath: sectionPath ? structuredClone(sectionPath) : undefined,
+    repeatPath: repeatPath ? structuredClone(repeatPath) : undefined
   };
 }
 
@@ -146,6 +149,118 @@ export function buildPyramid({ title = 'Pyramid', startMs = 20000, peakMs = 6000
     if (restMs > 0 && i < full.length - 1) steps.push(step({ label: 'Rest', phase: 'rest', durationMs: restMs, round: { current: i + 1, total: full.length } }));
   });
   return { kind: 'timeline', title, steps, meta: { mode: 'pyramid' } };
+}
+
+export function validateCustomRoutine({ title = 'Custom Routine', nodes = [] } = {}) {
+  const issues = [];
+  const seenIds = new Set();
+  const add = (code, message, path = []) => issues.push({ code, message, path });
+
+  if (!String(title || '').trim()) add('MISSING_TITLE', 'Routine name is required.');
+  if (!Array.isArray(nodes) || nodes.length === 0) {
+    add('EMPTY_ROUTINE', 'Custom routine must contain at least one step.');
+    return issues;
+  }
+
+  const walk = (children, path = [], depth = 0) => {
+    if (!Array.isArray(children)) {
+      add('INVALID_CHILDREN', 'A routine container has invalid children.', path);
+      return;
+    }
+    if (depth > 32) {
+      add('MAX_DEPTH', 'Custom routine nesting is too deep.', path);
+      return;
+    }
+    children.forEach((node, index) => {
+      const nodePath = [...path, index];
+      if (!node || typeof node !== 'object') {
+        add('INVALID_NODE', 'Routine contains an invalid item.', nodePath);
+        return;
+      }
+      if (!node.id || typeof node.id !== 'string') add('MISSING_ID', 'Routine item is missing an ID.', nodePath);
+      else if (seenIds.has(node.id)) add('DUPLICATE_ID', `Duplicate routine item ID: ${node.id}.`, nodePath);
+      else seenIds.add(node.id);
+
+      if (node.type === 'timed') {
+        if (!Number.isFinite(node.durationMs) || node.durationMs <= 0) add('INVALID_DURATION', `${node.label || 'Timed step'} must have a positive duration.`, nodePath);
+      } else if (node.type === 'manual') {
+        if (node.timeCapMs != null && (!Number.isFinite(node.timeCapMs) || node.timeCapMs <= 0)) add('INVALID_CAP', `${node.label || 'Manual step'} has an invalid time cap.`, nodePath);
+      } else if (node.type === 'repeat') {
+        if (!Number.isInteger(node.count) || node.count < 1 || node.count > 1000) add('INVALID_REPEAT', 'Repeat count must be an integer from 1 to 1000.', nodePath);
+        if (!Array.isArray(node.children) || node.children.length === 0) add('EMPTY_REPEAT', 'Repeat block must contain at least one item.', nodePath);
+        else walk(node.children, nodePath, depth + 1);
+      } else if (node.type === 'section') {
+        if (!String(node.label || '').trim()) add('MISSING_SECTION_NAME', 'Section name is required.', nodePath);
+        if (!Array.isArray(node.children) || node.children.length === 0) add('EMPTY_SECTION', `${node.label || 'Section'} must contain at least one item.`, nodePath);
+        else walk(node.children, nodePath, depth + 1);
+      } else {
+        add('UNKNOWN_NODE', `Unsupported custom routine item type: ${String(node.type)}.`, nodePath);
+      }
+    });
+  };
+
+  walk(nodes);
+  return issues;
+}
+
+function customRuntimeId(nodeId, repeatPath) {
+  const suffix = repeatPath.length ? repeatPath.map((r) => `${r.nodeId}:${r.current}`).join('/') : 'base';
+  return `${nodeId}@${suffix}`;
+}
+
+export function buildCustomRoutine({ title = 'Custom Routine', nodes = [] } = {}) {
+  const issues = validateCustomRoutine({ title, nodes });
+  if (issues.length) {
+    const error = new Error(issues.map((issue) => issue.message).join(' '));
+    error.name = 'CustomRoutineValidationError';
+    error.issues = issues;
+    throw error;
+  }
+
+  const steps = [];
+  const MAX_STEPS = 50000;
+  const compileNodes = (children, context = { sectionPath: [], repeatPath: [] }) => {
+    for (const node of children) {
+      if (steps.length > MAX_STEPS) throw new Error('Custom routine expands to too many steps.');
+      if (node.type === 'section') {
+        compileNodes(node.children, {
+          ...context,
+          sectionPath: [...context.sectionPath, { id: node.id, label: node.label }]
+        });
+        continue;
+      }
+      if (node.type === 'repeat') {
+        for (let r = 1; r <= node.count; r++) {
+          compileNodes(node.children, {
+            ...context,
+            repeatPath: [...context.repeatPath, { nodeId: node.id, current: r, total: node.count }]
+          });
+        }
+        continue;
+      }
+
+      const innerRound = context.repeatPath.at(-1);
+      const common = {
+        id: customRuntimeId(node.id, context.repeatPath),
+        sourceNodeId: node.id,
+        label: node.label,
+        phase: PHASES.includes(node.phase) ? node.phase : 'custom',
+        target: node.target,
+        sectionPath: context.sectionPath,
+        repeatPath: context.repeatPath,
+        round: innerRound ? { current: innerRound.current, total: innerRound.total } : undefined
+      };
+      if (node.type === 'manual') {
+        steps.push(step({ ...common, manual: true, timeCapMs: node.timeCapMs }));
+      } else {
+        steps.push(step({ ...common, durationMs: node.durationMs }));
+      }
+    }
+  };
+
+  compileNodes(nodes);
+  if (steps.length > MAX_STEPS) throw new Error('Custom routine expands to too many steps.');
+  return { kind: 'timeline', title: String(title || 'Custom Routine'), steps, meta: { mode: 'custom' } };
 }
 
 export function estimatePlanDuration(plan) {

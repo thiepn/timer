@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FakeClock, TimerEngine, buildInterval, buildEmom, buildCountdown, buildPyramid, buildBoxing } from '../src/core.js';
+import { FakeClock, TimerEngine, buildInterval, buildEmom, buildCountdown, buildPyramid, buildBoxing, buildCustomRoutine, validateCustomRoutine, estimatePlanDuration } from '../src/core.js';
 
 test('interval compilation omits final rest by default', () => {
   const plan = buildInterval({ workMs: 40000, restMs: 20000, rounds: 3, prepareMs: 0 });
@@ -97,4 +97,60 @@ test('EMOM phase totals split work and rest after early completion', () => {
   const totals = engine.snapshot().phaseTotals;
   assert.equal(totals.work, 35000);
   assert.equal(totals.rest, 25000);
+});
+
+
+test('custom routine expands nested sections and repeats with source metadata', () => {
+  const plan = buildCustomRoutine({
+    title: 'Nested',
+    nodes: [
+      { id: 'warm', type: 'timed', label: 'Warm-up', phase: 'prepare', durationMs: 10000 },
+      { id: 'main', type: 'section', label: 'Main', children: [
+        { id: 'rounds', type: 'repeat', count: 2, children: [
+          { id: 'work', type: 'timed', label: 'Push-ups', phase: 'work', durationMs: 40000 },
+          { id: 'rest', type: 'timed', label: 'Rest', phase: 'rest', durationMs: 20000 }
+        ]}
+      ]}
+    ]
+  });
+  assert.deepEqual(plan.steps.map((s) => s.label), ['Warm-up','Push-ups','Rest','Push-ups','Rest']);
+  assert.equal(plan.steps[1].sourceNodeId, 'work');
+  assert.deepEqual(plan.steps[1].sectionPath.map((s) => s.label), ['Main']);
+  assert.deepEqual(plan.steps[1].repeatPath.map((r) => [r.current, r.total]), [[1,2]]);
+  assert.equal(plan.steps[3].round.current, 2);
+  assert.notEqual(plan.steps[1].id, plan.steps[3].id);
+});
+
+test('custom routine with uncapped manual step has variable estimated duration', () => {
+  const plan = buildCustomRoutine({
+    title: 'Manual',
+    nodes: [
+      { id: 'manual', type: 'manual', label: 'Pull-ups', phase: 'work' },
+      { id: 'rest', type: 'timed', label: 'Rest', phase: 'rest', durationMs: 120000 }
+    ]
+  });
+  assert.equal(estimatePlanDuration(plan), undefined);
+  assert.equal(plan.steps[0].manual, true);
+});
+
+test('custom routine validation catches empty containers and duplicate IDs', () => {
+  const issues = validateCustomRoutine({
+    title: 'Broken',
+    nodes: [
+      { id: 'same', type: 'repeat', count: 2, children: [] },
+      { id: 'same', type: 'timed', label: 'Work', phase: 'work', durationMs: 1000 }
+    ]
+  });
+  assert.ok(issues.some((x) => x.code === 'EMPTY_REPEAT'));
+  assert.ok(issues.some((x) => x.code === 'DUPLICATE_ID'));
+});
+
+test('custom routine expansion is deterministic for persisted source IDs', () => {
+  const config = {
+    title: 'Deterministic',
+    nodes: [{ id: 'r', type: 'repeat', count: 2, children: [{ id: 'w', type: 'timed', label: 'Work', phase: 'work', durationMs: 1000 }] }]
+  };
+  const a = buildCustomRoutine(config);
+  const b = buildCustomRoutine(config);
+  assert.deepEqual(a.steps.map((x) => x.id), b.steps.map((x) => x.id));
 });
