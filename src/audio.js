@@ -46,66 +46,69 @@ export class CueManager {
     }
   }
 
-  haptic(pattern = 'short') {
-    const settings = this.getSettings();
-    if (!settings.haptics || this.muted || !navigator.vibrate) return;
-    try {
-      const p = pattern === 'double' ? [60, 50, 60] : pattern === 'finish' ? [120, 70, 180] : [60];
-      navigator.vibrate(p);
-    } catch {}
+  deliverTick(kind, view, snapshot, config, soundOverride = '') {
+    const key = `${view.current?.id || 'session'}:${kind}`;
+    if (this.delivered.has(key)) return false;
+    this.delivered.add(key);
+    void this.play(kind, config, soundOverride, this.generation);
+    this.haptic(kind, config);
+    return true;
   }
 
-  speak(text) {
-    const settings = this.getSettings();
-    if (!settings.voice || this.muted || !('speechSynthesis' in globalThis) || !text) return;
-    try {
-      speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.rate = 1.05;
-      u.volume = 0.9;
-      speechSynthesis.speak(u);
-    } catch {}
-  }
-
-  onEvent(event) {
-    if (event.type === 'step-started') {
-      const phase = event.step?.phase;
-      this.pattern(phase === 'rest' || phase === 'recovery' || phase === 'cooldown' ? 'rest' : phase === 'prepare' ? 'prepare' : 'work');
-      this.haptic(phase === 'work' ? 'double' : 'short');
-      if (event.step?.label && phase !== 'prepare') this.speak(event.step.label);
-      this.lastCountdown = null;
-      this.lastStepId = event.step?.id;
-    }
-    if (event.type === 'session-completed') {
-      this.pattern('finish');
-      this.haptic('finish');
-      this.speak('Complete');
-      this.lastCountdown = null;
-    }
-    if (event.type === 'session-paused') speechSynthesis?.cancel?.();
-  }
-
-  tick(view) {
-    const settings = this.getSettings();
-    if (!settings.countdownCues || !view?.current || view.status !== 'running') return;
+  tick(view, snapshot) {
+    if (this.muted || !view?.current || view.status !== 'running') return;
+    const step = snapshot?.plan?.kind === 'timeline' ? snapshot.plan.steps?.[snapshot.currentIndex] : view.current;
+    const config = this.config(snapshot, step);
     const rem = view.current.remainingMs;
-    if (rem == null || rem <= 0 || rem > 3100) {
-      if (rem > 3100) this.lastCountdown = null;
+    const progress = view.current.progress;
+    if (rem != null && rem > 0 && config.countdownCues && rem <= 3100) {
+      const sec = Math.ceil(rem / 1000);
+      if (sec >= 1 && sec <= 3) this.deliverTick(`countdown-${sec}`, view, snapshot, config, this.mappedSound(config, 'countdown') || 'countdown');
       return;
     }
-    const sec = Math.ceil(rem / 1000);
-    if (sec >= 1 && sec <= 3 && sec !== this.lastCountdown) {
-      this.lastCountdown = sec;
-      this.pattern('countdown');
+    if (rem != null && config.warningSeconds > 3) {
+      const target = config.warningSeconds * 1000;
+      if (rem <= target && rem > Math.max(3100, target - 1600)) {
+        if (this.deliverTick('warning', view, snapshot, config, this.mappedSound(config, 'warning') || 'warning') && config.voice && config.voiceVerbosity === 'detailed') this.speak(`${config.warningSeconds} seconds remaining.`, config);
+        return;
+      }
+    }
+    if (config.customPercent != null && progress != null) {
+      const target = config.customPercent / 100;
+      if (progress >= target && progress <= Math.min(1, target + .12)) {
+        this.deliverTick(`custom-${config.customPercent}`, view, snapshot, config, config.customSound || this.mappedSound(config, 'halfway') || 'halfway');
+        return;
+      }
+    }
+    if (config.halfwayCue && progress != null && progress >= .5 && progress <= .62) {
+      this.deliverTick('halfway', view, snapshot, config, this.mappedSound(config, 'halfway') || 'halfway');
     }
   }
 
-  toggleMute() { this.muted = !this.muted; return this.muted; }
+  async test(kind = 'work', routineOverrides = {}) {
+    const config = resolveCueConfig(this.getSettings?.() || {}, this.getProfiles?.() || [], routineOverrides, {});
+    await this.play(kind, config, this.mappedSound(config, kind));
+    this.haptic(kind, config);
+  }
+
+  async inspectAudioFile(file) {
+    if (!file || file.size <= 0) throw new Error('Choose a valid audio file.');
+    if (file.size > 2 * 1024 * 1024) throw new Error('Custom cue sounds must be 2 MB or smaller.');
+    if (!String(file.type || '').startsWith('audio/')) throw new Error('Custom cue sounds must be audio files.');
+    if (!await this.init()) throw new Error('Audio decoding is unavailable in this browser.');
+    const data = await file.arrayBuffer();
+    const buffer = await this.ctx.decodeAudioData(data.slice(0));
+    if (!Number.isFinite(buffer.duration) || buffer.duration <= 0 || buffer.duration > 15) throw new Error('Custom cue sounds must be 15 seconds or shorter.');
+    return { data, durationMs: Math.round(buffer.duration * 1000), mimeType: file.type, size: file.size };
+  }
+
+  clearCustomSoundCache(id) { if (id) this.customBufferCache.delete(id); else this.customBufferCache.clear(); }
+  toggleMute() { this.muted = !this.muted; if (this.muted) this.endSession(); return this.muted; }
 }
 
 export class WakeLockManager {
   constructor() { this.sentinel = null; }
-  supported() { return 'wakeLock' in navigator; }
+  supported() { return typeof navigator !== 'undefined' && 'wakeLock' in navigator; }
   async acquire() {
     try {
       if (!this.supported() || document.visibilityState !== 'visible') return false;
