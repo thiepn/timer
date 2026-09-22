@@ -122,3 +122,33 @@ test('selective backups only carry requested categories', async () => {
   assert.equal(backup.settings, null);
   assert.equal(backup.selection.sessions, false);
 });
+
+
+test('active-session persistence rejects stale checkpoint sequence numbers', async () => {
+  const db = new TimerDB();
+  await db.open();
+  const newer = { id: 'session-a', startedAt: 1000, sequence: 9, status: 'running' };
+  const stale = { id: 'session-a', startedAt: 1000, sequence: 4, status: 'running' };
+  await db.saveActive(newer, { title: 'Newer' });
+  await db.saveActive(stale, { title: 'Stale' });
+  const active = await db.getActive();
+  assert.equal(active.sequence, 9);
+  assert.equal(active.meta.title, 'Newer');
+});
+
+test('active-session clear is ordered after pending writes and can be session-guarded', async () => {
+  const db = new TimerDB();
+  await db.open();
+  const first = { id: 'session-a', startedAt: 1000, sequence: 1, status: 'running' };
+  const second = { id: 'session-a', startedAt: 1000, sequence: 2, status: 'running' };
+  const p1 = db.saveActive(first, {});
+  const p2 = db.saveActive(second, {});
+  const p3 = db.clearActive('session-a');
+  await Promise.all([p1, p2, p3]);
+  assert.equal(await db.getActive(), undefined);
+
+  await db.saveActive({ id: 'session-b', startedAt: 2000, sequence: 1, status: 'running' }, {});
+  const clearedWrong = await db.clearActive('session-a');
+  assert.equal(clearedWrong, false);
+  assert.equal((await db.getActive()).snapshot.id, 'session-b');
+});

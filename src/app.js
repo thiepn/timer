@@ -7,7 +7,7 @@ import {
 import { TimerDB, defaultSettings, requestPersistentStorage, storageEstimate } from './db.js';
 import { CueManager, WakeLockManager, requestNotificationPermission, showCompletionNotification, showActiveSessionNotification, closeTimerNotification, BUILTIN_CUE_PROFILES, SOUND_PACKS, cueProfileById, profileSettings } from './audio.js';
 import { analyzeSession, comparisonFingerprint, comparableSessions, objectiveRecord, factualTrend, summarizeRange, startOfLocalDay, startOfLocalWeek, monthCalendar, sessionsToCsv } from './analytics.js';
-import { createBackupArchive, verifyBackupArchive, encryptBackupArchive, decryptBackupArchive, isLegacyBackup, isEncryptedBackup, isBackupArchive, isRoutinePackage, backupCounts } from './resilience.js';
+import { createBackupArchive, verifyBackupArchive, encryptBackupArchive, decryptBackupArchive, isLegacyBackup, isEncryptedBackup, isBackupArchive, isRoutinePackage, backupCounts, assertBackupEntityLimits } from './resilience.js';
 import { SessionOwnershipManager, MediaSessionManager, parseLaunchCommand, detectDeviceCapabilities } from './device.js';
 import { LOCALE_OPTIONS, resolveLocale, applyDocumentLocale, localizeDOM, translateSource, translateBuiltInLabel, phaseLabel as localizedPhaseLabel, formatDuration, formatDate, formatNumber, t as i18nT } from './i18n.js';
 import { FocusTrap, Announcer, focusMainHeading, isInteractiveTarget, timerEventAnnouncement } from './accessibility.js';
@@ -22,7 +22,7 @@ const ms = (seconds) => Math.max(0, Math.round(Number(seconds || 0) * 1000));
 const sec = (milliseconds) => Math.round(Number(milliseconds || 0) / 1000);
 const mins = (minutes) => ms(Number(minutes || 0) * 60);
 const pct = (n) => `${Math.round(clamp(n || 0, 0, 1) * 100)}%`;
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '2.0.0';
 
 const BUILDER_META = {
   interval: { name: 'Interval', desc: 'Work / rest repetitions' },
@@ -1354,7 +1354,9 @@ async function finalizeSession(snapshot, cancelled = false) {
   mediaSession.disable();
   ownership.stopHeartbeat();
   const plan = snapshot.plan;
-  const activeDurationMs = Math.max(0, (snapshot.endedAt || Date.now()) - snapshot.startedAt - (snapshot.pausedTotalMs || 0));
+  const activeDurationMs = Number.isFinite(snapshot.finalElapsedMs)
+    ? Math.max(0, snapshot.finalElapsedMs)
+    : Math.max(0, (snapshot.endedAt || Date.now()) - snapshot.startedAt - (snapshot.pausedTotalMs || 0));
   const totals = snapshot.phaseTotals || {};
   let workMs = Number(totals.work) || 0;
   let restMs = (Number(totals.rest) || 0) + (Number(totals.recovery) || 0);
@@ -1391,7 +1393,7 @@ async function finalizeSession(snapshot, cancelled = false) {
   };
   record.comparisonFingerprint = comparisonFingerprint(record);
   if (!cancelled) await state.db.put('sessions', record).catch(() => toast('Session history could not be saved.'));
-  await state.db.clearActive().catch(() => {});
+  await state.db.clearActive(snapshot.id).catch(() => {});
   ownership.post('SESSION_ENDED', { sessionId: snapshot.id });
   await ownership.release();
   state.engineUnsub?.();
@@ -2165,6 +2167,7 @@ function validateIncomingPayload(payload) {
     payload = { format: 'thiepn-timer-backup', version: 4, exportedAt: payload.exportedAt, selection: { routines: true, blocks: true, cueProfiles: true, customSounds: true, sessions: false, settings: false }, routines: payload.routine ? [payload.routine] : [], blocks: payload.blocks || [], cueProfiles: payload.cueProfiles || [], customSounds: payload.customSounds || [], sessions: [], settings: null };
   }
   if (!payload || payload.format !== 'thiepn-timer-backup' || ![1,2,3,4].includes(Number(payload.version)) || !Array.isArray(payload.routines) || !Array.isArray(payload.sessions)) throw new Error('Unsupported or incomplete Timer backup.');
+  assertBackupEntityLimits(payload);
   const quarantine = [];
   const validSounds = [];
   const sourceSounds = payload.version >= 3 && Array.isArray(payload.customSounds) ? payload.customSounds : [];
@@ -2437,7 +2440,8 @@ async function onVisibilityChange() {
     }
   } else {
     await closeTimerNotification('timer-active');
-    state.engine.rebaseToWall();
+    // Keep foreground sessions on the monotonic clock. Re-basing to wall time here
+    // would make manual system-clock changes look like workout time.
     state.engine.reconcile();
     cue.init().catch(() => {});
     const status = state.engine?.view()?.status;

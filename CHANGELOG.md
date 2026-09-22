@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.0.0
+
+### Fixed
+- Foreground sessions no longer rebase to wall-clock time when returning from the background, preventing manual system-clock changes from becoming workout time.
+- Pause/resume and manual finish preserve active duration using the monotonic clock while the runtime remains alive.
+- Active-session checkpoints are serialized and sequence-guarded so stale asynchronous writes cannot replace newer recovery state or reappear after final cleanup.
+
+### Security and resilience
+- Added a restrictive production Content Security Policy and no-referrer policy.
+- Added static release checks forbidding `eval`, `new Function`, `document.write`, and non-local JavaScript imports.
+- Encrypted-backup PBKDF2 work factors are bounded before key derivation.
+- Backup entity counts are bounded before restore validation loops.
+
+### Certification
+- Added seeded command fuzzing across six timer plan families.
+- Added running/paused process-loss recovery equivalence tests and historical backup v1-v4 compatibility tests.
+- Added ownership-lease expiry certification and offline-shell import completeness checks.
+- Added `npm run certify` and consolidated CI onto the production release gate.
+- Added release scope, certification matrix and documented platform limitations.
+
+### Release
+- App version: 2.0.0.
+- IndexedDB schema remains v5.
+- Backup payload remains v4.
+- Service-worker cache generation is v12.
+
 ## 1.9.0
 
 ### Added

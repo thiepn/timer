@@ -1,6 +1,6 @@
 # Timer
 
-Current app version: **1.9.0**.
+Current app version: **2.0.0**.
 
 A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 
@@ -195,3 +195,14 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 - Service-worker runtime caching is restricted to the declared app shell so arbitrary same-origin GETs cannot grow cache storage indefinitely.
 - Added deterministic performance budgets, large-fixture regression tests, a benchmark command and a GitHub Actions quality workflow.
 - Current reference benchmark on the development environment: ~11 ms for a 1,000-step generated compile, ~10 ms for a 10,000-session summary, and ~98 KiB gzip for the summed offline shell assets.
+
+## v2.0.0 production certification
+
+- Feature scope is frozen in `RELEASE_SCOPE.md`.
+- Added seeded cross-mode command fuzzing and process-loss recovery certification.
+- Foreground and paused timing now stay monotonic across manual wall-clock changes.
+- Active-session persistence is serialized and sequence-guarded against stale checkpoint overwrites.
+- Added CSP/referrer hardening and static arbitrary-code-execution checks.
+- Backup import now bounds PBKDF2 work factors and entity counts before expensive restore processing.
+- Added one-command `npm run certify` gate covering tests, syntax, performance and release packaging.
+- Platform-specific limitations and the real-device certification boundary are documented explicitly.
