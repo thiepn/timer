@@ -11,6 +11,7 @@ import { createBackupArchive, verifyBackupArchive, encryptBackupArchive, decrypt
 import { SessionOwnershipManager, MediaSessionManager, parseLaunchCommand, detectDeviceCapabilities } from './device.js';
 import { LOCALE_OPTIONS, resolveLocale, applyDocumentLocale, localizeDOM, translateSource, translateBuiltInLabel, phaseLabel as localizedPhaseLabel, formatDuration, formatDate, formatNumber, t as i18nT } from './i18n.js';
 import { FocusTrap, Announcer, focusMainHeading, isInteractiveTarget, timerEventAnnouncement } from './accessibility.js';
+import { PerformanceMetrics, MaintenanceCoordinator, liveSchedulerPolicy, reduceMotionEnabled } from './performance.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -21,7 +22,7 @@ const ms = (seconds) => Math.max(0, Math.round(Number(seconds || 0) * 1000));
 const sec = (milliseconds) => Math.round(Number(milliseconds || 0) / 1000);
 const mins = (minutes) => ms(Number(minutes || 0) * 60);
 const pct = (n) => `${Math.round(clamp(n || 0, 0, 1) * 100)}%`;
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.9.0';
 
 const BUILDER_META = {
   interval: { name: 'Interval', desc: 'Work / rest repetitions' },
@@ -137,6 +138,10 @@ const state = {
   customSounds: [],
   availableVoices: [],
   sessions: [],
+  historyLoadedAll: false,
+  historyLoading: false,
+  historyVisible: 100,
+  historySearchTimer: 0,
   builder: null,
   builderEditingId: null,
   builderEditingBlockId: null,
@@ -146,6 +151,11 @@ const state = {
   engineUnsub: null,
   activeMeta: null,
   liveRaf: 0,
+  liveTimeout: 0,
+  liveLastFrame: 0,
+  liveSemanticKey: '',
+  liveModeKey: '',
+  liveSchedulerKind: 'idle',
   lastLiveSecond: null,
   lastProgress: -1,
   finalized: false,
@@ -172,6 +182,7 @@ const state = {
   remoteActive: null,
   remoteEngine: null,
   remoteRaf: 0,
+  remoteTimer: 0,
   displayMode: false,
   pendingTakeover: false,
   launchCommand: { type: 'HOME' },
@@ -180,7 +191,8 @@ const state = {
   updateDeferred: false,
   reloadOnControllerChange: false,
   deviceCapabilities: null,
-  locale: 'en'
+  locale: 'en',
+  bootPerformance: null
 };
 
 const currentLocale = () => state.locale || resolveLocale(state.settings?.language || 'system');
@@ -189,6 +201,9 @@ const durationLabel = (value, options = {}) => formatDuration(value, currentLoca
 const uiDate = (value, options = {}) => formatDate(value, currentLocale(), options, state.settings?.timeFormat || 'system', state.settings?.numberSystem || 'system');
 const uiNumber = (value, options = {}) => formatNumber(value, currentLocale(), options, state.settings?.numberSystem || 'system');
 
+const perf = new PerformanceMetrics();
+perf.mark('app:module');
+const maintenance = new MaintenanceCoordinator();
 const cue = new CueManager(() => ({ ...state.settings, voice: state.settings.screenReaderOptimized ? false : state.settings.voice }), () => state.cueProfiles, async (id) => state.db.get('customSounds', id));
 const wakeLock = new WakeLockManager();
 const ownership = new SessionOwnershipManager();
@@ -283,6 +298,7 @@ function setRemoteActive(active) {
 
 function renderRemoteActive() {
   cancelAnimationFrame(state.remoteRaf);
+  clearTimeout(state.remoteTimer);
   setLiveMode(true);
   const engine = state.remoteEngine;
   const view = engine?.view?.();
@@ -311,7 +327,7 @@ function renderRemoteActive() {
       $('#remote-round').textContent = round ? `Round ${round.current} / ${round.total}` : v.title;
     }
     const shell = $('#remote-live'); if (shell) shell.dataset.phase = current.phase || 'custom';
-    state.remoteRaf = requestAnimationFrame(loop);
+    state.remoteTimer = setTimeout(loop, v.mode === 'stopwatch' ? 100 : 250);
   };
   loop();
 }
@@ -326,6 +342,7 @@ async function restoreOwnedActive(active) {
     cue.beginSession(state.activeMeta);
     attachEngine(engine, state.activeMeta);
     if (engine.view()?.status === 'completed') { await finalizeSession(engine.snapshot(), false); return true; }
+    maintenance.suspend('active-session');
     if (state.settings.keepAwake) wakeLock.acquire();
     configureMediaSession();
     startOwnershipHeartbeat();
@@ -339,6 +356,7 @@ async function restoreOwnedActive(active) {
 
 async function relinquishRuntimeOwnership() {
   if (!ownership.isOwner()) return;
+  maintenance.resume('active-session');
   const snapshot = state.engine?.snapshot();
   const meta = state.activeMeta;
   if (snapshot) await state.db.saveActive(snapshot, meta).catch(() => {});
@@ -470,6 +488,10 @@ function setRoute(route) {
   state.builder = null;
   state.builderEditingId = null;
   state.builderEditingBlockId = null;
+  if (route === 'history') {
+    state.historyVisible = 100;
+    void ensureFullHistory();
+  }
   render();
   focusMainHeading(main);
 }
@@ -1278,6 +1300,7 @@ async function startRoutine(id) {
 
 async function startSession(plan, meta) {
   if (state.engine) return toast('A timer is already running.');
+  maintenance.suspend('active-session');
   if (!ownership.isOwner() && !await ownership.acquire()) {
     const active = await state.db.getActive().catch(() => null);
     if (active?.snapshot) { setRemoteActive(active); renderRemoteActive(); }
@@ -1323,7 +1346,8 @@ function attachEngine(engine, meta) {
 async function finalizeSession(snapshot, cancelled = false) {
   if (state.finalized) return;
   state.finalized = true;
-  cancelAnimationFrame(state.liveRaf);
+  stopLiveScheduler();
+  maintenance.resume('active-session');
   await wakeLock.release();
   await closeTimerNotification('timer-active');
   cue.endSession();
@@ -1387,6 +1411,56 @@ async function finalizeSession(snapshot, cancelled = false) {
   if (state.updateDeferred) setTimeout(() => applyUpdate(), 250);
 }
 
+function stopLiveScheduler() {
+  cancelAnimationFrame(state.liveRaf);
+  clearTimeout(state.liveTimeout);
+  state.liveRaf = 0;
+  state.liveTimeout = 0;
+  state.liveSchedulerKind = 'idle';
+}
+
+function currentLiveSchedulerPolicy() {
+  const view = state.engine?.view?.();
+  return liveSchedulerPolicy({
+    visible: document.visibilityState === 'visible',
+    status: view?.status || 'idle',
+    mode: view?.mode || 'generic',
+    layout: state.settings.layout || 'focus',
+    progressKnown: view?.current?.progress != null,
+    reducedMotion: reduceMotionEnabled(state.settings.reduceMotion)
+  });
+}
+
+function runLiveTick(timestamp = performance.now()) {
+  if (!state.engine) return stopLiveScheduler();
+  state.engine.reconcile();
+  if (!state.engine) return stopLiveScheduler();
+  const view = state.engine.view();
+  cue.tick(view, state.engine.session);
+  updateLiveView(false);
+  const policy = currentLiveSchedulerPolicy();
+  if (policy.kind !== state.liveSchedulerKind) return startLiveScheduler();
+  if (policy.kind === 'animation') {
+    if (timestamp - state.liveLastFrame >= policy.minFrameMs) state.liveLastFrame = timestamp;
+    state.liveRaf = requestAnimationFrame(runLiveTick);
+  } else if (policy.kind === 'timeout') {
+    state.liveTimeout = setTimeout(() => runLiveTick(performance.now()), policy.intervalMs);
+  } else stopLiveScheduler();
+}
+
+function startLiveScheduler() {
+  stopLiveScheduler();
+  if (!state.engine) return;
+  const policy = currentLiveSchedulerPolicy();
+  state.liveSchedulerKind = policy.kind;
+  if (policy.kind === 'animation') {
+    state.liveLastFrame = 0;
+    state.liveRaf = requestAnimationFrame(runLiveTick);
+  } else if (policy.kind === 'timeout') {
+    state.liveTimeout = setTimeout(() => runLiveTick(performance.now()), policy.intervalMs);
+  }
+}
+
 function renderLive() {
   if (!state.engine) return;
   setLiveMode(true);
@@ -1419,18 +1493,11 @@ function renderLive() {
       </div>
       ${state.liveLocked ? `<div class="lock-overlay"><button class="unlock-btn" data-action="live-unlock">🔒 Unlock controls</button></div>` : ''}
     </section>`;
+  state.liveSemanticKey = '';
+  state.liveModeKey = '';
   updateLiveView(true);
   setupWallAutoHide();
-  cancelAnimationFrame(state.liveRaf);
-  const loop = () => {
-    if (!state.engine) return;
-    state.engine.reconcile();
-    if (!state.engine) return;
-    cue.tick(state.engine.view(), state.engine.session);
-    updateLiveView(false);
-    state.liveRaf = requestAnimationFrame(loop);
-  };
-  state.liveRaf = requestAnimationFrame(loop);
+  startLiveScheduler();
 }
 
 function updateLiveView(force = false) {
@@ -1445,11 +1512,7 @@ function updateLiveView(force = false) {
   const text = formatClock(displayMs, { tenths, countUp: isCountUp });
   const liveTime = $('#live-time');
   if (force || liveTime?.textContent !== text) liveTime.textContent = text;
-  const semanticPhase = v.status === 'paused' ? translateSource('Paused', currentLocale()) : localizedPhaseLabel(current.phase || (isCountUp ? 'custom' : 'work'), currentLocale());
-  $('#live-phase').textContent = semanticPhase;
-  $('#live-label').textContent = translateBuiltInLabel(current.label || v.title, currentLocale());
-  $('#live-target').textContent = current.target ? String(current.target) : '';
-  liveTime?.setAttribute('aria-label', current.remainingMs != null ? tr('a11y.remaining', { duration: durationLabel(current.remainingMs, { style: 'long' }) }) : `${translateBuiltInLabel(current.label || v.title, currentLocale())} ${durationLabel(current.elapsedMs || 0, { style: 'long' })}`);
+
   const round = current.round;
   const blockLabel = current.blockPath?.at(-1)?.title;
   const sectionLabel = current.sectionPath?.at(-1)?.label;
@@ -1457,24 +1520,46 @@ function updateLiveView(force = false) {
   const generatorLabel = generator?.type === 'random' ? `Random ${generator.current} / ${generator.total}` : '';
   const roundLabel = round ? tr('a11y.round', round) : '';
   const contextLabel = [blockLabel, sectionLabel, generatorLabel, roundLabel].filter(Boolean).join(' · ');
-  $('#live-round').textContent = contextLabel || (v.mode === 'stopwatch' ? translateSource('Stopwatch', currentLocale()) : translateBuiltInLabel(v.title, currentLocale()));
   const next = v.next;
-  $('#live-next').innerHTML = next ? `${translateSource('Next', currentLocale())}<br><strong>${esc(translateBuiltInLabel(next.label, currentLocale()))}${next.durationMs ? ` · ${formatClock(next.durationMs)}` : ''}</strong>` : '';
+  const semanticKey = [
+    v.status, current.id, current.phase, current.label, current.target, contextLabel,
+    next?.id, next?.label, state.settings.layout, state.liveLocked, cue.muted
+  ].join('|');
+
+  if (force || state.liveSemanticKey !== semanticKey) {
+    state.liveSemanticKey = semanticKey;
+    const semanticPhase = v.status === 'paused' ? translateSource('Paused', currentLocale()) : localizedPhaseLabel(current.phase || (isCountUp ? 'custom' : 'work'), currentLocale());
+    $('#live-phase').textContent = semanticPhase;
+    $('#live-label').textContent = translateBuiltInLabel(current.label || v.title, currentLocale());
+    $('#live-target').textContent = current.target ? String(current.target) : '';
+    $('#live-round').textContent = contextLabel || (v.mode === 'stopwatch' ? translateSource('Stopwatch', currentLocale()) : translateBuiltInLabel(v.title, currentLocale()));
+    $('#live-next').innerHTML = next ? `${translateSource('Next', currentLocale())}<br><strong>${esc(translateBuiltInLabel(next.label, currentLocale()))}${next.durationMs ? ` · ${formatClock(next.durationMs)}` : ''}</strong>` : '';
+    const shell = $('#live-shell');
+    shell.dataset.phase = current.phase || 'custom';
+    shell.classList.toggle('paused', v.status === 'paused');
+    shell.classList.toggle('controls-hidden', state.controlsHidden && state.settings.layout === 'wall');
+    $('#pause-btn').textContent = translateSource(v.status === 'paused' ? 'Resume' : 'Pause', currentLocale());
+    const canAdjust = v.status === 'running' && current.remainingMs != null;
+    $('#adjust-minus').disabled = !canAdjust;
+    $('#adjust-plus').disabled = !canAdjust;
+    updateSecondaryAction(v);
+  }
+
+  liveTime?.setAttribute('aria-label', current.remainingMs != null ? tr('a11y.remaining', { duration: durationLabel(current.remainingMs, { style: 'long' }) }) : `${translateBuiltInLabel(current.label || v.title, currentLocale())} ${durationLabel(current.elapsedMs || 0, { style: 'long' })}`);
   const p = current.progress ?? 0;
   $('#live-progress').style.transform = `scaleX(${clamp(p, 0, 1)})`;
   const progressTrack = $('#live-progress-track');
   if (current.progress == null) progressTrack?.removeAttribute('aria-valuenow');
-  else progressTrack?.setAttribute('aria-valuenow', String(Math.round(clamp(p,0,1) * 100)));
-  const shell = $('#live-shell');
-  shell.dataset.phase = current.phase || 'custom';
-  shell.classList.toggle('paused', v.status === 'paused');
-  shell.classList.toggle('controls-hidden', state.controlsHidden && state.settings.layout === 'wall');
-  $('#pause-btn').textContent = translateSource(v.status === 'paused' ? 'Resume' : 'Pause', currentLocale());
-  const canAdjust = v.status === 'running' && current.remainingMs != null;
-  $('#adjust-minus').disabled = !canAdjust;
-  $('#adjust-plus').disabled = !canAdjust;
-  renderModePanel(v);
-  updateSecondaryAction(v);
+  else {
+    const percent = String(Math.round(clamp(p, 0, 1) * 100));
+    if (progressTrack?.getAttribute('aria-valuenow') !== percent) progressTrack?.setAttribute('aria-valuenow', percent);
+  }
+
+  const modeKey = `${v.mode}|${current.id || ''}|${JSON.stringify(v.data || {})}`;
+  if (force || modeKey !== state.liveModeKey) {
+    state.liveModeKey = modeKey;
+    renderModePanel(v);
+  }
 }
 
 function renderModePanel(v) {
@@ -1642,7 +1727,13 @@ function renderHistory() {
 }
 
 function renderHistoryList(sessions) {
-  return `<section class="section"><div class="row-between"><h2 class="section-title" style="margin:0">Sessions</h2><span class="pill">${sessions.length}</span></div><div class="list" style="margin-top:12px">${sessions.length ? sessions.map(sessionRowDetailed).join('') : `<div class="card empty">No sessions match this filter.</div>`}</div></section>`;
+  const visible = sessions.slice(0, state.historyVisible);
+  const remaining = Math.max(0, sessions.length - visible.length);
+  return `<section class="section"><div class="row-between"><h2 class="section-title" style="margin:0">Sessions</h2><span class="pill">${sessions.length}</span></div>
+    ${state.historyLoading ? '<div class="small muted history-loading">Loading full history…</div>' : ''}
+    <div class="list" style="margin-top:12px">${visible.length ? visible.map(sessionRowDetailed).join('') : `<div class="card empty">No sessions match this filter.</div>`}</div>
+    ${remaining ? `<button class="btn block history-loading" data-action="history-more">Load 100 more · ${remaining} remaining</button>` : ''}
+  </section>`;
 }
 
 function renderHistoryCalendar(sessions) {
@@ -1883,9 +1974,18 @@ function renderSettings() {
       </div>
       <div class="small muted">Primary reliable workout mode remains a visible installed PWA with Wake Lock. Background/locked-screen behavior is best effort unless a future native shell is added.</div>
     </section>
+    <section class="card form-card" style="margin-top:12px"><h2 class="section-title">Performance & Scale</h2>
+      <div class="capability-grid">
+        <div class="capability-row"><span>Boot to interactive</span><strong>${state.bootPerformance != null ? `${Math.round(state.bootPerformance)} ms` : '—'}</strong></div>
+        <div class="capability-row"><span>History in memory</span><strong>${state.sessions.length}${state.historyLoadedAll ? ' full' : ' recent'}</strong></div>
+        <div class="capability-row"><span>Live scheduler</span><strong>${esc(state.liveSchedulerKind || 'idle')}</strong></div>
+        <div class="capability-row"><span>Maintenance queued</span><strong>${maintenance.pending()}</strong></div>
+      </div>
+      <div class="small muted">Heavy storage/recovery maintenance is deferred during active workouts. History loads 10,000 sessions only when History is opened.</div>
+    </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">App</h2>
       <button class="btn" data-action="install">Install PWA</button>
-      <div class="small muted">Timer v1.8.0 · local-first · offline capable</div>
+      <div class="small muted">Timer v1.9.0 · local-first · offline capable</div>
     </section>`;
 }
 
@@ -2207,38 +2307,72 @@ async function installApp() {
   } else toast('Use your browser menu and choose “Install app” or “Add to Home screen”.', 4200);
 }
 
-async function loadCollections() {
-  state.routines = await state.db.all('routines').catch(() => []);
-  state.blocks = await state.db.all('blocks').catch(() => []);
-  state.cueProfiles = await state.db.all('cueProfiles').catch(() => []);
-  state.customSounds = (await state.db.all('customSounds').catch(() => [])).map(({ data, ...sound }) => sound);
-  state.sessions = await state.db.recentSessions(10000).catch(() => []);
+async function loadCollections({ historyLimit = state.historyLoadedAll ? 10000 : 100 } = {}) {
+  const [routines, blocks, cueProfiles, customSounds, sessions] = await Promise.all([
+    state.db.all('routines').catch(() => []),
+    state.db.all('blocks').catch(() => []),
+    state.db.all('cueProfiles').catch(() => []),
+    state.db.listCustomSoundMetadata().catch(() => []),
+    state.db.recentSessions(historyLimit).catch(() => [])
+  ]);
+  state.routines = routines;
+  state.blocks = blocks;
+  state.cueProfiles = cueProfiles;
+  state.customSounds = customSounds;
+  state.sessions = sessions;
+}
+
+async function ensureFullHistory() {
+  if (state.historyLoadedAll || state.historyLoading) return;
+  state.historyLoading = true;
+  if (state.route === 'history') renderHistory();
+  try {
+    state.sessions = await state.db.recentSessions(10000).catch(() => state.sessions);
+    state.historyLoadedAll = true;
+  } finally {
+    state.historyLoading = false;
+    if (state.route === 'history' && !state.engine) renderHistory();
+  }
+}
+
+function schedulePostBootMaintenance() {
+  maintenance.enqueue('storage-health', async () => {
+    state.storagePersistent = await requestPersistentStorage();
+    await refreshDataResilience();
+    if (state.route === 'settings' && !state.engine) renderSettings();
+  }, { priority: 'soon', delay: 150 });
+  maintenance.enqueue('daily-recovery', async () => {
+    await state.db.ensureDailyRecoverySnapshot().catch(() => {});
+    await state.db.pruneTombstones().catch(() => {});
+  });
 }
 
 async function boot() {
+  perf.mark('boot:start');
   state.launchCommand = parseLaunchCommand(location.href);
   state.displayMode = state.launchCommand.type === 'DISPLAY';
   clearLaunchQuery();
   applyTheme();
   try { await state.db.open(); } catch { toast('Storage unavailable. Timers can still run, but recovery may be limited.', 5000); }
+  perf.mark('boot:db');
   state.settings = await state.db.loadSettings().catch(() => ({ ...defaultSettings }));
   refreshVoices();
   if ('speechSynthesis' in globalThis) globalThis.speechSynthesis.onvoiceschanged = () => { refreshVoices(); if (state.route === 'settings' && !state.engine) renderSettings(); };
   state.quickMs = state.settings.quickPresets?.[3] || 120000;
   state.deviceCapabilities = detectDeviceCapabilities();
   applyTheme();
-  await loadCollections();
-  state.storagePersistent = await requestPersistentStorage();
-  await refreshDataResilience();
-  state.db.ensureDailyRecoverySnapshot().then(refreshDataResilience).catch(() => {});
-  state.db.pruneTombstones().catch(() => {});
-  await registerPwa();
+  await loadCollections({ historyLimit: 100 });
+  perf.mark('boot:data');
+  void registerPwa();
 
   const active = await state.db.getActive().catch(() => null);
   if (active?.snapshot && !['completed','cancelled'].includes(active.snapshot.status)) {
     if (state.displayMode) {
       setRemoteActive(active);
       renderRemoteActive();
+      perf.mark('boot:interactive');
+      state.bootPerformance = perf.measure('bootInteractiveMs', 'boot:start', 'boot:interactive');
+      schedulePostBootMaintenance();
       return;
     }
     if (await ownership.acquire()) {
@@ -2252,14 +2386,18 @@ async function boot() {
       setRemoteActive(active);
       renderRemoteActive();
     }
-    return;
-  }
+  } else if (state.displayMode) renderRemoteActive();
+  else await handleLaunchCommand(state.launchCommand);
 
-  if (state.displayMode) return renderRemoteActive();
-  await handleLaunchCommand(state.launchCommand);
+  perf.mark('boot:interactive');
+  state.bootPerformance = perf.measure('bootInteractiveMs', 'boot:start', 'boot:interactive');
+  schedulePostBootMaintenance();
 }
 
 async function registerPwa() {
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault(); state.installPrompt = e; $('#install-btn')?.classList.remove('hidden');
+  }, { once: true });
   if (!('serviceWorker' in navigator)) return;
   try {
     const registration = await navigator.serviceWorker.register('./sw.js');
@@ -2284,14 +2422,12 @@ async function registerPwa() {
       }
     });
   } catch {}
-  window.addEventListener('beforeinstallprompt', (e) => {
-    e.preventDefault(); state.installPrompt = e; $('#install-btn')?.classList.remove('hidden');
-  });
 }
 
 async function onVisibilityChange() {
   if (!state.engine || !ownership.isOwner()) return;
   if (document.visibilityState === 'hidden') {
+    stopLiveScheduler();
     const snapshot = state.engine.snapshot();
     await state.db.saveActive(snapshot, state.activeMeta).catch(() => {});
     broadcastActiveSnapshot(snapshot, state.activeMeta);
@@ -2308,6 +2444,7 @@ async function onVisibilityChange() {
     if (state.settings.keepAwake && status && !['completed', 'cancelled'].includes(status)) wakeLock.acquire();
     configureMediaSession();
     broadcastActiveSnapshot();
+    startLiveScheduler();
   }
 }
 
@@ -2347,8 +2484,12 @@ document.addEventListener('input', (e) => {
   }
   if (e.target.matches?.('[data-history-search]')) {
     state.historyQuery = e.target.value;
-    renderHistory();
-    requestAnimationFrame(() => { const input = $('[data-history-search]'); if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); } });
+    clearTimeout(state.historySearchTimer);
+    state.historySearchTimer = setTimeout(() => {
+      state.historyVisible = 100;
+      renderHistory();
+      requestAnimationFrame(() => { const input = $('[data-history-search]'); if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); } });
+    }, 80);
     return;
   }
   updateBuilderInput(e.target);
@@ -2446,7 +2587,8 @@ document.addEventListener('click', async (e) => {
   if (action === 'repeat-session') return repeatSession(btn.dataset.id);
   if (action === 'delete-session') { if (confirm('Delete this session?')) { await state.db.delete('sessions', btn.dataset.id); closeSheet(); await loadCollections(); render(); } return; }
   if (action === 'save-session-note') { const session = state.sessions.find((item) => item.id === btn.dataset.id); const input = document.querySelector(`[data-session-note][data-id="${CSS.escape(btn.dataset.id)}"]`); if (session && input) { session.notes = String(input.value || '').slice(0, 10000); await state.db.put('sessions', session); await loadCollections(); toast('Session note saved.'); } return; }
-  if (action === 'history-view') { state.historyView = btn.dataset.view || 'list'; return renderHistory(); }
+  if (action === 'history-view') { state.historyView = btn.dataset.view || 'list'; state.historyVisible = 100; void ensureFullHistory(); return renderHistory(); }
+  if (action === 'history-more') { state.historyVisible += 100; return renderHistory(); }
   if (action === 'history-month') { const d = new Date(state.historyMonth); d.setMonth(d.getMonth() + Number(btn.dataset.delta || 0)); state.historyMonth = new Date(d.getFullYear(), d.getMonth(), 1).getTime(); return renderHistory(); }
   if (action === 'history-day') return showHistoryDay(Number(btn.dataset.day));
   if (action === 'history-export-json') return exportHistoryJson();
@@ -2534,7 +2676,7 @@ document.addEventListener('click', async (e) => {
   if (action === 'clear-history') { if (confirm('Clear all session history? Saved routines will remain.')) { await state.db.clear('sessions'); await loadCollections(); renderHistory(); toast('History cleared.'); } return; }
   if (action === 'install') return installApp();
 
-  if (action === 'live-pause') { state.engine.view().status === 'paused' ? state.engine.resume() : state.engine.pause(); updateLiveView(true); return; }
+  if (action === 'live-pause') { state.engine.view().status === 'paused' ? state.engine.resume() : state.engine.pause(); updateLiveView(true); startLiveScheduler(); return; }
   if (action === 'live-adjust') { state.engine.adjust(Number(btn.dataset.delta)); updateLiveView(true); return; }
   if (action === 'live-next') { state.engine.next(); updateLiveView(true); return; }
   if (action === 'live-done') { state.engine.completeManual(); updateLiveView(true); return; }

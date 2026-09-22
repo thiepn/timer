@@ -1,6 +1,6 @@
 # Timer
 
-Current app version: **1.8.0**.
+Current app version: **1.9.0**.
 
 A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 
@@ -33,6 +33,7 @@ A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 - Keyboard controls during live sessions
 - Light, Dark and OLED appearance modes
 - Accessibility hardening: keyboard-safe controls, focus-contained dialogs, semantic timer announcements, browser zoom preserved, high contrast/forced-colors support, large controls/text, reduced motion, German localization, pseudo-localization and RTL test support
+- Performance hardening: lazy 10k-history loading, paged history DOM, indexed recent-session reads, metadata-only custom-audio listings, battery-aware live scheduling, bounded custom-audio decode cache, deferred maintenance, cache-growth controls and automated performance budgets
 
 ## Run locally
 
@@ -51,6 +52,7 @@ Requires a modern Node.js version:
 ```bash
 npm test
 npm run check
+npm run benchmark
 ```
 
 ## GitHub Pages
@@ -63,6 +65,7 @@ The app uses relative paths and is ready to be served from the repository root w
 - `src/db.js` — IndexedDB persistence, settings and backups
 - `src/audio.js` — audio, speech, haptic, wake-lock and notification adapters
 - `src/analytics.js` — pure session analysis, comparisons, records, calendars and history export
+- `src/performance.js` — performance budgets, live scheduling policy, instrumentation and deferred-maintenance coordinator
 - `src/app.js` — application coordinator and UI
 - `sw.js` — offline application shell
 
@@ -174,3 +177,21 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 - Added runtime language switching for normal screens, localized built-in phase labels and notification text, plus explicit RTL direction handling.
 - Wall-mode controls no longer auto-hide while keyboard focus is inside the live control surface.
 - Added a keyboard-shortcut reference surface and ensured global workout shortcuts cannot double-fire when a button/input is focused.
+
+
+## v1.9.0 performance, battery and scale hardening
+
+- Startup no longer waits for persistent-storage requests, storage-health diagnostics, recovery-snapshot work or tombstone cleanup; these tasks run later through a low-priority maintenance coordinator.
+- Initial app boot loads only recent history; the full 10,000-session history is fetched on demand when History is opened.
+- IndexedDB recent-session reads now use the existing `startedAt` index in descending order instead of loading and sorting the entire session store.
+- History list DOM is paged in 100-row batches instead of rendering thousands of session rows at once.
+- Added a metadata-only `customSoundMeta` store so Settings/Library views do not load audio ArrayBuffers merely to display sound names and sizes.
+- Data-health counts use IndexedDB `count()` rather than materializing every record.
+- Live timer scheduling is battery-aware: hidden/paused sessions perform no visual ticks, stopwatch uses 10 Hz, Wall/reduced-motion modes use 4 Hz, and smooth progress is capped near 30 Hz.
+- Live semantic DOM (phase, round, next, mode panels) updates only when semantic state changes rather than on every animation frame.
+- Secondary Wall display windows use low-frequency timestamp-derived updates instead of a continuous animation-frame loop.
+- Heavy maintenance is suspended during active workouts and resumed afterward.
+- Custom audio decode caching is bounded with LRU eviction.
+- Service-worker runtime caching is restricted to the declared app shell so arbitrary same-origin GETs cannot grow cache storage indefinitely.
+- Added deterministic performance budgets, large-fixture regression tests, a benchmark command and a GitHub Actions quality workflow.
+- Current reference benchmark on the development environment: ~11 ms for a 1,000-step generated compile, ~10 ms for a 10,000-session summary, and ~98 KiB gzip for the summed offline shell assets.

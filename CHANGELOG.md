@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.9.0
+
+### Added
+- Dedicated performance module with release budgets, boot instrumentation, battery-aware live scheduling policy and deferred-maintenance coordination.
+- Performance regression suite covering 1,000-step compilation, 10,000-session analytics, large recent-session queries, long deadline reconciliation, 24-hour countdown accuracy and custom-audio metadata behavior.
+- `npm run benchmark` with compiler, analytics and offline-shell gzip size gates.
+- GitHub Actions quality workflow running tests, syntax validation and benchmark gates on pushes and pull requests.
+- Metadata-only IndexedDB store for custom cue sounds.
+
+### Improved
+- Initial boot loads a bounded recent-history window and defers full 10,000-session history until History is actually opened.
+- IndexedDB recent-session reads use the `startedAt` index instead of `getAll()` plus in-memory sorting.
+- History list renders in 100-row batches with explicit Load More controls.
+- Storage-health diagnostics use store counts instead of loading all primary data into memory.
+- Persistent-storage requests, recovery snapshot creation, data-health refresh and tombstone cleanup no longer block the interactive boot path.
+- Heavy maintenance pauses during active workouts.
+- Live timer stops visual scheduling while hidden/paused, uses 10 Hz for stopwatch, 4 Hz for Wall/reduced-motion states, and approximately 30 Hz for smooth progress.
+- Phase/round/next/mode-panel DOM only updates on semantic state changes.
+- Secondary Wall display uses bounded timer updates instead of continuous animation frames.
+- Custom audio buffer cache uses bounded LRU eviction.
+- Service worker caches only declared shell assets at runtime, preventing unbounded same-origin cache growth.
+
+### Compatibility
+- IndexedDB schema upgraded to v5 by adding `customSoundMeta`; existing custom sounds are indexed into the metadata store during upgrade without altering audio data.
+- Backup payload remains v4 and no backup migration is required.
+- Service-worker cache generation bumped to `thiepn-timer-v11`.
+
 ## 1.8.0
 
 ### Added

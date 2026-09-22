@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { BUILTIN_CUE_PROFILES, SOUND_PACKS, cueProfileById, profileSettings, resolveCueConfig, soundRecipe, speechForStep } from '../src/audio.js';
+import { CueManager, BUILTIN_CUE_PROFILES, SOUND_PACKS, cueProfileById, profileSettings, resolveCueConfig, soundRecipe, speechForStep } from '../src/audio.js';
 
 test('built-in cue profiles are complete and resolvable', () => {
   for (const id of ['standard','quiet','voice-coach','loud-gym','silent']) {
@@ -46,4 +46,22 @@ test('speech verbosity is deterministic and step override can silence/customize 
 test('screen reader optimization suppresses app speech even when routine profile enables voice', () => {
   const config = resolveCueConfig({ cueProfileId: 'voice', voice: true, screenReaderOptimized: true }, [], { voice: true }, {});
   assert.equal(config.voice, false);
+});
+
+
+test('custom audio decode cache is bounded and evicts oldest entries', async () => {
+  const manager = new CueManager(() => ({ sound: true }));
+  manager.init = async () => true;
+  manager.ctx = {
+    state: 'running',
+    decodeAudioData: async () => ({ duration: 1 }),
+    createBufferSource: () => ({ connect() { return this; }, addEventListener() {}, start() {} }),
+    createGain: () => ({ gain: { value: 1 }, connect() { return this; } }),
+    destination: {}
+  };
+  manager.getCustomSound = async (id) => ({ id, data: new Uint8Array([1,2,3]).buffer });
+  for (const id of ['a','b','c','d','e']) await manager.customSound(id, { sound: true, profileGain: 1, masterVolume: 1 });
+  assert.equal(manager.customBufferCache.size, 4);
+  assert.equal(manager.customBufferCache.has('a'), false);
+  assert.equal(manager.customBufferCache.has('e'), true);
 });

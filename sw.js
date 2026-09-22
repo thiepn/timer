@@ -1,4 +1,4 @@
-const CACHE = 'thiepn-timer-v10';
+const CACHE = 'thiepn-timer-v11';
 const APP_SHELL = [
   './',
   './index.html',
@@ -13,8 +13,10 @@ const APP_SHELL = [
   './src/device.js',
   './src/i18n.js',
   './src/accessibility.js',
+  './src/performance.js',
   './src/app.js'
 ];
+const APP_SHELL_URLS = new Set(APP_SHELL.map((path) => new URL(path, self.registration.scope).href));
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(APP_SHELL)));
@@ -54,11 +56,14 @@ self.addEventListener('fetch', (event) => {
   }
 
   event.respondWith((async () => {
-    const cached = await caches.match(event.request);
-    if (cached) return cached;
+    const cacheableShellAsset = APP_SHELL_URLS.has(url.href);
+    if (cacheableShellAsset) {
+      const cached = await caches.match(event.request);
+      if (cached) return cached;
+    }
     try {
       const response = await fetch(event.request);
-      if (response.ok) {
+      if (response.ok && cacheableShellAsset) {
         const cache = await caches.open(CACHE);
         cache.put(event.request, response.clone());
       }
