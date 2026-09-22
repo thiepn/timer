@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.3.0
+
+### Added
+- Safe arithmetic formula parser/evaluator for advanced Custom Routine programming; formulas never execute JavaScript.
+- Formula-driven timed durations, manual caps, repeat counts, and launch-parameter variables.
+- Progression Generator nodes for increasing/decreasing work and rest patterns.
+- Seeded Random Generator nodes with choose/shuffle modes, no-repeat selection, and immediate-repeat avoidance.
+- Deterministic generator source metadata and stored random seeds in compiled plans.
+- Explicit Custom Routine duration scaling and proportional target-duration fitting.
+- Formula-variable names for duration/number launch parameters.
+
+### Improved
+- Repeat blocks now double as reusable pattern generators with formula-aware children.
+- Compiled preview shows generator context, random seed, scale, and target-duration metadata.
+- Live timer context identifies random-generator position while keeping the existing runtime unchanged.
+- Copying or unlinking reusable blocks with formulas/generators safely materializes their resolved steps.
+- Parameter dependency tracking now includes formula references.
+- Added regression coverage for formula safety, progressions, seeded randomization, scaling/target fitting, dependency tracking, and backup persistence.
+
+### Compatibility
+- IndexedDB and backup schemas remain compatible with v1.2.0; no data migration is required.
+- Service-worker cache generation bumped so installed PWAs receive v1.3.0 assets.
+
 ## 1.2.0
 
 ### Added
