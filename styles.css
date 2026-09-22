@@ -333,3 +333,13 @@ button { cursor: pointer; }
   .custom-node-head { align-items: flex-start; }
   .custom-node-actions { max-width: 210px; }
 }
+
+/* v1.3 advanced routine programming */
+.compile-options { padding: 14px; display: grid; gap: 12px; background: color-mix(in srgb, var(--accent-soft) 45%, var(--surface)); }
+.generator-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.generator-node { border-color: color-mix(in srgb, var(--accent) 38%, var(--border)); background: color-mix(in srgb, var(--accent-soft) 22%, var(--surface)); }
+.formula-input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .88rem; }
+.generator-node .custom-children { margin-top: 8px; }
+@media (max-width: 560px) {
+  .generator-grid { grid-template-columns: 1fr; }
+}
