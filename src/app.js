@@ -728,6 +728,7 @@ function updateCustomInput(target) {
   } else {
     node[fieldName] = target.value;
   }
+  if (fieldName === 'mode') return renderBuilder();
   refreshBuilderSummary();
 }
 
@@ -758,11 +759,12 @@ function showCustomPreview() {
       const section = item.sectionPath?.length ? item.sectionPath.map((part) => part.label).join(' › ') : '';
       const blocks = item.blockPath?.length ? item.blockPath.map((part) => part.title).join(' › ') : '';
       const round = item.repeatPath?.length ? item.repeatPath.map((part) => `${part.current}/${part.total}`).join(' · ') : '';
+      const generated = item.generatorPath?.length ? item.generatorPath.map((part) => part.type === 'random' ? `Random ${part.current}/${part.total}` : `Progression ${part.current}/${part.total}`).join(' · ') : '';
       const timing = item.manual ? (item.timeCapMs ? `Manual · cap ${durationLabel(item.timeCapMs)}` : 'Manual') : durationLabel(item.durationMs);
       const trail = [blocks, section].filter(Boolean).join(' › ');
-      return `<div class="preview-row"><span>${index + 1}</span><div><strong>${esc(item.label)}</strong>${trail ? `<div class="tiny">${esc(trail)}</div>` : ''}</div><div class="preview-meta">${round ? `<div>${esc(round)}</div>` : ''}<span>${esc(timing)}</span></div></div>`;
+      return `<div class="preview-row"><span>${index + 1}</span><div><strong>${esc(item.label)}</strong>${trail ? `<div class="tiny">${esc(trail)}</div>` : ''}</div><div class="preview-meta">${generated ? `<div>${esc(generated)}</div>` : round ? `<div>${esc(round)}</div>` : ''}<span>${esc(timing)}</span></div></div>`;
     }).join('');
-    showSheet('Compiled Preview', `<div class="stack"><div class="analytics-grid"><div class="metric"><strong>${plan.steps.length}</strong><span>Executable steps</span></div><div class="metric"><strong>${manualCount}</strong><span>Manual</span></div><div class="metric"><strong>${estimate == null ? 'Varies' : durationLabel(estimate)}</strong><span>Duration</span></div></div>${(config.parameters || []).length ? `<div class="card card-pad"><strong>Default launch parameters</strong><div class="small muted" style="margin-top:6px">${(config.parameters || []).map((parameter) => `${esc(parameter.label)}: ${parameter.type === 'duration' ? durationLabel(parameter.defaultMs) : esc(parameter.defaultValue)}`).join(' · ')}</div></div>` : ''}<div class="preview-list">${previewRows}${plan.steps.length > 120 ? `<div class="small muted">Showing first 120 of ${plan.steps.length} steps.</div>` : ''}</div></div>`);
+    showSheet('Compiled Preview', `<div class="stack"><div class="analytics-grid"><div class="metric"><strong>${plan.steps.length}</strong><span>Executable steps</span></div><div class="metric"><strong>${manualCount}</strong><span>Manual</span></div><div class="metric"><strong>${estimate == null ? 'Varies' : durationLabel(estimate)}</strong><span>Duration</span></div></div><div class="card card-pad small muted">Seed: ${esc(plan.meta?.randomSeed || 'preview')} · Scale: ${esc(plan.meta?.durationScale || 1)}×${plan.meta?.targetDurationMs ? ` · Target ${durationLabel(plan.meta.targetDurationMs)}` : ''}</div>${(config.parameters || []).length ? `<div class="card card-pad"><strong>Default launch parameters</strong><div class="small muted" style="margin-top:6px">${(config.parameters || []).map((parameter) => `${esc(parameter.label)}: ${parameter.type === 'duration' ? durationLabel(parameter.defaultMs) : esc(parameter.defaultValue)}`).join(' · ')}</div></div>` : ''}<div class="preview-list">${previewRows}${plan.steps.length > 120 ? `<div class="small muted">Showing first 120 of ${plan.steps.length} steps.</div>` : ''}</div></div>`);
   } catch (error) { toast(error.message || 'Routine could not be compiled.', 4200); }
 }
 
@@ -826,7 +828,7 @@ async function confirmParameterizedStart() {
   try { resolved = resolveCustomParameterValues(parameters, values); }
   catch (error) { return toast(error.message || 'Parameter values are invalid.', 4200); }
   let plan;
-  try { plan = planFromType(pending.type, pending.config, { parameterValues: resolved, blocks: pending.blocks || state.blocks }); }
+  try { plan = planFromType(pending.type, pending.config, { parameterValues: resolved, blocks: pending.blocks || state.blocks, seed: pending.type === 'custom' && pending.config.randomMode !== 'fixed' ? uid('seed') : undefined }); }
   catch (error) { return toast(error.issues?.[0]?.message || error.message || 'Routine could not be compiled.', 4200); }
 
   if (pending.routineId) {
@@ -851,7 +853,7 @@ async function startBuilder() {
     return showParameterizedStart({ type, config, routineId: state.builderEditingId || undefined, title: config.title, savedValues: routine?.lastParameterValues, source: 'builder' });
   }
   let plan;
-  try { plan = planFromType(type, config, { blocks: blocksForCurrentBuilder() }); }
+  try { plan = planFromType(type, config, { blocks: blocksForCurrentBuilder(), seed: type === 'custom' && config.randomMode !== 'fixed' ? uid('seed') : undefined }); }
   catch (e) { return toast(e.issues?.[0]?.message || e.message || 'This timer could not be created.'); }
   await startSession(plan, { ...metaForType(type, config), routineId: state.builderEditingId || undefined });
 }
@@ -863,7 +865,7 @@ async function startRoutine(id) {
     return showParameterizedStart({ type: routine.type, config: routine.config, routineId: routine.id, title: routine.title, savedValues: routine.lastParameterValues, source: 'library' });
   }
   let plan;
-  try { plan = planFromType(routine.type, routine.config); }
+  try { plan = planFromType(routine.type, routine.config, { blocks: state.blocks, seed: routine.type === 'custom' && routine.config?.randomMode !== 'fixed' ? uid('seed') : undefined }); }
   catch (error) { return toast(error.issues?.[0]?.message || error.message || 'Routine could not be compiled.', 4200); }
   routine.useCount = (routine.useCount || 0) + 1;
   routine.lastUsedAt = Date.now();
@@ -1010,7 +1012,9 @@ function updateLiveView(force = false) {
   const round = current.round;
   const blockLabel = current.blockPath?.at(-1)?.title;
   const sectionLabel = current.sectionPath?.at(-1)?.label;
-  const contextLabel = [blockLabel, sectionLabel, round ? `Round ${round.current} / ${round.total}` : ''].filter(Boolean).join(' · ');
+  const generator = current.generatorPath?.at(-1);
+  const generatorLabel = generator?.type === 'random' ? `Random ${generator.current} / ${generator.total}` : '';
+  const contextLabel = [blockLabel, sectionLabel, generatorLabel, round ? `Round ${round.current} / ${round.total}` : ''].filter(Boolean).join(' · ');
   $('#live-round').textContent = contextLabel || (v.mode === 'stopwatch' ? 'Stopwatch' : v.title);
   const next = v.next;
   $('#live-next').innerHTML = next ? `Next<br><strong>${esc(next.label)}${next.durationMs ? ` · ${formatClock(next.durationMs)}` : ''}</strong>` : '';
@@ -1218,7 +1222,7 @@ function renderSettings() {
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">App</h2>
       <button class="btn" data-action="install">Install PWA</button>
-      <div class="small muted">Timer v1.2.0 · local-first · offline capable</div>
+      <div class="small muted">Timer v1.3.0 · local-first · offline capable</div>
     </section>`;
 }
 
@@ -1387,6 +1391,7 @@ function updateBuilderInput(target) {
   const cfg = state.builder.config;
   if (target.type === 'number') cfg[key] = Number(target.value);
   else cfg[key] = target.value;
+  if (key === 'randomMode') return renderBuilder();
   refreshBuilderSummary();
 }
 
