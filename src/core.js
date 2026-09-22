@@ -373,7 +373,42 @@ function customRuntimeId(nodeId, repeatPath, blockPath) {
   return `${blockSuffix}|${nodeId}@${repeatSuffix}`;
 }
 
-export function buildCustomRoutine({ title = 'Custom Routine', nodes = [], parameters = [], parameterValues = {}, blocks = [] } = {}) {
+function scaleCompiledSteps(steps, factor) {
+  factor = Number(factor);
+  if (!Number.isFinite(factor) || factor <= 0 || factor > 20) throw new Error('Duration scale must be greater than 0 and no more than 20×.');
+  if (Math.abs(factor - 1) < 1e-9) return;
+  for (const item of steps) {
+    if (Number.isFinite(item.durationMs)) item.durationMs = Math.max(1000, Math.round(item.durationMs * factor));
+    if (Number.isFinite(item.timeCapMs)) item.timeCapMs = Math.max(1000, Math.round(item.timeCapMs * factor));
+  }
+}
+
+function fitCompiledStepsToDuration(steps, targetDurationMs) {
+  targetDurationMs = Math.round(Number(targetDurationMs));
+  if (!Number.isFinite(targetDurationMs) || targetDurationMs <= 0) throw new Error('Target duration must be positive.');
+  if (steps.some((item) => item.manual && !item.timeCapMs)) throw new Error('A target duration cannot be applied while the routine contains uncapped manual steps.');
+  const getDuration = (item) => item.manual ? item.timeCapMs : item.durationMs;
+  const current = steps.reduce((sum, item) => sum + (Number(getDuration(item)) || 0), 0);
+  if (current <= 0) throw new Error('Routine has no scalable duration.');
+  if (targetDurationMs < steps.length * 1000) throw new Error(`Target duration is too short for ${steps.length} compiled steps.`);
+  scaleCompiledSteps(steps, targetDurationMs / current);
+  let actual = steps.reduce((sum, item) => sum + (Number(getDuration(item)) || 0), 0);
+  let diff = targetDurationMs - actual;
+  if (diff) {
+    for (let i = steps.length - 1; i >= 0 && diff; i--) {
+      const item = steps[i];
+      const key = item.manual ? 'timeCapMs' : 'durationMs';
+      if (!Number.isFinite(item[key])) continue;
+      const next = Math.max(1000, item[key] + diff);
+      const applied = next - item[key];
+      item[key] = next;
+      diff -= applied;
+    }
+  }
+  if (diff) throw new Error('Target duration could not be fitted without producing invalid step durations.');
+}
+
+export function buildCustomRoutine({ title = 'Custom Routine', nodes = [], parameters = [], parameterValues = {}, blocks = [], seed = 'preview', durationScale = 1, targetDurationMs } = {}) {
   const issues = validateCustomRoutine({ title, nodes, parameters, blocks });
   if (issues.length) {
     const error = new Error(issues.map((issue) => issue.message).join(' '));
@@ -387,35 +422,86 @@ export function buildCustomRoutine({ title = 'Custom Routine', nodes = [], param
   const steps = [];
   const MAX_STEPS = 50000;
   const blockRevisions = {};
+  const random = createSeededRandom(seed);
+  const formulaCache = new Map();
 
-  const resolveCount = (node, values) => {
-    const count = node.countParamId ? Number(values[node.countParamId]) : Number(node.count);
-    if (!Number.isInteger(count) || count < 1 || count > 1000) throw new Error('Resolved repeat count must be an integer from 1 to 1000.');
+  const parseCached = (expression) => {
+    const key = String(expression || '').trim();
+    if (!formulaCache.has(key)) formulaCache.set(key, parseFormula(key));
+    return formulaCache.get(key);
+  };
+  const formulaVars = (context, values, parameterDefs, base = 0, previous = 0) => {
+    const generator = context.generatorPath.at(-1);
+    const repeat = context.repeatPath.at(-1);
+    const outerRepeat = generator ? repeat : context.repeatPath.at(-2);
+    const current = generator?.current ?? repeat?.current ?? 1;
+    const total = generator?.total ?? repeat?.total ?? 1;
+    return {
+      round: current,
+      rounds: total,
+      outerRound: outerRepeat?.current ?? 1,
+      outerRounds: outerRepeat?.total ?? 1,
+      level: current,
+      cycle: current,
+      cycles: total,
+      index: steps.length + 1,
+      base: Number(base) || 0,
+      previous: Number(previous) || 0,
+      ...parameterFormulaVariables(parameterDefs, values)
+    };
+  };
+  const evalExpr = (expression, context, values, parameterDefs, base = 0, previous = 0) => evaluateFormulaAst(parseCached(expression), formulaVars(context, values, parameterDefs, base, previous));
+  const resolveCount = (node, context, values, parameterDefs) => {
+    let count;
+    if (String(node.countFormula || '').trim()) {
+      try { count = evalExpr(node.countFormula, context, values, parameterDefs, Number(node.count) || 1, Number(node.count) || 1); }
+      catch (error) { throw new Error(`${node.label || node.type || 'Count'} formula failed: ${error.message}`); }
+    } else count = node.countParamId ? Number(values[node.countParamId]) : Number(node.count);
+    count = Math.round(count);
+    if (!Number.isInteger(count) || count < 1 || count > 1000) throw new Error(`${node.label || 'Generated count'} resolved outside the allowed range 1–1000.`);
     return count;
   };
-  const resolveDuration = (node, values, key, paramKey) => {
-    const value = node[paramKey] ? Number(values[node[paramKey]]) : Number(node[key]);
-    if (!Number.isFinite(value) || value <= 0) throw new Error(`${node.label || 'Step'} resolved to an invalid duration.`);
+  const resolveDuration = (node, context, values, parameterDefs, key, paramKey, formulaKey) => {
+    let value;
+    const baseMs = Number(node[key]);
+    if (String(node[formulaKey] || '').trim()) {
+      const previousMs = steps.at(-1)?.durationMs ?? steps.at(-1)?.timeCapMs ?? baseMs;
+      try { value = evalExpr(node[formulaKey], context, values, parameterDefs, Number.isFinite(baseMs) ? baseMs / 1000 : 0, Number(previousMs || 0) / 1000) * 1000; }
+      catch (error) {
+        const pos = context.generatorPath.at(-1)?.current ?? context.repeatPath.at(-1)?.current;
+        throw new Error(`${node.label || 'Step'} formula failed${pos ? ` at round ${pos}` : ''}: ${error.message}`);
+      }
+    } else value = node[paramKey] ? Number(values[node[paramKey]]) : baseMs;
+    value = Math.round(value);
+    if (!Number.isFinite(value) || value <= 0 || value > 24 * 3600000) throw new Error(`${node.label || 'Step'} resolved to an invalid duration.`);
     return value;
   };
+  const shuffledIndices = (length) => {
+    const values = Array.from({ length }, (_, index) => index);
+    for (let i = values.length - 1; i > 0; i--) {
+      const j = Math.floor(random() * (i + 1));
+      [values[i], values[j]] = [values[j], values[i]];
+    }
+    return values;
+  };
 
-  const compileNodes = (children, context, values, blockStack = []) => {
+  const compileNodes = (children, context, values, parameterDefs, blockStack = []) => {
     for (const node of children) {
       if (steps.length >= MAX_STEPS) throw new Error('Custom routine expands to too many steps.');
       if (node.type === 'section') {
         compileNodes(node.children, {
           ...context,
           sectionPath: [...context.sectionPath, { id: node.id, label: node.label }]
-        }, values, blockStack);
+        }, values, parameterDefs, blockStack);
         continue;
       }
       if (node.type === 'repeat') {
-        const count = resolveCount(node, values);
+        const count = resolveCount(node, context, values, parameterDefs);
         for (let r = 1; r <= count; r++) {
           compileNodes(node.children, {
             ...context,
             repeatPath: [...context.repeatPath, { nodeId: node.id, current: r, total: count }]
-          }, values, blockStack);
+          }, values, parameterDefs, blockStack);
         }
         continue;
       }
