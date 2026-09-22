@@ -5,7 +5,7 @@ import {
   buildCustomRoutine, validateCustomRoutine, collectCustomParameterRefs, resolveCustomParameterValues, formulaVariableName
 } from './core.js';
 import { TimerDB, defaultSettings, requestPersistentStorage, storageEstimate } from './db.js';
-import { CueManager, WakeLockManager, requestNotificationPermission, showCompletionNotification } from './audio.js';
+import { CueManager, WakeLockManager, requestNotificationPermission, showCompletionNotification, BUILTIN_CUE_PROFILES, SOUND_PACKS, cueProfileById, profileSettings } from './audio.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -91,8 +91,8 @@ function planFromType(type, c, options = {}) {
   }
 }
 
-function metaForType(type, config) {
-  return { mode: type, title: config.title || BUILDER_META[type]?.name || 'Timer', config: structuredClone(config) };
+function metaForType(type, config, cueOverrides = {}) {
+  return { mode: type, title: config.title || BUILDER_META[type]?.name || 'Timer', config: structuredClone(config), cueOverrides: structuredClone(cueOverrides || {}) };
 }
 
 function typeSummary(type, c) {
@@ -127,10 +127,14 @@ const state = {
   settings: { ...defaultSettings },
   routines: [],
   blocks: [],
+  cueProfiles: [],
+  customSounds: [],
+  availableVoices: [],
   sessions: [],
   builder: null,
   builderEditingId: null,
   builderEditingBlockId: null,
+  builderCueOverrides: {},
   quickMs: 120000,
   engine: null,
   engineUnsub: null,
@@ -152,7 +156,7 @@ const state = {
   pendingStart: null
 };
 
-const cue = new CueManager(() => state.settings);
+const cue = new CueManager(() => state.settings, () => state.cueProfiles, async (id) => state.db.get('customSounds', id));
 const wakeLock = new WakeLockManager();
 const main = $('#app-main');
 const appShell = $('#app');
@@ -277,6 +281,7 @@ function openBuilder(type, routine = null) {
   state.builder = { type, config: structuredClone(routine?.config || defaultConfig(type)) };
   state.builderEditingId = routine?.id || null;
   state.builderEditingBlockId = null;
+  state.builderCueOverrides = structuredClone(routine?.cueOverrides || {});
   renderBuilder();
 }
 
@@ -286,6 +291,7 @@ function openBlockEditor(block) {
   state.builder = { type: 'custom', config: { title: block.title, parameters: structuredClone(block.parameters || []), nodes: structuredClone(block.nodes || []) } };
   state.builderEditingId = null;
   state.builderEditingBlockId = block.id;
+  state.builderCueOverrides = {};
   renderBuilder();
 }
 
@@ -302,6 +308,32 @@ function field(label, key, value, opts = {}) {
 
 function toggleField(label, key, checked, hint = '') {
   return `<div class="toggle-row"><div><strong>${esc(label)}</strong>${hint ? `<div class="small muted">${esc(hint)}</div>` : ''}</div><button class="toggle" data-action="builder-toggle" data-key="${key}" aria-pressed="${checked}" aria-label="${esc(label)}"></button></div>`;
+}
+
+function cueProfileOptions(selected = '', { inherit = false } = {}) {
+  const builtins = Object.values(BUILTIN_CUE_PROFILES);
+  return `${inherit ? `<option value="" ${!selected ? 'selected' : ''}>Use global cue profile</option>` : ''}${builtins.map((profile) => `<option value="${esc(profile.id)}" ${selected === profile.id ? 'selected' : ''}>${esc(profile.title)}</option>`).join('')}${state.cueProfiles.map((profile) => `<option value="${esc(profile.id)}" ${selected === profile.id ? 'selected' : ''}>${esc(profile.title)} · Custom</option>`).join('')}`;
+}
+
+function soundPackOptions(selected = 'clean', { inherit = false } = {}) {
+  return `${inherit ? `<option value="" ${!selected ? 'selected' : ''}>Inherit</option>` : ''}${Object.entries(SOUND_PACKS).map(([id, pack]) => `<option value="${id}" ${selected === id ? 'selected' : ''}>${esc(pack.title)}</option>`).join('')}`;
+}
+
+function cueSoundOptions(selected = '') {
+  const standard = [
+    ['', 'Inherit phase sound'], ['off', 'No transition sound'], ['default', 'Default phase sound'],
+    ['work', 'Work sound'], ['rest', 'Rest sound'], ['prepare', 'Prepare sound'], ['warning', 'Warning sound'], ['halfway', 'Halfway sound'], ['finish', 'Finish sound']
+  ];
+  return `${standard.map(([value, label]) => `<option value="${value}" ${selected === value ? 'selected' : ''}>${label}</option>`).join('')}${state.customSounds.map((sound) => `<option value="custom:${esc(sound.id)}" ${selected === `custom:${sound.id}` ? 'selected' : ''}>Custom · ${esc(sound.title)}</option>`).join('')}`;
+}
+
+function renderRoutineCueOverrides(overrides = {}) {
+  return `<section class="card form-card cue-override-card"><h2 class="section-title">Routine cues</h2><div class="small muted">Optional. A routine profile overrides the global cue profile only while this routine is running.</div><div class="field"><label>Cue profile</label><select class="select" data-builder-cue-field="profileId">${cueProfileOptions(overrides.profileId || '', { inherit: true })}</select></div><div class="field"><label>Sound pack</label><select class="select" data-builder-cue-field="soundPack">${soundPackOptions(overrides.soundPack || '', { inherit: true })}</select></div><div class="generator-grid"><label class="custom-number-label">Warning seconds<input class="input" type="number" min="0" max="60" value="${overrides.warningSeconds ?? ''}" placeholder="Inherit" data-builder-cue-field="warningSeconds"></label><label class="custom-number-label">Halfway cue<select class="select" data-builder-cue-field="halfwayCue"><option value="" ${overrides.halfwayCue == null ? 'selected' : ''}>Inherit</option><option value="true" ${overrides.halfwayCue === true || overrides.halfwayCue === 'true' ? 'selected' : ''}>On</option><option value="false" ${overrides.halfwayCue === false || overrides.halfwayCue === 'false' ? 'selected' : ''}>Off</option></select></label></div></section>`;
+}
+
+function renderStepCueOverrides(node, path) {
+  const cueOverrides = node.cueOverrides || {};
+  return `<details class="step-cue-editor"><summary>Cue overrides</summary><div class="stack compact-stack"><label class="custom-number-label">Transition sound<select class="select" data-custom-cue-path="${path}" data-custom-cue-field="transitionSound">${cueSoundOptions(cueOverrides.transitionSound || '')}</select></label><label class="custom-number-label">Voice behavior<select class="select" data-custom-cue-path="${path}" data-custom-cue-field="voiceMode"><option value="inherit" ${(cueOverrides.voiceMode || 'inherit') === 'inherit' ? 'selected' : ''}>Inherit</option><option value="off" ${cueOverrides.voiceMode === 'off' ? 'selected' : ''}>No voice for this step</option><option value="label" ${cueOverrides.voiceMode === 'label' ? 'selected' : ''}>Speak step label only</option><option value="custom" ${cueOverrides.voiceMode === 'custom' ? 'selected' : ''}>Custom phrase</option></select></label>${cueOverrides.voiceMode === 'custom' ? `<label class="custom-number-label">Custom phrase<input class="input" value="${esc(cueOverrides.voiceText || '')}" data-custom-cue-path="${path}" data-custom-cue-field="voiceText"></label>` : ''}<div class="generator-grid"><label class="custom-number-label">Warning seconds<input class="input" type="number" min="0" max="60" value="${cueOverrides.warningSeconds ?? ''}" placeholder="Inherit" data-custom-cue-path="${path}" data-custom-cue-field="warningSeconds"></label><label class="custom-number-label">Halfway cue<select class="select" data-custom-cue-path="${path}" data-custom-cue-field="halfway"><option value="inherit" ${cueOverrides.halfway == null || cueOverrides.halfway === 'inherit' ? 'selected' : ''}>Inherit</option><option value="on" ${cueOverrides.halfway === true || cueOverrides.halfway === 'on' ? 'selected' : ''}>On</option><option value="off" ${cueOverrides.halfway === false || cueOverrides.halfway === 'off' ? 'selected' : ''}>Off</option></select></label></div><div class="generator-grid"><label class="custom-number-label">Custom cue at %<input class="input" type="number" min="1" max="99" value="${cueOverrides.customPercent ?? ''}" placeholder="Off" data-custom-cue-path="${path}" data-custom-cue-field="customPercent"></label><label class="custom-number-label">Custom cue sound<select class="select" data-custom-cue-path="${path}" data-custom-cue-field="customSound">${cueSoundOptions(cueOverrides.customSound || 'halfway')}</select></label></div></div></details>`;
 }
 
 function renderBuilder() {
