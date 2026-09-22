@@ -2,6 +2,7 @@ const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
 const uid = (prefix = 'id') => `${prefix}_${globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`}`;
 
 export const PHASES = ['work', 'rest', 'prepare', 'recovery', 'cooldown', 'custom'];
+const makePhaseTotals = () => Object.fromEntries(PHASES.map((phase) => [phase, 0]));
 
 export class BrowserClock {
   wallNow() { return Date.now(); }
@@ -67,12 +68,16 @@ export function buildCircuit({ title = 'Circuit', rounds = 3, prepareMs = 10000,
 }
 
 export function buildBoxing({ rounds = 8, roundMs = 180000, restMs = 60000, prepareMs = 10000, finalRest = false }) {
-  return buildCircuit({
-    title: 'Boxing', rounds, prepareMs, items: [
-      { label: 'Box', phase: 'work', durationMs: roundMs },
-      { label: 'Rest', phase: 'rest', durationMs: restMs }
-    ], finalRoundRest: finalRest
-  });
+  const steps = [];
+  rounds = clamp(Math.floor(Number(rounds) || 1), 1, 1000);
+  if (prepareMs > 0) steps.push(step({ label: 'Get Ready', phase: 'prepare', durationMs: prepareMs }));
+  for (let r = 1; r <= rounds; r++) {
+    steps.push(step({ label: 'Box', phase: 'work', durationMs: roundMs, round: { current: r, total: rounds } }));
+    if (restMs > 0 && (r < rounds || finalRest)) {
+      steps.push(step({ label: 'Rest', phase: 'rest', durationMs: restMs, round: { current: r, total: rounds } }));
+    }
+  }
+  return { kind: 'timeline', title: 'Boxing', steps, meta: { mode: 'boxing' } };
 }
 
 export function buildRunWalk({ rounds = 10, runMs = 120000, walkMs = 60000, warmupMs = 300000, cooldownMs = 300000, finalWalk = true }) {
@@ -216,6 +221,9 @@ export class TimerEngine {
       currentStartedAt: now,
       currentEndsAt: undefined,
       currentManualResting: false,
+      phaseTotals: makePhaseTotals(),
+      segmentPhase: plan.kind === 'timeline' ? (plan.steps[0]?.phase || 'custom') : 'work',
+      segmentStartedAt: now,
       sessionEndsAt: plan.kind === 'timebox' ? now + plan.durationMs : (plan.kind === 'open' && plan.timeCapMs ? now + plan.timeCapMs : undefined)
     };
     if (plan.kind === 'timeline') this.beginTimelineStep(now);
@@ -234,6 +242,8 @@ export class TimerEngine {
     if (!s) return;
     this.session.currentStartedAt = at;
     this.session.currentManualResting = false;
+    this.session.segmentStartedAt = at;
+    this.session.segmentPhase = PHASES.includes(s.phase) ? s.phase : 'custom';
     this.session.currentEndsAt = s.manual ? (s.timeCapMs ? at + s.timeCapMs : undefined) : at + s.durationMs;
   }
 
@@ -242,9 +252,39 @@ export class TimerEngine {
   static restore(snapshot, clock = new BrowserClock()) {
     const engine = new TimerEngine(clock);
     engine.session = structuredClone(snapshot);
+    if (engine.session) {
+      if (!engine.session.phaseTotals) {
+        engine.session.phaseTotals = makePhaseTotals();
+        if (engine.session.plan?.kind === 'timeline') {
+          const completed = engine.session.plan.steps?.slice(0, engine.session.currentIndex || 0) || [];
+          for (const item of completed) {
+            const phase = PHASES.includes(item.phase) ? item.phase : 'custom';
+            const duration = item.manual ? (item.timeCapMs || 0) : (item.durationMs || 0);
+            engine.session.phaseTotals[phase] += Math.max(0, duration);
+          }
+        }
+      }
+      if (!engine.session.segmentPhase) {
+        const current = engine.session.plan?.kind === 'timeline' ? engine.currentStep() : null;
+        engine.session.segmentPhase = engine.session.currentManualResting ? 'rest' : (current?.phase || 'work');
+      }
+      if (!Number.isFinite(engine.session.segmentStartedAt)) {
+        engine.session.segmentStartedAt = engine.session.currentStartedAt || engine.session.startedAt || clock.wallNow();
+      }
+    }
     engine.rebaseToWall();
     if (engine.session?.status === 'running') engine.reconcile();
     return engine;
+  }
+
+  recordSegment(at = this.logicalNow()) {
+    const s = this.session;
+    if (!s || !Number.isFinite(s.segmentStartedAt) || !Number.isFinite(at)) return;
+    const end = Math.max(s.segmentStartedAt, at);
+    const phase = PHASES.includes(s.segmentPhase) ? s.segmentPhase : 'custom';
+    if (!s.phaseTotals) s.phaseTotals = makePhaseTotals();
+    s.phaseTotals[phase] = (s.phaseTotals[phase] || 0) + Math.max(0, end - s.segmentStartedAt);
+    s.segmentStartedAt = end;
   }
 
   reconcile() {
@@ -258,6 +298,7 @@ export class TimerEngine {
         if (!cur) return this.complete('finished');
         if (!s.currentEndsAt || now < s.currentEndsAt) break;
         const boundary = s.currentEndsAt;
+        this.recordSegment(boundary);
         this.emit('step-completed', { step: cur, scheduledAt: boundary, delayed: now > boundary + 50 });
         s.currentIndex += 1;
         if (s.currentIndex >= s.plan.steps.length) return this.complete('finished', boundary);
@@ -267,6 +308,7 @@ export class TimerEngine {
       }
       if (guard >= 100000) throw new Error('Timer reconciliation exceeded safety limit.');
     } else if (s.sessionEndsAt != null && now >= s.sessionEndsAt) {
+      this.recordSegment(s.sessionEndsAt);
       return this.complete(s.plan.kind === 'open' ? 'time-cap' : 'finished', s.sessionEndsAt);
     }
     return this.view();
@@ -277,6 +319,7 @@ export class TimerEngine {
     this.reconcile();
     if (this.session.status !== 'running') return false;
     const now = this.logicalNow();
+    this.recordSegment(now);
     this.session.status = 'paused';
     this.session.pausedAt = this.clock.wallNow();
     this.session.pauseState = {
@@ -301,6 +344,8 @@ export class TimerEngine {
     this.session.status = 'running';
     this.session.pausedAt = undefined;
     this.session.pauseState = undefined;
+    this.session.segmentStartedAt = now;
+    this.session.segmentPhase = this.session.currentManualResting ? 'rest' : (this.currentStep()?.phase || 'work');
     this.emit('session-resumed');
     return true;
   }
@@ -310,6 +355,7 @@ export class TimerEngine {
     if (this.session.status === 'paused') this.resume();
     const cur = this.currentStep();
     const now = this.logicalNow();
+    this.recordSegment(now);
     this.emit(cur?.manual ? 'step-completed' : 'step-skipped', { step: cur });
     this.session.currentIndex += 1;
     if (this.session.currentIndex >= this.session.plan.steps.length) return this.complete('finished');
@@ -321,8 +367,9 @@ export class TimerEngine {
   previous() {
     if (!this.session || this.session.plan.kind !== 'timeline' || this.session.currentIndex <= 0 || ['completed', 'cancelled'].includes(this.session.status)) return false;
     if (this.session.status === 'paused') this.resume();
-    this.session.currentIndex -= 1;
     const now = this.logicalNow();
+    this.recordSegment(now);
+    this.session.currentIndex -= 1;
     this.beginTimelineStep(now);
     this.emit('step-started', { step: this.currentStep(), reason: 'previous' });
     return true;
@@ -332,6 +379,7 @@ export class TimerEngine {
     if (!this.session || this.session.plan.kind !== 'timeline' || ['completed', 'cancelled'].includes(this.session.status)) return false;
     if (this.session.status === 'paused') this.resume();
     const now = this.logicalNow();
+    this.recordSegment(now);
     this.beginTimelineStep(now);
     this.emit('step-restarted', { step: this.currentStep() });
     return true;
@@ -360,7 +408,11 @@ export class TimerEngine {
     if (!this.session || this.session.status !== 'running' || !cur?.manual) return false;
     if (cur.completionBehavior === 'rest-until-deadline' && this.session.currentEndsAt != null) {
       if (this.session.currentManualResting) return false;
+      const now = this.logicalNow();
+      this.recordSegment(now);
       this.session.currentManualResting = true;
+      this.session.segmentStartedAt = now;
+      this.session.segmentPhase = 'rest';
       this.emit('manual-completed', { step: cur });
       return true;
     }
@@ -387,16 +439,25 @@ export class TimerEngine {
 
   finish(reason = 'finished') {
     if (!this.session || ['completed', 'cancelled'].includes(this.session.status)) return false;
-    const now = this.clock.wallNow();
+    const nowWall = this.clock.wallNow();
+    if (this.session.status === 'running') {
+      this.recordSegment(this.logicalNow());
+    } else if (this.session.status === 'paused') {
+      const pausedFor = Math.max(0, nowWall - (this.session.pausedAt || nowWall));
+      this.session.pausedTotalMs += pausedFor;
+      this.session.pausedAt = undefined;
+      this.session.pauseState = undefined;
+    }
     this.session.status = reason === 'cancelled' ? 'cancelled' : 'completed';
     this.session.completionReason = reason;
-    this.session.endedAt = now;
+    this.session.endedAt = nowWall;
     this.emit(reason === 'cancelled' ? 'session-cancelled' : 'session-completed', { reason });
     return true;
   }
 
   complete(reason = 'finished', at) {
     if (!this.session || ['completed', 'cancelled'].includes(this.session.status)) return this.view();
+    if (this.session.status === 'running') this.recordSegment(at ?? this.logicalNow());
     this.session.status = 'completed';
     this.session.completionReason = reason;
     this.session.endedAt = at ?? this.clock.wallNow();

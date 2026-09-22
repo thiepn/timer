@@ -127,7 +127,9 @@ const state = {
   controlsHidden: false,
   wallHideTimer: 0,
   storagePersistent: null,
-  storageEstimate: null
+  storageEstimate: null,
+  libraryQuery: '',
+  librarySearchActive: false
 };
 
 const cue = new CueManager(() => state.settings);
@@ -304,6 +306,7 @@ function renderBuilder() {
         <div id="builder-summary" class="builder-summary"><span>${esc(typeSummary(type, c))}</span><strong>${estimate != null ? durationLabel(estimate) : 'Varies'}</strong></div>
       </section>
       <button class="btn primary big block" data-action="start-builder">Start ${esc(m.name)}</button>
+      ${state.builderEditingId ? `<button class="btn danger block" data-action="delete-routine" data-id="${esc(state.builderEditingId)}">Delete saved routine</button>` : ''}
     </div>`;
 }
 
@@ -388,12 +391,15 @@ async function finalizeSession(snapshot, cancelled = false) {
   await wakeLock.release();
   const plan = snapshot.plan;
   const activeDurationMs = Math.max(0, (snapshot.endedAt || Date.now()) - snapshot.startedAt - (snapshot.pausedTotalMs || 0));
-  let workMs = 0, restMs = 0, otherMs = 0;
-  if (plan.kind === 'timeline') {
-    for (const s of plan.steps) {
-      const d = s.manual ? (s.timeCapMs || 0) : (s.durationMs || 0);
-      if (s.phase === 'work') workMs += d;
-      else if (s.phase === 'rest' || s.phase === 'recovery') restMs += d;
+  const totals = snapshot.phaseTotals || {};
+  let workMs = Number(totals.work) || 0;
+  let restMs = (Number(totals.rest) || 0) + (Number(totals.recovery) || 0);
+  let otherMs = (Number(totals.prepare) || 0) + (Number(totals.cooldown) || 0) + (Number(totals.custom) || 0);
+  if (!snapshot.phaseTotals && plan.kind === 'timeline') {
+    for (const item of plan.steps) {
+      const d = item.manual ? (item.timeCapMs || 0) : (item.durationMs || 0);
+      if (item.phase === 'work') workMs += d;
+      else if (item.phase === 'rest' || item.phase === 'recovery') restMs += d;
       else otherMs += d;
     }
   }
@@ -452,9 +458,9 @@ function renderLive() {
       </div>
       <div id="live-controls" class="live-controls">
         <div class="live-control-row">
-          <button class="live-control" data-action="live-adjust" data-delta="-${state.settings.adjustmentMs}">−${Math.round(state.settings.adjustmentMs / 1000)}</button>
+          <button id="adjust-minus" class="live-control" data-action="live-adjust" data-delta="-${state.settings.adjustmentMs}">−${Math.round(state.settings.adjustmentMs / 1000)}</button>
           <button id="pause-btn" class="live-control primary" data-action="live-pause">Pause</button>
-          <button class="live-control" data-action="live-adjust" data-delta="${state.settings.adjustmentMs}">+${Math.round(state.settings.adjustmentMs / 1000)}</button>
+          <button id="adjust-plus" class="live-control" data-action="live-adjust" data-delta="${state.settings.adjustmentMs}">+${Math.round(state.settings.adjustmentMs / 1000)}</button>
         </div>
         <button id="live-secondary" class="live-control next" data-action="live-next">Next</button>
       </div>
@@ -500,6 +506,9 @@ function updateLiveView(force = false) {
   shell.classList.toggle('paused', v.status === 'paused');
   shell.classList.toggle('controls-hidden', state.controlsHidden && state.settings.layout === 'wall');
   $('#pause-btn').textContent = v.status === 'paused' ? 'Resume' : 'Pause';
+  const canAdjust = v.status === 'running' && current.remainingMs != null;
+  $('#adjust-minus').disabled = !canAdjust;
+  $('#adjust-plus').disabled = !canAdjust;
   renderModePanel(v);
   updateSecondaryAction(v);
 }
@@ -570,11 +579,23 @@ function renderCompletion() {
 }
 
 function renderLibrary() {
-  const favorites = state.routines.filter((r) => r.favorite);
-  const routines = [...state.routines].sort((a, b) => (b.lastUsedAt || b.updatedAt || 0) - (a.lastUsedAt || a.updatedAt || 0));
+  const query = state.libraryQuery.trim().toLowerCase();
+  const matches = (r) => !query || `${r.title || ''} ${BUILDER_META[r.type]?.name || r.type || ''} ${typeSummary(r.type, r.config || {})}`.toLowerCase().includes(query);
+  const favorites = state.routines.filter((r) => r.favorite && matches(r));
+  const routines = [...state.routines].filter(matches).sort((a, b) => (b.lastUsedAt || b.updatedAt || 0) - (a.lastUsedAt || a.updatedAt || 0));
   main.innerHTML = `<div class="page-head"><div><h1>Library</h1><p>Saved timers and routines.</p></div><button class="btn primary" data-action="create">＋ Create</button></div>
+    <div class="field"><label for="library-search">Search routines</label><input id="library-search" class="input" type="search" data-library-search value="${esc(state.libraryQuery)}" placeholder="Search by name or type"></div>
     ${favorites.length ? `<section class="section"><h2 class="section-title">Favorites</h2><div class="list">${favorites.map(routineRow).join('')}</div></section>` : ''}
-    <section class="section"><div class="row-between"><h2 class="section-title" style="margin:0">My Routines</h2><span class="pill">${routines.length}</span></div><div class="list" style="margin-top:12px">${routines.length ? routines.map(routineRow).join('') : `<div class="card empty"><p>No saved routines yet.</p><button class="btn primary" data-action="create">Create timer</button></div>`}</div></section>`;
+    <section class="section"><div class="row-between"><h2 class="section-title" style="margin:0">My Routines</h2><span class="pill">${routines.length}</span></div><div class="list" style="margin-top:12px">${routines.length ? routines.map(routineRow).join('') : `<div class="card empty"><p>${query ? 'No routines match your search.' : 'No saved routines yet.'}</p>${query ? '' : '<button class="btn primary" data-action="create">Create timer</button>'}</div>`}</div></section>`;
+  if (state.librarySearchActive) {
+    requestAnimationFrame(() => {
+      const input = $('#library-search');
+      if (!input) return;
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+      state.librarySearchActive = false;
+    });
+  }
 }
 
 function routineRow(r) {
@@ -627,6 +648,7 @@ function renderSettings() {
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">Timer</h2>
       <div class="field"><label for="adjust-setting">Time adjustment</label><select id="adjust-setting" class="select" data-setting="adjustmentMs"><option value="5000" ${s.adjustmentMs===5000?'selected':''}>5 seconds</option><option value="15000" ${s.adjustmentMs===15000?'selected':''}>15 seconds</option><option value="30000" ${s.adjustmentMs===30000?'selected':''}>30 seconds</option><option value="60000" ${s.adjustmentMs===60000?'selected':''}>1 minute</option></select></div>
+      ${settingToggle('Start quick presets immediately', 'startPresetImmediately', s.startPresetImmediately, 'Tap a quick duration to start without pressing Start')}
       ${settingToggle('Keep screen awake', 'keepAwake', s.keepAwake, 'Uses Screen Wake Lock when supported')}
       ${settingToggle('Wall layout auto-hide', 'wallAutoHide', s.wallAutoHide, 'Hide controls after a few seconds')}
     </section>
@@ -647,7 +669,7 @@ function renderSettings() {
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">App</h2>
       <button class="btn" data-action="install">Install PWA</button>
-      <div class="small muted">Timer v1.0 foundation · local-first · offline capable</div>
+      <div class="small muted">Timer v1.0.1 · local-first · offline capable</div>
     </section>`;
 }
 
@@ -787,7 +809,8 @@ async function onVisibilityChange() {
   } else {
     state.engine.rebaseToWall();
     state.engine.reconcile();
-    if (state.settings.keepAwake) wakeLock.acquire();
+    const status = state.engine?.view()?.status;
+    if (state.settings.keepAwake && status && !['completed', 'cancelled'].includes(status)) wakeLock.acquire();
   }
 }
 
@@ -824,7 +847,15 @@ function updateCircuitInput(target) {
   else item[key] = target.value;
 }
 
-document.addEventListener('input', (e) => { updateBuilderInput(e.target); updateCircuitInput(e.target); });
+document.addEventListener('input', (e) => {
+  if (e.target.matches?.('[data-library-search]')) {
+    state.libraryQuery = e.target.value;
+    state.librarySearchActive = true;
+    return renderLibrary();
+  }
+  updateBuilderInput(e.target);
+  updateCircuitInput(e.target);
+});
 document.addEventListener('change', (e) => { updateBuilderInput(e.target); updateCircuitInput(e.target); if (e.target.dataset.setting) { const key = e.target.dataset.setting; state.settings[key] = key === 'adjustmentMs' ? Number(e.target.value) : e.target.value; saveSettings(); } });
 
 document.addEventListener('click', async (e) => {
@@ -857,6 +888,15 @@ document.addEventListener('click', async (e) => {
   if (action === 'start-routine') return startRoutine(btn.dataset.id);
   if (action === 'edit-routine') { const r = state.routines.find((x) => x.id === btn.dataset.id); if (r) return openBuilder(r.type, r); }
   if (action === 'favorite-routine') { const r = state.routines.find((x) => x.id === btn.dataset.id); if (r) { r.favorite = !r.favorite; await state.db.saveRoutine(r); await loadCollections(); renderLibrary(); } return; }
+  if (action === 'delete-routine') {
+    const r = state.routines.find((x) => x.id === btn.dataset.id);
+    if (r && confirm(`Delete “${r.title}”? Session history will be kept.`)) {
+      await state.db.delete('routines', r.id);
+      state.builder = null; state.builderEditingId = null; state.route = 'library';
+      await loadCollections(); render(); toast('Routine deleted.');
+    }
+    return;
+  }
   if (action === 'session-detail') return showSessionDetail(btn.dataset.id);
   if (action === 'repeat-session') return repeatSession(btn.dataset.id);
   if (action === 'delete-session') { if (confirm('Delete this session?')) { await state.db.delete('sessions', btn.dataset.id); closeSheet(); await loadCollections(); render(); } return; }

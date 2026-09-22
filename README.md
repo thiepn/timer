@@ -1,5 +1,7 @@
 # Timer
 
+Current app version: **1.0.1**.
+
 A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 
 ## Included in the current build
@@ -11,11 +13,11 @@ A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
 - EMOM / alternating EMOM behavior with early-completion rest
 - AMRAP scoring
 - For Time with optional cap
-- Boxing rounds
+- Boxing rounds with correct optional final-rest behavior
 - Run / Walk intervals
 - Ladder and pyramid generators
-- Saved routine library + favorites
-- Session history and basic work/rest analytics
+- Saved routine library + favorites + search + routine deletion
+- Session history with actual observed work/rest time, including pauses, skips and early endings
 - Focus, Classic, Strength and Wall live layouts
 - Pause/resume, skip, previous, restart, time adjustment and fullscreen
 - Sound countdown/transition cues, optional speech and haptics
@@ -60,3 +62,13 @@ The app uses relative paths and is ready to be served from the repository root w
 - `sw.js` — offline application shell
 
 The timer engine is timestamp-based; rendering frequency is not the source of timing truth.
+
+## v1.0.1 hardening
+
+- Fixed Boxing always adding a final rest even when disabled.
+- Fixed ending a timer while paused incorrectly counting paused wall time as active time.
+- History now uses observed phase time instead of blindly summing the planned routine.
+- Time-adjust controls disable when the current mode has no adjustable deadline.
+- Added Library search and safe saved-routine deletion.
+- Exposed the existing one-tap quick-preset option in Settings.
+- Hardened wake-lock reacquisition around sessions that complete while returning to the app.
