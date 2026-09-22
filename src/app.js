@@ -346,6 +346,7 @@ function renderBuilder() {
         ${body}
         <div id="builder-summary" class="builder-summary"><span>${esc(typeSummary(type, c))}</span><strong>${estimate != null ? durationLabel(estimate) : 'Varies'}</strong></div>
       </section>
+      ${editingBlock ? '' : renderRoutineCueOverrides(state.builderCueOverrides || {})}
       <button class="btn primary big block" data-action="start-builder">${editingBlock ? 'Test Reusable Block' : `Start ${esc(m.name)}`}</button>
       ${state.builderEditingId ? `<button class="btn danger block" data-action="delete-routine" data-id="${esc(state.builderEditingId)}">Delete saved routine</button>` : state.builderEditingBlockId ? `<button class="btn danger block" data-action="delete-block" data-id="${esc(state.builderEditingBlockId)}">Delete reusable block</button>` : ''}
     </div>`;
@@ -599,6 +600,7 @@ function renderCustomTree(nodes = [], depth = 0, prefix = []) {
       ${bound ? `<div class="binding-value">Uses <strong>${esc(customParameterById(bound)?.label || 'missing parameter')}</strong></div>` : `<label class="custom-number-label">${manual ? 'Base cap seconds (0 = none)' : 'Base seconds'}<input class="input" type="number" min="0" step="1" value="${secondsValue}" data-custom-path="${path}" data-custom-field="${manual ? 'timeCapMs' : 'durationMs'}" data-custom-unit="seconds"></label>`}
       <label class="custom-number-label">${manual ? 'Cap formula' : 'Duration formula'} <span class="tiny">optional; result is seconds</span><input class="input formula-input" value="${esc(formulaValue)}" data-custom-path="${path}" data-custom-field="${manual ? 'timeCapFormula' : 'durationFormula'}" placeholder="e.g. base + (round - 1) * 5"></label>
       <input class="input" value="${esc(node.target || '')}" data-custom-path="${path}" data-custom-field="target" placeholder="Target / note (optional)" aria-label="Step target">
+      ${renderStepCueOverrides(node, path)}
     </div>`;
   }).join('');
 }
@@ -774,6 +776,33 @@ function updateCustomInput(target) {
   refreshBuilderSummary();
 }
 
+function updateBuilderCueInput(target) {
+  const field = target.dataset.builderCueField;
+  if (!field || !state.builder) return;
+  state.builderCueOverrides ||= {};
+  if (target.value === '') delete state.builderCueOverrides[field];
+  else if (field === 'warningSeconds') state.builderCueOverrides[field] = Number(target.value);
+  else if (field === 'halfwayCue') state.builderCueOverrides[field] = target.value === 'true';
+  else state.builderCueOverrides[field] = target.value;
+}
+
+function updateCustomCueInput(target) {
+  if (!state.builder || state.builder.type !== 'custom') return;
+  const path = target.dataset.customCuePath;
+  const field = target.dataset.customCueField;
+  if (path == null || !field) return;
+  const node = customNodeAt(path);
+  if (!node) return;
+  node.cueOverrides ||= {};
+  let value = target.value;
+  if (field === 'warningSeconds' || field === 'customPercent') value = value === '' ? undefined : Number(value);
+  if (field === 'halfway') value = value === 'inherit' ? undefined : value;
+  if (value === '' || value === undefined) delete node.cueOverrides[field];
+  else node.cueOverrides[field] = value;
+  if (field === 'voiceMode') return renderBuilder();
+  refreshBuilderSummary();
+}
+
 function updateBlockParameterInput(target) {
   if (!state.builder || state.builder.type !== 'custom') return;
   const path = target.dataset.blockParamPath;
@@ -840,7 +869,8 @@ async function saveBuilder() {
     favorite: previous?.favorite || false,
     createdAt: previous?.createdAt || Date.now(),
     useCount: previous?.useCount || 0,
-    lastParameterValues: previous?.lastParameterValues || undefined
+    lastParameterValues: previous?.lastParameterValues || undefined,
+    cueOverrides: structuredClone(state.builderCueOverrides || previous?.cueOverrides || {})
   };
   await state.db.saveRoutine(routine);
   await loadCollections();
@@ -848,11 +878,11 @@ async function saveBuilder() {
   toast('Routine saved.');
 }
 
-function showParameterizedStart({ type, config, routineId, title, savedValues, source }) {
+function showParameterizedStart({ type, config, routineId, title, savedValues, source, cueOverrides = {} }) {
   const parameters = config.parameters || [];
   const defaults = defaultParameterValues(parameters);
   const values = { ...defaults, ...(savedValues || {}) };
-  state.pendingStart = { type, config: structuredClone(config), routineId, title, source, blocks: structuredClone(blocksForCurrentBuilder()) };
+  state.pendingStart = { type, config: structuredClone(config), routineId, title, source, cueOverrides: structuredClone(cueOverrides || {}), blocks: structuredClone(blocksForCurrentBuilder()) };
   showSheet(`Start ${title || config.title || 'Routine'}`, `<div class="stack"><div class="small muted">Adjust this run without changing the saved routine.</div>${parameters.map((parameter) => `<label class="field"><span>${esc(parameter.label)}</span>${renderParameterValueInput(parameter, values[parameter.id], `data-launch-param="${esc(parameter.id)}"`)}</label>`).join('')}<button class="btn primary big" data-action="confirm-param-start">Start</button></div>`);
 }
 
@@ -885,26 +915,26 @@ async function confirmParameterizedStart() {
   state.pendingStart = null;
   closeSheet();
   await loadCollections();
-  await startSession(plan, { ...metaForType(pending.type, pending.config), title: pending.title || pending.config.title, routineId: pending.routineId, parameterValues: resolved });
+  await startSession(plan, { ...metaForType(pending.type, pending.config, pending.cueOverrides), title: pending.title || pending.config.title, routineId: pending.routineId, parameterValues: resolved });
 }
 
 async function startBuilder() {
   const { type, config } = state.builder;
   if (type === 'custom' && (config.parameters || []).length) {
     const routine = state.routines.find((item) => item.id === state.builderEditingId);
-    return showParameterizedStart({ type, config, routineId: state.builderEditingId || undefined, title: config.title, savedValues: routine?.lastParameterValues, source: 'builder' });
+    return showParameterizedStart({ type, config, routineId: state.builderEditingId || undefined, title: config.title, savedValues: routine?.lastParameterValues, source: 'builder', cueOverrides: state.builderCueOverrides });
   }
   let plan;
   try { plan = planFromType(type, config, { blocks: blocksForCurrentBuilder(), seed: type === 'custom' && config.randomMode !== 'fixed' ? uid('seed') : undefined }); }
   catch (e) { return toast(e.issues?.[0]?.message || e.message || 'This timer could not be created.'); }
-  await startSession(plan, { ...metaForType(type, config), routineId: state.builderEditingId || undefined });
+  await startSession(plan, { ...metaForType(type, config, state.builderCueOverrides), routineId: state.builderEditingId || undefined });
 }
 
 async function startRoutine(id) {
   const routine = state.routines.find((r) => r.id === id);
   if (!routine) return toast('Routine not found.');
   if (routine.type === 'custom' && (routine.config?.parameters || []).length) {
-    return showParameterizedStart({ type: routine.type, config: routine.config, routineId: routine.id, title: routine.title, savedValues: routine.lastParameterValues, source: 'library' });
+    return showParameterizedStart({ type: routine.type, config: routine.config, routineId: routine.id, title: routine.title, savedValues: routine.lastParameterValues, source: 'library', cueOverrides: routine.cueOverrides });
   }
   let plan;
   try { plan = planFromType(routine.type, routine.config, { blocks: state.blocks, seed: routine.type === 'custom' && routine.config?.randomMode !== 'fixed' ? uid('seed') : undefined }); }
@@ -913,7 +943,7 @@ async function startRoutine(id) {
   routine.lastUsedAt = Date.now();
   await state.db.saveRoutine(routine);
   await loadCollections();
-  await startSession(plan, { ...metaForType(routine.type, routine.config), title: routine.title, routineId: routine.id });
+  await startSession(plan, { ...metaForType(routine.type, routine.config, routine.cueOverrides), title: routine.title, routineId: routine.id });
 }
 
 async function startSession(plan, meta) {
@@ -921,6 +951,7 @@ async function startSession(plan, meta) {
   state.completion = null;
   state.finalized = false;
   await cue.init();
+  cue.beginSession(meta);
   const engine = new TimerEngine(new BrowserClock());
   attachEngine(engine, meta);
   engine.start(plan, meta);
@@ -934,7 +965,7 @@ async function startSession(plan, meta) {
 function attachEngine(engine, meta) {
   state.engineUnsub?.();
   state.engineUnsub = engine.subscribe((event, snapshot) => {
-    cue.onEvent(event);
+    cue.onEvent(event, snapshot);
     if (!['session-completed', 'session-cancelled'].includes(event.type)) state.db.saveActive(snapshot, meta).catch(() => {});
     if (event.type === 'session-completed' || event.type === 'session-cancelled') finalizeSession(snapshot, event.type === 'session-cancelled');
   });
@@ -945,6 +976,7 @@ async function finalizeSession(snapshot, cancelled = false) {
   state.finalized = true;
   cancelAnimationFrame(state.liveRaf);
   await wakeLock.release();
+  cue.endSession();
   const plan = snapshot.plan;
   const activeDurationMs = Math.max(0, (snapshot.endedAt || Date.now()) - snapshot.startedAt - (snapshot.pausedTotalMs || 0));
   const totals = snapshot.phaseTotals || {};
@@ -965,6 +997,7 @@ async function finalizeSession(snapshot, cancelled = false) {
     mode: snapshot.meta?.mode || plan.meta?.mode || 'countdown',
     routineId: snapshot.meta?.routineId,
     config: snapshot.meta?.config,
+    cueOverrides: snapshot.meta?.cueOverrides,
     plan,
     startedAt: snapshot.startedAt,
     endedAt: snapshot.endedAt || Date.now(),
@@ -1029,7 +1062,7 @@ function renderLive() {
     if (!state.engine) return;
     state.engine.reconcile();
     if (!state.engine) return;
-    cue.tick(state.engine.view());
+    cue.tick(state.engine.view(), state.engine.session);
     updateLiveView(false);
     state.liveRaf = requestAnimationFrame(loop);
   };
@@ -1231,6 +1264,42 @@ function showSessionDetail(id) {
     <button class="btn primary" data-action="repeat-session" data-id="${esc(s.id)}">Repeat timer</button>
     <button class="btn danger" data-action="delete-session" data-id="${esc(s.id)}">Delete session</button>
   </div>`);
+}
+
+function scrubCustomSoundFromNodes(nodes = [], soundId) {
+  const ref = `custom:${soundId}`;
+  const cueKeys = ['transitionSound', 'customSound'];
+  for (const node of nodes || []) {
+    for (const bucket of ['cueOverrides', 'workCueOverrides', 'restCueOverrides']) {
+      const cueData = node?.[bucket];
+      if (!cueData) continue;
+      for (const key of cueKeys) if (cueData[key] === ref) delete cueData[key];
+    }
+    if (Array.isArray(node?.children)) scrubCustomSoundFromNodes(node.children, soundId);
+  }
+}
+
+async function scrubDeletedCustomSound(soundId) {
+  const ref = `custom:${soundId}`;
+  const mappingKeys = ['soundWork','soundRest','soundPrepare','soundCountdown','soundWarning','soundHalfway','soundFinish'];
+  for (const key of mappingKeys) if (state.settings[key] === ref) state.settings[key] = '';
+  await saveSettings();
+  for (const profile of state.cueProfiles) {
+    let changed = false;
+    for (const key of mappingKeys) if (profile[key] === ref) { profile[key] = ''; changed = true; }
+    if (changed) await state.db.saveCueProfile(profile);
+  }
+  for (const routine of state.routines) {
+    let changed = false;
+    if (routine.cueOverrides) for (const key of mappingKeys) if (routine.cueOverrides[key] === ref) { routine.cueOverrides[key] = ''; changed = true; }
+    if (routine.type === 'custom') { const before = JSON.stringify(routine.config.nodes || []); scrubCustomSoundFromNodes(routine.config.nodes || [], soundId); changed ||= before !== JSON.stringify(routine.config.nodes || []); }
+    if (changed) await state.db.saveRoutine(routine);
+  }
+  for (const block of state.blocks) {
+    const before = JSON.stringify(block.nodes || []);
+    scrubCustomSoundFromNodes(block.nodes || [], soundId);
+    if (before !== JSON.stringify(block.nodes || [])) await state.db.saveBlock(block);
+  }
 }
 
 function renderSettings() {
