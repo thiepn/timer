@@ -257,12 +257,23 @@ function validateCustomSource({ title, nodes, parameters, blocksById, scope = 'R
     else if (parameter.type !== type) add('PARAMETER_TYPE_MISMATCH', `${label} requires a ${type} parameter.`, path);
     return Boolean(parameter && parameter.type === type);
   };
+  const checkFormula = (expression, label, path) => {
+    const result = validateFormula(expression, formulaVars);
+    if (!result.ok) add('INVALID_FORMULA', `${label}: ${result.error}`, path);
+    return result.ok;
+  };
 
   if (!String(title || '').trim()) add('MISSING_TITLE', `${scope} name is required.`);
   if (!Array.isArray(nodes) || nodes.length === 0) {
     add('EMPTY_ROUTINE', `${scope} must contain at least one step.`);
     return issues;
   }
+
+  const validateCountSource = (node, label, path) => {
+    if (String(node.countFormula || '').trim()) checkFormula(node.countFormula, `${label} formula`, path);
+    else if (node.countParamId) requireParameter(node.countParamId, 'number', label, path);
+    else if (!Number.isInteger(node.count) || node.count < 1 || node.count > 1000) add('INVALID_REPEAT', `${label} must be an integer from 1 to 1000.`, path);
+  };
 
   const walk = (children, path = [], depth = 0) => {
     if (!Array.isArray(children)) {
@@ -284,20 +295,37 @@ function validateCustomSource({ title, nodes, parameters, blocksById, scope = 'R
       else seenIds.add(node.id);
 
       if (node.type === 'timed') {
-        if (node.durationParamId) requireParameter(node.durationParamId, 'duration', `${node.label || 'Timed step'} duration`, nodePath);
+        if (String(node.durationFormula || '').trim()) checkFormula(node.durationFormula, `${node.label || 'Timed step'} duration formula`, nodePath);
+        else if (node.durationParamId) requireParameter(node.durationParamId, 'duration', `${node.label || 'Timed step'} duration`, nodePath);
         else if (!Number.isFinite(node.durationMs) || node.durationMs <= 0) add('INVALID_DURATION', `${node.label || 'Timed step'} must have a positive duration.`, nodePath);
       } else if (node.type === 'manual') {
-        if (node.timeCapParamId) requireParameter(node.timeCapParamId, 'duration', `${node.label || 'Manual step'} time cap`, nodePath);
+        if (String(node.timeCapFormula || '').trim()) checkFormula(node.timeCapFormula, `${node.label || 'Manual step'} cap formula`, nodePath);
+        else if (node.timeCapParamId) requireParameter(node.timeCapParamId, 'duration', `${node.label || 'Manual step'} time cap`, nodePath);
         else if (node.timeCapMs != null && (!Number.isFinite(node.timeCapMs) || node.timeCapMs <= 0)) add('INVALID_CAP', `${node.label || 'Manual step'} has an invalid time cap.`, nodePath);
       } else if (node.type === 'repeat') {
-        if (node.countParamId) requireParameter(node.countParamId, 'number', 'Repeat count', nodePath);
-        else if (!Number.isInteger(node.count) || node.count < 1 || node.count > 1000) add('INVALID_REPEAT', 'Repeat count must be an integer from 1 to 1000.', nodePath);
+        validateCountSource(node, 'Repeat count', nodePath);
         if (!Array.isArray(node.children) || node.children.length === 0) add('EMPTY_REPEAT', 'Repeat block must contain at least one item.', nodePath);
         else walk(node.children, nodePath, depth + 1);
       } else if (node.type === 'section') {
         if (!String(node.label || '').trim()) add('MISSING_SECTION_NAME', 'Section name is required.', nodePath);
         if (!Array.isArray(node.children) || node.children.length === 0) add('EMPTY_SECTION', `${node.label || 'Section'} must contain at least one item.`, nodePath);
         else walk(node.children, nodePath, depth + 1);
+      } else if (node.type === 'progression') {
+        validateCountSource(node, 'Progression rounds', nodePath);
+        if (!Number.isFinite(node.workBaseMs) || node.workBaseMs <= 0) add('INVALID_DURATION', 'Progression work base must be positive.', nodePath);
+        if (node.restBaseMs != null && (!Number.isFinite(node.restBaseMs) || node.restBaseMs < 0)) add('INVALID_DURATION', 'Progression rest base is invalid.', nodePath);
+        checkFormula(node.workFormula || 'base', 'Progression work formula', nodePath);
+        if (String(node.restFormula || '').trim()) checkFormula(node.restFormula, 'Progression rest formula', nodePath);
+      } else if (node.type === 'random') {
+        if (!['choose', 'shuffle'].includes(node.mode || 'choose')) add('INVALID_RANDOM_MODE', 'Random generator mode is invalid.', nodePath);
+        if (!Array.isArray(node.children) || node.children.length === 0) add('EMPTY_RANDOM_POOL', 'Random generator needs at least one pool item.', nodePath);
+        else {
+          if ((node.mode || 'choose') === 'choose') {
+            validateCountSource(node, 'Random pick count', nodePath);
+            if (!node.allowRepeats && !node.countFormula && !node.countParamId && Number(node.count) > node.children.length) add('RANDOM_POOL_TOO_SMALL', 'Random pick count exceeds the pool size while repeats are disabled.', nodePath);
+          }
+          walk(node.children, nodePath, depth + 1);
+        }
       } else if (node.type === 'block') {
         if (!node.blockId || typeof node.blockId !== 'string') add('MISSING_BLOCK', 'Linked block is missing its block ID.', nodePath);
         else if (blocksById && !blocksById.has(node.blockId)) add('UNKNOWN_BLOCK', 'Linked block no longer exists.', nodePath);
@@ -338,7 +366,7 @@ function validateBlockLibrary(blocks = []) {
   const walkRefs = (nodes, stack) => {
     for (const node of nodes || []) {
       if (node?.type === 'block' && node.blockId) visit(node.blockId, stack);
-      if (node?.type === 'repeat' || node?.type === 'section') walkRefs(node.children, stack);
+      if (['repeat','section','random'].includes(node?.type)) walkRefs(node.children, stack);
     }
   };
   const visit = (id, stack = []) => {
@@ -367,10 +395,11 @@ export function validateCustomRoutine({ title = 'Custom Routine', nodes = [], pa
   ];
 }
 
-function customRuntimeId(nodeId, repeatPath, blockPath) {
+function customRuntimeId(nodeId, repeatPath, blockPath, generatorPath = []) {
   const blockSuffix = blockPath.length ? blockPath.map((part) => `${part.refNodeId}:${part.blockId}@${part.revision}`).join('/') : 'root';
   const repeatSuffix = repeatPath.length ? repeatPath.map((r) => `${r.nodeId}:${r.current}`).join('/') : 'base';
-  return `${blockSuffix}|${nodeId}@${repeatSuffix}`;
+  const generatorSuffix = generatorPath.length ? generatorPath.map((g) => `${g.nodeId}:${g.type}:${g.current ?? g.pick ?? 0}:${g.sourceIndex ?? ''}`).join('/') : 'plain';
+  return `${blockSuffix}|${nodeId}@${repeatSuffix}|${generatorSuffix}`;
 }
 
 function scaleCompiledSteps(steps, factor) {
