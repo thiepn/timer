@@ -51,6 +51,7 @@ test('screen reader optimization suppresses app speech even when routine profile
 
 test('custom audio decode cache is bounded and evicts oldest entries', async () => {
   const manager = new CueManager(() => ({ sound: true }));
+  manager.init = async () => true;
   manager.ctx = {
     state: 'running',
     decodeAudioData: async () => ({ duration: 1 }),
