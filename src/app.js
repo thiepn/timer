@@ -2,7 +2,7 @@ import {
   TimerEngine, BrowserClock, formatClock, durationLabel, estimatePlanDuration,
   buildCountdown, buildInterval, buildCircuit, buildBoxing, buildRunWalk,
   buildEmom, buildAmrap, buildForTime, buildStopwatch, buildLadder, buildPyramid,
-  buildCustomRoutine, validateCustomRoutine, collectCustomParameterRefs, resolveCustomParameterValues
+  buildCustomRoutine, validateCustomRoutine, collectCustomParameterRefs, resolveCustomParameterValues, formulaVariableName
 } from './core.js';
 import { TimerDB, defaultSettings, requestPersistentStorage, storageEstimate } from './db.js';
 import { CueManager, WakeLockManager, requestNotificationPermission, showCompletionNotification } from './audio.js';
@@ -48,7 +48,7 @@ function defaultConfig(type) {
     case 'run-walk': return { title: 'Run / Walk', rounds: 10, runMinutes: 2, walkMinutes: 1, warmupMinutes: 5, cooldownMinutes: 5, finalWalk: true };
     case 'ladder': return { title: 'Ascending Ladder', start: 20, step: 10, levels: 5, rest: 10, direction: 'up' };
     case 'pyramid': return { title: 'Pyramid', start: 20, peak: 60, step: 10, rest: 10 };
-    case 'custom': return { title: 'Custom Routine', parameters: [], nodes: [{ id: uid('node'), type: 'repeat', count: 3, children: [
+    case 'custom': return { title: 'Custom Routine', parameters: [], durationScale: 1, targetDurationMinutes: 0, randomMode: 'new', fixedSeed: 'timer-seed', nodes: [{ id: uid('node'), type: 'repeat', count: 3, children: [
       { id: uid('node'), type: 'timed', label: 'Work', phase: 'work', durationMs: 40000 },
       { id: uid('node'), type: 'timed', label: 'Rest', phase: 'rest', durationMs: 20000 }
     ] }] };
@@ -85,7 +85,7 @@ function planFromType(type, c, options = {}) {
     case 'run-walk': return buildRunWalk({ rounds: c.rounds, runMs: mins(c.runMinutes), walkMs: mins(c.walkMinutes), warmupMs: mins(c.warmupMinutes), cooldownMs: mins(c.cooldownMinutes), finalWalk: !!c.finalWalk });
     case 'ladder': return buildLadder({ title: c.title || 'Ladder', startMs: ms(c.start), stepMs: ms(c.step), levels: c.levels, restMs: ms(c.rest), direction: c.direction });
     case 'pyramid': return buildPyramid({ title: c.title || 'Pyramid', startMs: ms(c.start), peakMs: ms(c.peak), stepMs: ms(c.step), restMs: ms(c.rest) });
-    case 'custom': return buildCustomRoutine({ title: c.title || 'Custom Routine', nodes: c.nodes || [], parameters: c.parameters || [], parameterValues: options.parameterValues || {}, blocks: options.blocks || state.blocks || [] });
+    case 'custom': return buildCustomRoutine({ title: c.title || 'Custom Routine', nodes: c.nodes || [], parameters: c.parameters || [], parameterValues: options.parameterValues || {}, blocks: options.blocks || state.blocks || [], seed: options.seed ?? (c.randomMode === 'fixed' ? (c.fixedSeed || 'timer-seed') : 'preview'), durationScale: Number(c.durationScale || 1), targetDurationMs: Number(c.targetDurationMinutes) > 0 ? mins(c.targetDurationMinutes) : undefined });
     case 'stopwatch': return buildStopwatch();
     default: throw new Error(`Unknown builder type: ${type}`);
   }
@@ -118,7 +118,7 @@ function typeSummary(type, c) {
 }
 
 function countCustomNodes(nodes = []) {
-  return (nodes || []).reduce((total, node) => total + 1 + ((node?.type === 'repeat' || node?.type === 'section') ? countCustomNodes(node.children || []) : 0), 0);
+  return (nodes || []).reduce((total, node) => total + 1 + ((['repeat','section','random'].includes(node?.type)) ? countCustomNodes(node.children || []) : 0), 0);
 }
 
 const state = {
@@ -331,7 +331,7 @@ function renderBuilder() {
     body = `${field('Start', 'start', c.start, { min: 1, max: 3600, suffix: 'sec' })}${field('Peak', 'peak', c.peak, { min: 1, max: 3600, suffix: 'sec' })}${field('Step', 'step', c.step, { min: 1, max: 3600, suffix: 'sec' })}${field('Rest', 'rest', c.rest, { min: 0, max: 3600, suffix: 'sec' })}`;
   } else if (type === 'custom') {
     c.parameters ||= [];
-    body = `${renderCustomParameters(c.parameters)}<div class="field"><div class="row-between"><div><div class="field-label">Routine structure</div><div class="small muted">Nest sections, repeats, and linked reusable blocks. Copy/paste and move controls work without dragging.</div></div><button class="btn" data-action="custom-add" data-parent="">＋ Add</button></div><div class="custom-tree">${renderCustomTree(c.nodes || [])}</div>${!(c.nodes || []).length ? `<div class="empty">Add a step, repeat, section, or reusable block to begin.</div>` : ''}<div class="row" style="flex-wrap:wrap"><button class="btn" data-action="custom-preview">Preview compiled plan</button>${state.blocks.length ? `<span class="pill">${state.blocks.length} reusable block${state.blocks.length === 1 ? '' : 's'}</span>` : ''}</div></div>`;
+    body = `${renderCustomParameters(c.parameters)}${editingBlock ? '' : renderCustomCompileOptions(c)}<div class="field"><div class="row-between"><div><div class="field-label">Routine structure</div><div class="small muted">Nest patterns, formulas, generators, sections and reusable blocks. Formulas resolve before the workout starts.</div></div><button class="btn" data-action="custom-add" data-parent="">＋ Add</button></div><div class="custom-tree">${renderCustomTree(c.nodes || [])}</div>${!(c.nodes || []).length ? `<div class="empty">Add a step, repeat, generator, section, or reusable block to begin.</div>` : ''}<div class="row" style="flex-wrap:wrap"><button class="btn" data-action="custom-preview">Preview compiled plan</button>${state.blocks.length ? `<span class="pill">${state.blocks.length} reusable block${state.blocks.length === 1 ? '' : 's'}</span>` : ''}</div></div>`;
   } else if (type === 'stopwatch') {
     body = `<div class="card card-pad"><strong>Stopwatch</strong><p class="muted">Open-ended timing with pause, resume and lap recording.</p></div>`;
   }
@@ -391,7 +391,7 @@ function customPathLabel(path = []) {
     const node = nodes[index];
     if (!node) break;
     const block = node.type === 'block' ? state.blocks.find((item) => item.id === node.blockId) : null;
-    labels.push(node.label || block?.title || (node.type === 'repeat' ? 'Repeat block' : node.type === 'manual' ? 'Manual step' : node.type === 'section' ? 'Section' : 'Timed step'));
+    labels.push(node.label || block?.title || (node.type === 'repeat' ? 'Repeat block' : node.type === 'manual' ? 'Manual step' : node.type === 'section' ? 'Section' : node.type === 'progression' ? 'Progression' : node.type === 'random' ? 'Random pool' : 'Timed step'));
     nodes = node.children || [];
   }
   return labels.join(' › ') || 'Routine';
@@ -401,7 +401,7 @@ function customChildrenAt(parentPath = '') {
   if (!state.builder || state.builder.type !== 'custom') return null;
   if (parentPath === '') return state.builder.config.nodes;
   const parent = customNodeAt(parentPath);
-  return parent && (parent.type === 'repeat' || parent.type === 'section') ? parent.children : null;
+  return parent && ['repeat','section','random'].includes(parent.type) ? parent.children : null;
 }
 
 function customParentCollection(path) {
@@ -416,7 +416,7 @@ function customParentCollection(path) {
 function walkCustomNodes(nodes, fn) {
   for (const node of nodes || []) {
     fn(node);
-    if (node?.type === 'repeat' || node?.type === 'section') walkCustomNodes(node.children, fn);
+    if (['repeat','section','random'].includes(node?.type)) walkCustomNodes(node.children, fn);
   }
 }
 
@@ -457,15 +457,21 @@ function renderCustomParameters(parameters = []) {
       return `<div class="parameter-row" data-param-id="${esc(parameter.id)}">
         <div class="row-between"><span class="node-kind">${duration ? 'Duration' : parameter.type === 'choice' ? 'Choice' : 'Number'}</span><button class="mini-btn danger-text" data-action="custom-delete-param" data-id="${esc(parameter.id)}" aria-label="Delete parameter">×</button></div>
         <input class="input" value="${esc(parameter.label || '')}" data-param-id="${esc(parameter.id)}" data-param-field="label" aria-label="Parameter name">
+        ${parameter.type !== 'choice' ? `<label class="custom-number-label">Formula variable<input class="input" value="${esc(parameter.variable || formulaVariableName(parameter))}" data-param-id="${esc(parameter.id)}" data-param-field="variable" aria-label="Formula variable"></label>` : ''}
         ${duration ? `<div class="parameter-grid"><label class="custom-number-label">Default seconds<input class="input" type="number" min="1" value="${Math.round(parameter.defaultMs / 1000)}" data-param-id="${esc(parameter.id)}" data-param-field="defaultMs" data-param-unit="seconds"></label><label class="custom-number-label">Min seconds<input class="input" type="number" min="1" value="${Math.round((parameter.minMs || 1000) / 1000)}" data-param-id="${esc(parameter.id)}" data-param-field="minMs" data-param-unit="seconds"></label><label class="custom-number-label">Max seconds<input class="input" type="number" min="1" value="${Math.round((parameter.maxMs || 3600000) / 1000)}" data-param-id="${esc(parameter.id)}" data-param-field="maxMs" data-param-unit="seconds"></label></div>` : `<div class="parameter-grid"><label class="custom-number-label">Default<input class="input" type="number" value="${esc(parameter.defaultValue)}" data-param-id="${esc(parameter.id)}" data-param-field="defaultValue"></label><label class="custom-number-label">Minimum<input class="input" type="number" value="${esc(parameter.min ?? 1)}" data-param-id="${esc(parameter.id)}" data-param-field="min"></label><label class="custom-number-label">Maximum<input class="input" type="number" value="${esc(parameter.max ?? 1000)}" data-param-id="${esc(parameter.id)}" data-param-field="max"></label></div>`}
       </div>`;
     }).join('')}</div>` : `<div class="small muted parameter-empty">No launch parameters yet.</div>`}
   </div>`;
 }
 
+
+function renderCustomCompileOptions(config) {
+  return `<div class="compile-options card"><div class="field-label">Compile options</div><div class="small muted">Applied after formulas and generators resolve. Target duration proportionally fits every finite timed/capped step.</div><div class="generator-grid"><label class="custom-number-label">Duration scale<input class="input" type="number" min="0.05" max="20" step="0.05" value="${esc(config.durationScale ?? 1)}" data-builder-key="durationScale"></label><label class="custom-number-label">Target minutes (0 = off)<input class="input" type="number" min="0" step="0.1" value="${esc(config.targetDurationMinutes ?? 0)}" data-builder-key="targetDurationMinutes"></label></div><label class="custom-number-label">Randomization<select class="select" data-builder-key="randomMode"><option value="new" ${(config.randomMode || 'new') === 'new' ? 'selected' : ''}>New seeded sequence each start</option><option value="fixed" ${config.randomMode === 'fixed' ? 'selected' : ''}>Fixed reproducible seed</option></select></label>${config.randomMode === 'fixed' ? `<label class="custom-number-label">Fixed seed<input class="input" value="${esc(config.fixedSeed || 'timer-seed')}" data-builder-key="fixedSeed"></label>` : ''}</div>`;
+}
+
 function createCustomParameter(kind) {
-  if (kind === 'number') return { id: uid('param'), type: 'number', label: 'Rounds', defaultValue: 3, min: 1, max: 1000, integer: true };
-  return { id: uid('param'), type: 'duration', label: 'Work time', defaultMs: 40000, minMs: 1000, maxMs: 3600000, stepMs: 1000 };
+  if (kind === 'number') return { id: uid('param'), type: 'number', label: 'Rounds', variable: 'roundsValue', defaultValue: 3, min: 1, max: 1000, integer: true };
+  return { id: uid('param'), type: 'duration', label: 'Work time', variable: 'workTime', defaultMs: 40000, minMs: 1000, maxMs: 3600000, stepMs: 1000 };
 }
 
 function showCustomParameterSheet() {
@@ -483,17 +489,8 @@ function deleteCustomParameter(id) {
   const parameters = state.builder?.config?.parameters || [];
   const index = parameters.findIndex((parameter) => parameter.id === id);
   if (index < 0) return;
-  let used = false;
-  walkCustomNodes(state.builder.config.nodes, (node) => {
-    if ([node.durationParamId, node.timeCapParamId, node.countParamId].includes(id)) used = true;
-  });
-  if (used && !confirm('This parameter is used by routine items. Remove the parameter and return those items to fixed values?')) return;
-  const parameter = parameters[index];
-  walkCustomNodes(state.builder.config.nodes, (node) => {
-    if (node.durationParamId === id) { node.durationParamId = undefined; node.durationMs = parameter.defaultMs; }
-    if (node.timeCapParamId === id) { node.timeCapParamId = undefined; node.timeCapMs = parameter.defaultMs; }
-    if (node.countParamId === id) { node.countParamId = undefined; node.count = parameter.defaultValue; }
-  });
+  const used = new Set(collectCustomParameterRefs(state.builder.config.nodes || [], parameters)).has(id);
+  if (used) return toast('Remove this parameter from bindings and formulas before deleting it.', 4200);
   parameters.splice(index, 1);
   renderBuilder();
 }
@@ -521,6 +518,12 @@ function createCustomNode(kind) {
   if (kind === 'section') return { id: uid('node'), type: 'section', label: 'Section', children: [
     { id: uid('node'), type: 'timed', label: 'Work', phase: 'work', durationMs: 40000 }
   ] };
+  if (kind === 'progression') return { id: uid('node'), type: 'progression', count: 6, workLabel: 'Work', workPhase: 'work', workBaseMs: 30000, workFormula: 'base + (round - 1) * 5', restLabel: 'Rest', restPhase: 'rest', restBaseMs: 30000, restFormula: 'max(10, base - (round - 1) * 5)', finalRest: false };
+  if (kind === 'random') return { id: uid('node'), type: 'random', mode: 'choose', count: 5, allowRepeats: true, avoidImmediateRepeat: true, children: [
+    { id: uid('node'), type: 'timed', label: 'Push-ups', phase: 'work', durationMs: 30000 },
+    { id: uid('node'), type: 'timed', label: 'Squats', phase: 'work', durationMs: 30000 },
+    { id: uid('node'), type: 'timed', label: 'Burpees', phase: 'work', durationMs: 30000 }
+  ] };
   return { id: uid('node'), type: 'timed', label: 'Work', phase: 'work', durationMs: 40000 };
 }
 
@@ -546,9 +549,10 @@ function renderCustomTree(nodes = [], depth = 0, prefix = []) {
     if (node.type === 'repeat') {
       const bound = node.countParamId || '';
       return `<div class="custom-node custom-container" style="--depth:${depth}">
-        <div class="custom-node-head"><span class="node-kind">Repeat</span>${controls}</div>
+        <div class="custom-node-head"><span class="node-kind">Repeat / Pattern</span>${controls}</div>
         <div class="binding-grid"><label class="custom-number-label">Rounds source<select class="select" data-custom-path="${path}" data-custom-field="countParamId">${customParameterOptions('number', bound)}</select></label>${bound ? `<div class="binding-value">Uses <strong>${esc(customParameterById(bound)?.label || 'missing parameter')}</strong></div>` : `<label class="custom-number-label">Rounds<input class="input" type="number" min="1" max="1000" value="${esc(node.count)}" data-custom-path="${path}" data-custom-field="count"></label>`}</div>
-        <div class="custom-container-config"><span class="small muted">${(node.children || []).length} item${(node.children || []).length === 1 ? '' : 's'}</span><button class="btn ghost compact-btn" data-action="custom-add" data-parent="${path}">＋ Add inside</button></div>
+        <label class="custom-number-label">Count formula <span class="tiny">optional; overrides fixed/parameter</span><input class="input formula-input" value="${esc(node.countFormula || '')}" data-custom-path="${path}" data-custom-field="countFormula" placeholder="e.g. max(1, roundsValue)"></label>
+        <div class="custom-container-config"><span class="small muted">${(node.children || []).length} pattern item${(node.children || []).length === 1 ? '' : 's'}</span><button class="btn ghost compact-btn" data-action="custom-add" data-parent="${path}">＋ Add inside</button></div>
         <div class="custom-children">${renderCustomTree(node.children || [], depth + 1, [...prefix, index])}</div>
       </div>`;
     }
@@ -560,14 +564,40 @@ function renderCustomTree(nodes = [], depth = 0, prefix = []) {
         <div class="custom-children">${renderCustomTree(node.children || [], depth + 1, [...prefix, index])}</div>
       </div>`;
     }
+    if (node.type === 'progression') {
+      const bound = node.countParamId || '';
+      return `<div class="custom-node custom-container generator-node" style="--depth:${depth}">
+        <div class="custom-node-head"><span class="node-kind">Progression Generator</span>${controls}</div>
+        <div class="binding-grid"><label class="custom-number-label">Rounds source<select class="select" data-custom-path="${path}" data-custom-field="countParamId">${customParameterOptions('number', bound)}</select></label>${bound ? `<div class="binding-value">Uses <strong>${esc(customParameterById(bound)?.label || 'missing parameter')}</strong></div>` : `<label class="custom-number-label">Rounds<input class="input" type="number" min="1" max="1000" value="${esc(node.count || 5)}" data-custom-path="${path}" data-custom-field="count"></label>`}</div>
+        <label class="custom-number-label">Rounds formula <span class="tiny">optional</span><input class="input formula-input" value="${esc(node.countFormula || '')}" data-custom-path="${path}" data-custom-field="countFormula" placeholder="e.g. 6"></label>
+        <div class="generator-grid"><label class="custom-number-label">Work label<input class="input" value="${esc(node.workLabel || 'Work')}" data-custom-path="${path}" data-custom-field="workLabel"></label><label class="custom-number-label">Base work (sec)<input class="input" type="number" min="1" value="${sec(node.workBaseMs || 30000)}" data-custom-path="${path}" data-custom-field="workBaseMs" data-custom-unit="seconds"></label></div>
+        <label class="custom-number-label">Work formula <span class="tiny">variables: round, rounds, base, previous, index + parameter variables</span><input class="input formula-input" value="${esc(node.workFormula || 'base')}" data-custom-path="${path}" data-custom-field="workFormula" placeholder="base + (round - 1) * 5"></label>
+        <div class="generator-grid"><label class="custom-number-label">Rest label<input class="input" value="${esc(node.restLabel || 'Rest')}" data-custom-path="${path}" data-custom-field="restLabel"></label><label class="custom-number-label">Base rest (sec)<input class="input" type="number" min="0" value="${sec(node.restBaseMs || 0)}" data-custom-path="${path}" data-custom-field="restBaseMs" data-custom-unit="seconds"></label></div>
+        <label class="custom-number-label">Rest formula <span class="tiny">0 omits rest</span><input class="input formula-input" value="${esc(node.restFormula || '')}" data-custom-path="${path}" data-custom-field="restFormula" placeholder="max(10, base - (round - 1) * 5)"></label>
+        <label class="small muted"><input type="checkbox" data-custom-path="${path}" data-custom-field="finalRest" ${node.finalRest ? 'checked' : ''}> Include final rest</label>
+      </div>`;
+    }
+    if (node.type === 'random') {
+      const bound = node.countParamId || '';
+      const mode = node.mode || 'choose';
+      return `<div class="custom-node custom-container generator-node" style="--depth:${depth}">
+        <div class="custom-node-head"><span class="node-kind">Random Generator</span>${controls}</div>
+        <div class="generator-grid"><label class="custom-number-label">Mode<select class="select" data-custom-path="${path}" data-custom-field="mode"><option value="choose" ${mode === 'choose' ? 'selected' : ''}>Choose from pool</option><option value="shuffle" ${mode === 'shuffle' ? 'selected' : ''}>Shuffle all once</option></select></label>${mode === 'choose' ? `<label class="custom-number-label">Pick count<input class="input" type="number" min="1" max="1000" value="${esc(node.count || 4)}" data-custom-path="${path}" data-custom-field="count"></label>` : ''}</div>
+        ${mode === 'choose' ? `<label class="custom-number-label">Pick-count formula <span class="tiny">optional</span><input class="input formula-input" value="${esc(node.countFormula || '')}" data-custom-path="${path}" data-custom-field="countFormula" placeholder="e.g. 6"></label><label class="small muted"><input type="checkbox" data-custom-path="${path}" data-custom-field="allowRepeats" ${node.allowRepeats !== false ? 'checked' : ''}> Allow repeats</label><label class="small muted"><input type="checkbox" data-custom-path="${path}" data-custom-field="avoidImmediateRepeat" ${node.avoidImmediateRepeat !== false ? 'checked' : ''}> Avoid immediate repeat</label>` : ''}
+        <div class="custom-container-config"><span class="small muted">${(node.children || []).length} pool item${(node.children || []).length === 1 ? '' : 's'}</span><button class="btn ghost compact-btn" data-action="custom-add" data-parent="${path}">＋ Add pool item</button></div>
+        <div class="custom-children">${renderCustomTree(node.children || [], depth + 1, [...prefix, index])}</div>
+      </div>`;
+    }
     const manual = node.type === 'manual';
     const bound = manual ? (node.timeCapParamId || '') : (node.durationParamId || '');
     const secondsValue = manual ? (node.timeCapMs ? sec(node.timeCapMs) : 0) : sec(node.durationMs || 0);
+    const formulaValue = manual ? (node.timeCapFormula || '') : (node.durationFormula || '');
     return `<div class="custom-node custom-leaf" style="--depth:${depth}">
       <div class="custom-node-head"><span class="node-kind">${manual ? 'Manual' : 'Timed'}</span>${controls}</div>
       <input class="input" value="${esc(node.label || '')}" data-custom-path="${path}" data-custom-field="label" aria-label="Step label">
       <div class="custom-leaf-grid"><select class="select" data-custom-path="${path}" data-custom-field="phase" aria-label="Step phase">${customPhaseOptions(node.phase || 'work')}</select><label class="custom-number-label">${manual ? 'Cap source' : 'Duration source'}<select class="select" data-custom-path="${path}" data-custom-field="${manual ? 'timeCapParamId' : 'durationParamId'}">${customParameterOptions('duration', bound, manual ? 'Fixed / no cap' : 'Fixed duration')}</select></label></div>
-      ${bound ? `<div class="binding-value">Uses <strong>${esc(customParameterById(bound)?.label || 'missing parameter')}</strong></div>` : `<label class="custom-number-label">${manual ? 'Cap seconds (0 = none)' : 'Seconds'}<input class="input" type="number" min="0" step="1" value="${secondsValue}" data-custom-path="${path}" data-custom-field="${manual ? 'timeCapMs' : 'durationMs'}" data-custom-unit="seconds"></label>`}
+      ${bound ? `<div class="binding-value">Uses <strong>${esc(customParameterById(bound)?.label || 'missing parameter')}</strong></div>` : `<label class="custom-number-label">${manual ? 'Base cap seconds (0 = none)' : 'Base seconds'}<input class="input" type="number" min="0" step="1" value="${secondsValue}" data-custom-path="${path}" data-custom-field="${manual ? 'timeCapMs' : 'durationMs'}" data-custom-unit="seconds"></label>`}
+      <label class="custom-number-label">${manual ? 'Cap formula' : 'Duration formula'} <span class="tiny">optional; result is seconds</span><input class="input formula-input" value="${esc(formulaValue)}" data-custom-path="${path}" data-custom-field="${manual ? 'timeCapFormula' : 'durationFormula'}" placeholder="e.g. base + (round - 1) * 5"></label>
       <input class="input" value="${esc(node.target || '')}" data-custom-path="${path}" data-custom-field="target" placeholder="Target / note (optional)" aria-label="Step target">
     </div>`;
   }).join('');
@@ -581,6 +611,8 @@ function showCustomAddSheet(parentPath = '') {
     <button class="sheet-item" data-action="custom-add-kind" data-parent="${esc(parentPath)}" data-kind="manual"><div><strong>Manual step</strong><div class="small muted">Continue when you tap Done</div></div></button>
     <button class="sheet-item" data-action="custom-add-kind" data-parent="${esc(parentPath)}" data-kind="repeat"><div><strong>Repeat block</strong><div class="small muted">Nested repeated sequence</div></div></button>
     <button class="sheet-item" data-action="custom-add-kind" data-parent="${esc(parentPath)}" data-kind="section"><div><strong>Section</strong><div class="small muted">Named group for structure</div></div></button>
+    <button class="sheet-item" data-action="custom-add-kind" data-parent="${esc(parentPath)}" data-kind="progression"><div><strong>Progression generator</strong><div class="small muted">Formula-driven work/rest progression</div></div></button>
+    <button class="sheet-item" data-action="custom-add-kind" data-parent="${esc(parentPath)}" data-kind="random"><div><strong>Random generator</strong><div class="small muted">Seeded choose/shuffle pool</div></div></button>
     ${state.blocks.length ? `<button class="sheet-item" data-action="custom-block-picker" data-parent="${esc(parentPath)}" data-mode="linked"><div><strong>Linked reusable block</strong><div class="small muted">Future block revisions flow into this routine</div></div></button><button class="sheet-item" data-action="custom-block-picker" data-parent="${esc(parentPath)}" data-mode="copy"><div><strong>Copy reusable block</strong><div class="small muted">Insert independent concrete steps</div></div></button>` : ''}
     ${state.customClipboard ? `<button class="sheet-item" data-action="custom-paste" data-parent="${esc(parentPath)}"><div><strong>Paste copied item</strong><div class="small muted">Insert an independent copy</div></div></button>` : ''}
   </div>`);
@@ -598,7 +630,7 @@ function freshenCustomNodeIds(node) {
   const copy = structuredClone(node);
   const walk = (item) => {
     item.id = uid('node');
-    if (item.type === 'repeat' || item.type === 'section') (item.children || []).forEach(walk);
+    if (['repeat','section','random'].includes(item.type)) (item.children || []).forEach(walk);
   };
   walk(copy);
   return copy;
@@ -624,9 +656,14 @@ function insertCustomBlock(parentPath, blockId, mode) {
   const block = state.blocks.find((item) => item.id === blockId);
   if (!collection || !block) return toast('Reusable block not found.');
   if (mode === 'copy') {
-    const values = defaultParameterValues(block.parameters || []);
-    const materialized = materializeNodesWithValues(block.nodes, values).map(freshenCustomNodeIds);
-    collection.push(...materialized);
+    try {
+      const values = defaultParameterValues(block.parameters || []);
+      const plan = buildCustomRoutine({ title: block.title || 'Block', nodes: block.nodes || [], parameters: block.parameters || [], parameterValues: values, blocks: state.blocks, seed: 'block-copy' });
+      const materialized = plan.steps.map((item) => item.manual
+        ? { id: uid('node'), type: 'manual', label: item.label, phase: item.phase, timeCapMs: item.timeCapMs, target: item.target || '' }
+        : { id: uid('node'), type: 'timed', label: item.label, phase: item.phase, durationMs: item.durationMs, target: item.target || '' });
+      collection.push(...materialized);
+    } catch (error) { return toast(error.message || 'Reusable block could not be copied.', 4200); }
   } else {
     collection.push({ id: uid('node'), type: 'block', blockId: block.id, parameterValues: defaultParameterValues(block.parameters || []) });
   }
@@ -637,7 +674,7 @@ function insertCustomBlock(parentPath, blockId, mode) {
 function copyCustomNode(path) {
   const node = customNodeAt(path);
   if (!node) return;
-  const refs = new Set(collectCustomParameterRefs([node]));
+  const refs = new Set(collectCustomParameterRefs([node], state.builder.config.parameters || []));
   const parameters = (state.builder.config.parameters || []).filter((parameter) => refs.has(parameter.id)).map((parameter) => structuredClone(parameter));
   state.customClipboard = { node: structuredClone(node), parameters };
   toast('Routine item copied.');
@@ -661,7 +698,7 @@ async function extractCustomBlock(path) {
   if (!info || !node || node.type === 'block') return;
   const title = prompt('Reusable block name', node.label || (node.type === 'repeat' ? 'Repeat Block' : node.type === 'section' ? 'Section Block' : 'Workout Block'));
   if (!title?.trim()) return;
-  const refs = new Set(collectCustomParameterRefs([node]));
+  const refs = new Set(collectCustomParameterRefs([node], state.builder.config.parameters || []));
   const parameters = (state.builder.config.parameters || []).filter((parameter) => refs.has(parameter.id)).map((parameter) => structuredClone(parameter));
   const block = { id: uid('block'), title: title.trim(), revision: 1, parameters, nodes: [structuredClone(node)] };
   await state.db.saveBlock(block);
@@ -678,7 +715,10 @@ function unlinkCustomBlock(path) {
   if (!info || !node || !block) return toast('Reusable block not found.');
   try {
     const values = resolveCustomParameterValues(block.parameters || [], node.parameterValues || {});
-    const nodes = materializeNodesWithValues(block.nodes, values).map(freshenCustomNodeIds);
+    const plan = buildCustomRoutine({ title: block.title || 'Block', nodes: block.nodes || [], parameters: block.parameters || [], parameterValues: values, blocks: state.blocks, seed: 'block-unlink' });
+    const nodes = plan.steps.map((item) => item.manual
+      ? { id: uid('node'), type: 'manual', label: item.label, phase: item.phase, timeCapMs: item.timeCapMs, target: item.target || '' }
+      : { id: uid('node'), type: 'timed', label: item.label, phase: item.phase, durationMs: item.durationMs, target: item.target || '' });
     info.collection.splice(info.index, 1, ...nodes);
     renderBuilder();
   } catch (error) { toast(error.message || 'Block could not be unlinked.'); }
@@ -720,14 +760,17 @@ function updateCustomInput(target) {
   if (fieldName === 'durationParamId' || fieldName === 'timeCapParamId' || fieldName === 'countParamId') {
     node[fieldName] = target.value || undefined;
     return renderBuilder();
-  } else if (fieldName === 'durationMs' || fieldName === 'timeCapMs') {
+  } else if (['durationMs','timeCapMs','workBaseMs','restBaseMs'].includes(fieldName)) {
     const value = Number(target.value);
-    node[fieldName] = value > 0 ? ms(value) : (fieldName === 'timeCapMs' ? undefined : 0);
+    node[fieldName] = value > 0 ? ms(value) : (['timeCapMs','restBaseMs'].includes(fieldName) ? undefined : 0);
   } else if (fieldName === 'count') {
     node.count = Number(target.value);
+  } else if (target.type === 'checkbox') {
+    node[fieldName] = target.checked;
   } else {
     node[fieldName] = target.value;
   }
+  if (fieldName === 'mode') return renderBuilder();
   refreshBuilderSummary();
 }
 
@@ -758,11 +801,12 @@ function showCustomPreview() {
       const section = item.sectionPath?.length ? item.sectionPath.map((part) => part.label).join(' › ') : '';
       const blocks = item.blockPath?.length ? item.blockPath.map((part) => part.title).join(' › ') : '';
       const round = item.repeatPath?.length ? item.repeatPath.map((part) => `${part.current}/${part.total}`).join(' · ') : '';
+      const generated = item.generatorPath?.length ? item.generatorPath.map((part) => part.type === 'random' ? `Random ${part.current}/${part.total}` : `Progression ${part.current}/${part.total}`).join(' · ') : '';
       const timing = item.manual ? (item.timeCapMs ? `Manual · cap ${durationLabel(item.timeCapMs)}` : 'Manual') : durationLabel(item.durationMs);
       const trail = [blocks, section].filter(Boolean).join(' › ');
-      return `<div class="preview-row"><span>${index + 1}</span><div><strong>${esc(item.label)}</strong>${trail ? `<div class="tiny">${esc(trail)}</div>` : ''}</div><div class="preview-meta">${round ? `<div>${esc(round)}</div>` : ''}<span>${esc(timing)}</span></div></div>`;
+      return `<div class="preview-row"><span>${index + 1}</span><div><strong>${esc(item.label)}</strong>${trail ? `<div class="tiny">${esc(trail)}</div>` : ''}</div><div class="preview-meta">${generated ? `<div>${esc(generated)}</div>` : round ? `<div>${esc(round)}</div>` : ''}<span>${esc(timing)}</span></div></div>`;
     }).join('');
-    showSheet('Compiled Preview', `<div class="stack"><div class="analytics-grid"><div class="metric"><strong>${plan.steps.length}</strong><span>Executable steps</span></div><div class="metric"><strong>${manualCount}</strong><span>Manual</span></div><div class="metric"><strong>${estimate == null ? 'Varies' : durationLabel(estimate)}</strong><span>Duration</span></div></div>${(config.parameters || []).length ? `<div class="card card-pad"><strong>Default launch parameters</strong><div class="small muted" style="margin-top:6px">${(config.parameters || []).map((parameter) => `${esc(parameter.label)}: ${parameter.type === 'duration' ? durationLabel(parameter.defaultMs) : esc(parameter.defaultValue)}`).join(' · ')}</div></div>` : ''}<div class="preview-list">${previewRows}${plan.steps.length > 120 ? `<div class="small muted">Showing first 120 of ${plan.steps.length} steps.</div>` : ''}</div></div>`);
+    showSheet('Compiled Preview', `<div class="stack"><div class="analytics-grid"><div class="metric"><strong>${plan.steps.length}</strong><span>Executable steps</span></div><div class="metric"><strong>${manualCount}</strong><span>Manual</span></div><div class="metric"><strong>${estimate == null ? 'Varies' : durationLabel(estimate)}</strong><span>Duration</span></div></div><div class="card card-pad small muted">Seed: ${esc(plan.meta?.randomSeed || 'preview')} · Scale: ${esc(plan.meta?.durationScale || 1)}×${plan.meta?.targetDurationMs ? ` · Target ${durationLabel(plan.meta.targetDurationMs)}` : ''}</div>${(config.parameters || []).length ? `<div class="card card-pad"><strong>Default launch parameters</strong><div class="small muted" style="margin-top:6px">${(config.parameters || []).map((parameter) => `${esc(parameter.label)}: ${parameter.type === 'duration' ? durationLabel(parameter.defaultMs) : esc(parameter.defaultValue)}`).join(' · ')}</div></div>` : ''}<div class="preview-list">${previewRows}${plan.steps.length > 120 ? `<div class="small muted">Showing first 120 of ${plan.steps.length} steps.</div>` : ''}</div></div>`);
   } catch (error) { toast(error.message || 'Routine could not be compiled.', 4200); }
 }
 
@@ -826,7 +870,7 @@ async function confirmParameterizedStart() {
   try { resolved = resolveCustomParameterValues(parameters, values); }
   catch (error) { return toast(error.message || 'Parameter values are invalid.', 4200); }
   let plan;
-  try { plan = planFromType(pending.type, pending.config, { parameterValues: resolved, blocks: pending.blocks || state.blocks }); }
+  try { plan = planFromType(pending.type, pending.config, { parameterValues: resolved, blocks: pending.blocks || state.blocks, seed: pending.type === 'custom' && pending.config.randomMode !== 'fixed' ? uid('seed') : undefined }); }
   catch (error) { return toast(error.issues?.[0]?.message || error.message || 'Routine could not be compiled.', 4200); }
 
   if (pending.routineId) {
@@ -851,7 +895,7 @@ async function startBuilder() {
     return showParameterizedStart({ type, config, routineId: state.builderEditingId || undefined, title: config.title, savedValues: routine?.lastParameterValues, source: 'builder' });
   }
   let plan;
-  try { plan = planFromType(type, config, { blocks: blocksForCurrentBuilder() }); }
+  try { plan = planFromType(type, config, { blocks: blocksForCurrentBuilder(), seed: type === 'custom' && config.randomMode !== 'fixed' ? uid('seed') : undefined }); }
   catch (e) { return toast(e.issues?.[0]?.message || e.message || 'This timer could not be created.'); }
   await startSession(plan, { ...metaForType(type, config), routineId: state.builderEditingId || undefined });
 }
@@ -863,7 +907,7 @@ async function startRoutine(id) {
     return showParameterizedStart({ type: routine.type, config: routine.config, routineId: routine.id, title: routine.title, savedValues: routine.lastParameterValues, source: 'library' });
   }
   let plan;
-  try { plan = planFromType(routine.type, routine.config); }
+  try { plan = planFromType(routine.type, routine.config, { blocks: state.blocks, seed: routine.type === 'custom' && routine.config?.randomMode !== 'fixed' ? uid('seed') : undefined }); }
   catch (error) { return toast(error.issues?.[0]?.message || error.message || 'Routine could not be compiled.', 4200); }
   routine.useCount = (routine.useCount || 0) + 1;
   routine.lastUsedAt = Date.now();
@@ -1010,7 +1054,9 @@ function updateLiveView(force = false) {
   const round = current.round;
   const blockLabel = current.blockPath?.at(-1)?.title;
   const sectionLabel = current.sectionPath?.at(-1)?.label;
-  const contextLabel = [blockLabel, sectionLabel, round ? `Round ${round.current} / ${round.total}` : ''].filter(Boolean).join(' · ');
+  const generator = current.generatorPath?.at(-1);
+  const generatorLabel = generator?.type === 'random' ? `Random ${generator.current} / ${generator.total}` : '';
+  const contextLabel = [blockLabel, sectionLabel, generatorLabel, round ? `Round ${round.current} / ${round.total}` : ''].filter(Boolean).join(' · ');
   $('#live-round').textContent = contextLabel || (v.mode === 'stopwatch' ? 'Stopwatch' : v.title);
   const next = v.next;
   $('#live-next').innerHTML = next ? `Next<br><strong>${esc(next.label)}${next.durationMs ? ` · ${formatClock(next.durationMs)}` : ''}</strong>` : '';
@@ -1218,7 +1264,7 @@ function renderSettings() {
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">App</h2>
       <button class="btn" data-action="install">Install PWA</button>
-      <div class="small muted">Timer v1.2.0 · local-first · offline capable</div>
+      <div class="small muted">Timer v1.3.0 · local-first · offline capable</div>
     </section>`;
 }
 
@@ -1387,6 +1433,7 @@ function updateBuilderInput(target) {
   const cfg = state.builder.config;
   if (target.type === 'number') cfg[key] = Number(target.value);
   else cfg[key] = target.value;
+  if (key === 'randomMode') return renderBuilder();
   refreshBuilderSummary();
 }
 

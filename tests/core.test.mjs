@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FakeClock, TimerEngine, buildInterval, buildEmom, buildCountdown, buildPyramid, buildBoxing, buildCustomRoutine, validateCustomRoutine, estimatePlanDuration } from '../src/core.js';
+import { FakeClock, TimerEngine, buildInterval, buildEmom, buildCountdown, buildPyramid, buildBoxing, buildCustomRoutine, validateCustomRoutine, estimatePlanDuration, evaluateFormula, validateFormula, createSeededRandom, collectCustomParameterRefs, formulaVariableName } from '../src/core.js';
 
 test('interval compilation omits final rest by default', () => {
   const plan = buildInterval({ workMs: 40000, restMs: 20000, rounds: 3, prepareMs: 0 });
@@ -213,4 +213,123 @@ test('circular reusable blocks are rejected', () => {
     title: 'Cycle', blocks,
     nodes: [{ id: 'root-ref', type: 'block', blockId: 'a' }]
   }), /Circular reusable block reference/);
+});
+
+
+test('formula engine evaluates safe arithmetic and rejects unknown capabilities', () => {
+  assert.equal(evaluateFormula('clamp(base + (round - 1) * 5, 10, 60)', { base: 30, round: 4 }), 45);
+  assert.equal(evaluateFormula('max(10, 30 - 5 * 6)', {}), 10);
+  assert.equal(validateFormula('window.alert(1)', []).ok, false);
+  assert.throws(() => evaluateFormula('constructor()', {}), /Unsupported formula function/);
+  assert.throws(() => evaluateFormula('1 / 0', {}), /Division by zero/);
+});
+
+test('custom formulas can use launch parameters and repeat context', () => {
+  const parameters = [
+    { id: 'p-work', type: 'duration', label: 'Work time', variable: 'workTime', defaultMs: 40000, minMs: 1000, maxMs: 120000 },
+    { id: 'p-rounds', type: 'number', label: 'Set count', variable: 'setCount', defaultValue: 3, min: 1, max: 10, integer: true }
+  ];
+  const plan = buildCustomRoutine({
+    title: 'Formula routine', parameters,
+    parameterValues: { 'p-work': 40000, 'p-rounds': 3 },
+    nodes: [{ id: 'repeat', type: 'repeat', count: 1, countFormula: 'setCount', children: [
+      { id: 'work', type: 'timed', label: 'Work', phase: 'work', durationMs: 30000, durationFormula: 'workTime + (round - 1) * 5' }
+    ] }]
+  });
+  assert.deepEqual(plan.steps.map((item) => item.durationMs), [40000, 45000, 50000]);
+});
+
+test('progression generator expands formula-driven work and rest', () => {
+  const plan = buildCustomRoutine({
+    title: 'Progressive',
+    nodes: [{
+      id: 'prog', type: 'progression', count: 3,
+      workLabel: 'Push', workBaseMs: 30000, workFormula: 'base + (round - 1) * 5',
+      restLabel: 'Rest', restBaseMs: 20000, restFormula: 'max(10, base - (round - 1) * 5)', finalRest: false
+    }]
+  });
+  assert.deepEqual(plan.steps.map((item) => [item.phase, item.durationMs]), [
+    ['work', 30000], ['rest', 20000], ['work', 35000], ['rest', 15000], ['work', 40000]
+  ]);
+  assert.equal(plan.steps[2].generatorPath[0].type, 'progression');
+  assert.equal(plan.steps[2].round.current, 2);
+});
+
+test('seeded random generator is reproducible and source-aware', () => {
+  const nodes = [{ id: 'rng', type: 'random', mode: 'choose', count: 8, allowRepeats: true, avoidImmediateRepeat: true, children: [
+    { id: 'a', type: 'timed', label: 'A', phase: 'work', durationMs: 1000 },
+    { id: 'b', type: 'timed', label: 'B', phase: 'work', durationMs: 1000 },
+    { id: 'c', type: 'timed', label: 'C', phase: 'work', durationMs: 1000 }
+  ] }];
+  const a = buildCustomRoutine({ title: 'Random', nodes, seed: 'same-seed' });
+  const b = buildCustomRoutine({ title: 'Random', nodes, seed: 'same-seed' });
+  const c = buildCustomRoutine({ title: 'Random', nodes, seed: 'another-seed' });
+  assert.deepEqual(a.steps.map((item) => item.label), b.steps.map((item) => item.label));
+  assert.notDeepEqual(a.steps.map((item) => item.label), c.steps.map((item) => item.label));
+  assert.ok(a.steps.every((item) => item.generatorPath?.[0]?.type === 'random'));
+  for (let i = 1; i < a.steps.length; i++) assert.notEqual(a.steps[i].label, a.steps[i - 1].label);
+  assert.equal(a.meta.randomSeed, 'same-seed');
+});
+
+test('random generator without repeats never selects more than one copy of a pool item', () => {
+  const plan = buildCustomRoutine({
+    title: 'Shuffle subset', seed: 'subset',
+    nodes: [{ id: 'rng', type: 'random', mode: 'choose', count: 3, allowRepeats: false, children: [
+      { id: 'a', type: 'timed', label: 'A', phase: 'work', durationMs: 1000 },
+      { id: 'b', type: 'timed', label: 'B', phase: 'work', durationMs: 1000 },
+      { id: 'c', type: 'timed', label: 'C', phase: 'work', durationMs: 1000 }
+    ] }]
+  });
+  assert.equal(new Set(plan.steps.map((item) => item.label)).size, 3);
+});
+
+test('duration scaling and target fitting produce explicit deterministic totals', () => {
+  const nodes = [
+    { id: 'a', type: 'timed', label: 'A', phase: 'work', durationMs: 30000 },
+    { id: 'b', type: 'timed', label: 'B', phase: 'rest', durationMs: 30000 }
+  ];
+  const scaled = buildCustomRoutine({ title: 'Scale', nodes, durationScale: 2 });
+  assert.equal(estimatePlanDuration(scaled), 120000);
+  const fitted = buildCustomRoutine({ title: 'Fit', nodes, targetDurationMs: 90000 });
+  assert.equal(estimatePlanDuration(fitted), 90000);
+  assert.deepEqual(fitted.steps.map((item) => item.durationMs), [45000, 45000]);
+  assert.equal(fitted.meta.targetDurationMs, 90000);
+});
+
+test('target duration refuses uncapped manual steps', () => {
+  assert.throws(() => buildCustomRoutine({
+    title: 'Cannot fit', targetDurationMs: 60000,
+    nodes: [{ id: 'manual', type: 'manual', label: 'Done when ready', phase: 'work' }]
+  }), /uncapped manual steps/);
+});
+
+test('malicious or unknown formula variables are rejected during routine validation', () => {
+  const issues = validateCustomRoutine({
+    title: 'Bad formula',
+    nodes: [{ id: 'x', type: 'timed', label: 'X', phase: 'work', durationMs: 1000, durationFormula: 'fetch(1)' }]
+  });
+  assert.ok(issues.some((issue) => issue.code === 'INVALID_FORMULA'));
+});
+
+test('seeded PRNG returns same sequence for same seed', () => {
+  const a = createSeededRandom('abc');
+  const b = createSeededRandom('abc');
+  assert.deepEqual([a(), a(), a()], [b(), b(), b()]);
+});
+
+
+test('formula parameter references are preserved for copy/extract dependency tracking', () => {
+  const parameters = [
+    { id: 'p-work', type: 'duration', label: 'Work time', variable: 'workTime', defaultMs: 30000, minMs: 1000, maxMs: 120000 },
+    { id: 'p-rounds', type: 'number', label: 'Rounds setting', variable: 'roundCount', defaultValue: 4, min: 1, max: 20, integer: true }
+  ];
+  const refs = collectCustomParameterRefs([{ id: 'r', type: 'repeat', count: 1, countFormula: 'roundCount', children: [
+    { id: 'w', type: 'timed', label: 'Work', phase: 'work', durationMs: 30000, durationFormula: 'workTime + round' }
+  ] }], parameters);
+  assert.deepEqual(new Set(refs), new Set(['p-work', 'p-rounds']));
+});
+
+test('legacy parameter labels derive non-reserved formula variables', () => {
+  assert.equal(formulaVariableName({ label: 'Rounds' }), 'roundsValue');
+  assert.equal(formulaVariableName({ label: 'Work time' }), 'workTime');
 });

@@ -27,3 +27,20 @@ test('saving an existing reusable block increments its revision', async () => {
   assert.equal(one.revision, 1);
   assert.equal(two.revision, 2);
 });
+
+test('backup preserves advanced generator and formula routine configuration', async () => {
+  const db = new TimerDB();
+  await db.open();
+  const config = {
+    title: 'Advanced', durationScale: 1.25, targetDurationMinutes: 12, randomMode: 'fixed', fixedSeed: 'abc',
+    parameters: [{ id: 'p', type: 'duration', label: 'Work time', variable: 'workTime', defaultMs: 30000, minMs: 1000, maxMs: 120000 }],
+    nodes: [{ id: 'g', type: 'progression', count: 4, workBaseMs: 30000, workFormula: 'workTime + (round - 1) * 5', restBaseMs: 15000, restFormula: 'base' }]
+  };
+  await db.saveRoutine({ id: 'advanced-routine', type: 'custom', title: 'Advanced', config });
+  const backup = await db.exportData();
+  const restored = new TimerDB();
+  await restored.open();
+  await restored.importData(backup, { replace: true });
+  const routine = (await restored.all('routines')).find((item) => item.id === 'advanced-routine');
+  assert.deepEqual(routine.config, config);
+});

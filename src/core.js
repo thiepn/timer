@@ -19,7 +19,7 @@ export class FakeClock {
   set(wall, mono = wall) { this.wall = wall; this.mono = mono; }
 }
 
-export function step({ id, label, phase = 'work', durationMs, manual = false, timeCapMs, completionBehavior = 'advance', round, target, sourceNodeId, sectionPath, repeatPath, blockPath }) {
+export function step({ id, label, phase = 'work', durationMs, manual = false, timeCapMs, completionBehavior = 'advance', round, target, sourceNodeId, sectionPath, repeatPath, blockPath, generatorPath }) {
   return {
     id: id || uid('step'),
     label: String(label || (phase === 'rest' ? 'Rest' : 'Work')),
@@ -33,7 +33,8 @@ export function step({ id, label, phase = 'work', durationMs, manual = false, ti
     sourceNodeId,
     sectionPath: sectionPath ? structuredClone(sectionPath) : undefined,
     repeatPath: repeatPath ? structuredClone(repeatPath) : undefined,
-    blockPath: blockPath ? structuredClone(blockPath) : undefined
+    blockPath: blockPath ? structuredClone(blockPath) : undefined,
+    generatorPath: generatorPath ? structuredClone(generatorPath) : undefined
   };
 }
 
@@ -152,10 +153,220 @@ export function buildPyramid({ title = 'Pyramid', startMs = 20000, peakMs = 6000
   return { kind: 'timeline', title, steps, meta: { mode: 'pyramid' } };
 }
 
+
+const FORMULA_FUNCTIONS = new Set(['min', 'max', 'clamp', 'round', 'floor', 'ceil', 'abs']);
+const FORMULA_BUILTINS = new Set(['round', 'rounds', 'outerRound', 'outerRounds', 'index', 'level', 'cycle', 'cycles', 'base', 'previous']);
+
+export function formulaVariableName(parameter) {
+  if (!parameter) return '';
+  const explicit = String(parameter.variable || '').trim();
+  if (explicit) return explicit;
+  const words = String(parameter.label || '').trim().replace(/[^A-Za-z0-9_ ]+/g, ' ').split(/\s+/).filter(Boolean);
+  if (!words.length) return '';
+  let value = words[0].toLowerCase() + words.slice(1).map((word) => word[0].toUpperCase() + word.slice(1).toLowerCase()).join('');
+  if (!/^[A-Za-z_]/.test(value)) value = `p_${value}`;
+  if (FORMULA_BUILTINS.has(value) || FORMULA_FUNCTIONS.has(value)) value = `${value}Value`;
+  return value;
+}
+
+function tokenizeFormula(expression) {
+  expression = String(expression ?? '').trim();
+  if (!expression) throw new Error('Formula is empty.');
+  if (expression.length > 240) throw new Error('Formula is too long.');
+  const tokens = [];
+  let i = 0;
+  while (i < expression.length) {
+    const ch = expression[i];
+    if (/\s/.test(ch)) { i += 1; continue; }
+    if (/[0-9.]/.test(ch)) {
+      const start = i;
+      let dots = 0;
+      while (i < expression.length && /[0-9.]/.test(expression[i])) {
+        if (expression[i] === '.') dots += 1;
+        i += 1;
+      }
+      const raw = expression.slice(start, i);
+      if (dots > 1 || raw === '.' || !Number.isFinite(Number(raw))) throw new Error(`Invalid number “${raw}”.`);
+      tokens.push({ type: 'number', value: Number(raw) });
+      continue;
+    }
+    if (/[A-Za-z_]/.test(ch)) {
+      const start = i++;
+      while (i < expression.length && /[A-Za-z0-9_]/.test(expression[i])) i += 1;
+      tokens.push({ type: 'identifier', value: expression.slice(start, i) });
+      continue;
+    }
+    if ('+-*/%(),'.includes(ch)) { tokens.push({ type: ch, value: ch }); i += 1; continue; }
+    throw new Error(`Unsupported formula character “${ch}”.`);
+  }
+  if (tokens.length > 180) throw new Error('Formula is too complex.');
+  return tokens;
+}
+
+export function parseFormula(expression) {
+  const tokens = tokenizeFormula(expression);
+  let pos = 0;
+  let depth = 0;
+  const peek = () => tokens[pos];
+  const take = (type) => {
+    const token = tokens[pos];
+    if (!token || token.type !== type) throw new Error(`Expected “${type}”.`);
+    pos += 1;
+    return token;
+  };
+  const parsePrimary = () => {
+    if (++depth > 32) throw new Error('Formula nesting is too deep.');
+    const token = peek();
+    let node;
+    if (!token) throw new Error('Formula ended unexpectedly.');
+    if (token.type === 'number') { pos += 1; node = { type: 'number', value: token.value }; }
+    else if (token.type === 'identifier') {
+      pos += 1;
+      const name = token.value;
+      if (peek()?.type === '(') {
+        if (!FORMULA_FUNCTIONS.has(name)) throw new Error(`Unsupported formula function “${name}”.`);
+        take('(');
+        const args = [];
+        if (peek()?.type !== ')') {
+          while (true) {
+            args.push(parseExpression());
+            if (peek()?.type !== ',') break;
+            take(',');
+          }
+        }
+        take(')');
+        node = { type: 'call', name, args };
+      } else node = { type: 'variable', name };
+    } else if (token.type === '(') {
+      take('('); node = parseExpression(); take(')');
+    } else throw new Error(`Unexpected token “${token.value}”.`);
+    depth -= 1;
+    return node;
+  };
+  const parseUnary = () => {
+    const token = peek();
+    if (token?.type === '+' || token?.type === '-') { pos += 1; return { type: 'unary', op: token.type, value: parseUnary() }; }
+    return parsePrimary();
+  };
+  const parseMul = () => {
+    let left = parseUnary();
+    while (['*','/','%'].includes(peek()?.type)) {
+      const op = tokens[pos++].type;
+      left = { type: 'binary', op, left, right: parseUnary() };
+    }
+    return left;
+  };
+  const parseExpression = () => {
+    let left = parseMul();
+    while (['+','-'].includes(peek()?.type)) {
+      const op = tokens[pos++].type;
+      left = { type: 'binary', op, left, right: parseMul() };
+    }
+    return left;
+  };
+  const ast = parseExpression();
+  if (pos !== tokens.length) throw new Error(`Unexpected token “${tokens[pos].value}”.`);
+  return ast;
+}
+
+export function formulaIdentifiers(expression) {
+  const ast = parseFormula(expression);
+  const out = new Set();
+  const walk = (node) => {
+    if (node.type === 'variable') out.add(node.name);
+    if (node.type === 'binary') { walk(node.left); walk(node.right); }
+    if (node.type === 'unary') walk(node.value);
+    if (node.type === 'call') node.args.forEach(walk);
+  };
+  walk(ast);
+  return [...out];
+}
+
+export function evaluateFormulaAst(ast, variables = {}) {
+  let ops = 0;
+  const visit = (node) => {
+    if (++ops > 500) throw new Error('Formula exceeded operation limit.');
+    if (node.type === 'number') return node.value;
+    if (node.type === 'variable') {
+      if (!Object.prototype.hasOwnProperty.call(variables, node.name)) throw new Error(`Unknown formula variable “${node.name}”.`);
+      const value = Number(variables[node.name]);
+      if (!Number.isFinite(value)) throw new Error(`Formula variable “${node.name}” is not numeric.`);
+      return value;
+    }
+    if (node.type === 'unary') return node.op === '-' ? -visit(node.value) : visit(node.value);
+    if (node.type === 'binary') {
+      const a = visit(node.left), b = visit(node.right);
+      if (node.op === '+') return a + b;
+      if (node.op === '-') return a - b;
+      if (node.op === '*') return a * b;
+      if (node.op === '/') { if (b === 0) throw new Error('Division by zero.'); return a / b; }
+      if (node.op === '%') { if (b === 0) throw new Error('Modulo by zero.'); return a % b; }
+    }
+    if (node.type === 'call') {
+      const args = node.args.map(visit);
+      if (node.name === 'min') { if (!args.length) throw new Error('min() needs a value.'); return Math.min(...args); }
+      if (node.name === 'max') { if (!args.length) throw new Error('max() needs a value.'); return Math.max(...args); }
+      if (node.name === 'clamp') { if (args.length !== 3) throw new Error('clamp() needs value, min, max.'); return clamp(args[0], args[1], args[2]); }
+      if (node.name === 'round') { if (args.length !== 1) throw new Error('round() needs one value.'); return Math.round(args[0]); }
+      if (node.name === 'floor') { if (args.length !== 1) throw new Error('floor() needs one value.'); return Math.floor(args[0]); }
+      if (node.name === 'ceil') { if (args.length !== 1) throw new Error('ceil() needs one value.'); return Math.ceil(args[0]); }
+      if (node.name === 'abs') { if (args.length !== 1) throw new Error('abs() needs one value.'); return Math.abs(args[0]); }
+    }
+    throw new Error('Invalid formula node.');
+  };
+  const value = visit(ast);
+  if (!Number.isFinite(value)) throw new Error('Formula did not produce a finite number.');
+  return value;
+}
+
+export function evaluateFormula(expression, variables = {}) {
+  return evaluateFormulaAst(parseFormula(expression), variables);
+}
+
+export function validateFormula(expression, allowedVariables = []) {
+  try {
+    const ids = formulaIdentifiers(expression);
+    const allowed = new Set([...FORMULA_BUILTINS, ...allowedVariables]);
+    const unknown = ids.filter((id) => !allowed.has(id));
+    if (unknown.length) return { ok: false, error: `Unknown formula variable “${unknown[0]}”.` };
+    return { ok: true };
+  } catch (error) { return { ok: false, error: error.message || 'Invalid formula.' }; }
+}
+
+function hashSeed(input) {
+  let h = 2166136261 >>> 0;
+  for (const ch of String(input ?? 'seed')) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+
+export function createSeededRandom(seed = 'seed') {
+  let a = hashSeed(seed) || 1;
+  return () => {
+    a += 0x6D2B79F5;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function parameterFormulaVariables(parameters = [], values = {}) {
+  const out = {};
+  for (const parameter of parameters || []) {
+    if (!['duration', 'number'].includes(parameter.type)) continue;
+    const name = formulaVariableName(parameter);
+    if (!name) continue;
+    const raw = values[parameter.id];
+    out[name] = parameter.type === 'duration' ? Number(raw) / 1000 : Number(raw);
+  }
+  return out;
+}
+
 export function validateCustomParameters(parameters = [], { scope = 'Routine' } = {}) {
   const issues = [];
   const ids = new Set();
   const labels = new Set();
+  const variables = new Set();
   const add = (code, message, parameterId) => issues.push({ code, message, parameterId });
   if (!Array.isArray(parameters)) return [{ code: 'INVALID_PARAMETERS', message: `${scope} parameters are invalid.` }];
 
@@ -172,6 +383,14 @@ export function validateCustomParameters(parameters = [], { scope = 'Routine' } 
     if (!label) add('MISSING_PARAMETER_LABEL', `${scope} parameter needs a name.`, parameter.id);
     else if (labels.has(label.toLowerCase())) add('DUPLICATE_PARAMETER_LABEL', `${scope} contains duplicate parameter name “${label}”.`, parameter.id);
     else labels.add(label.toLowerCase());
+
+    if (parameter.type !== 'choice') {
+      const variable = formulaVariableName(parameter);
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable)) add('INVALID_PARAMETER_VARIABLE', `${label || 'Parameter'} has an invalid formula variable name.`, parameter.id);
+      else if (FORMULA_BUILTINS.has(variable) || FORMULA_FUNCTIONS.has(variable)) add('RESERVED_PARAMETER_VARIABLE', `${label || 'Parameter'} uses reserved formula variable “${variable}”.`, parameter.id);
+      else if (variables.has(variable)) add('DUPLICATE_PARAMETER_VARIABLE', `${scope} contains duplicate formula variable “${variable}”.`, parameter.id);
+      else variables.add(variable);
+    }
 
     if (!['duration', 'number', 'choice'].includes(parameter.type)) {
       add('INVALID_PARAMETER_TYPE', `${label || 'Parameter'} has an unsupported type.`, parameter.id);
@@ -230,15 +449,30 @@ export function resolveCustomParameterValues(parameters = [], values = {}) {
   return resolved;
 }
 
-export function collectCustomParameterRefs(nodes = []) {
+export function collectCustomParameterRefs(nodes = [], parameters = []) {
   const refs = new Set();
+  const byVariable = new Map((parameters || []).filter((parameter) => ['duration', 'number'].includes(parameter.type)).map((parameter) => [formulaVariableName(parameter), parameter.id]));
+  const collectFormula = (expression) => {
+    if (!String(expression || '').trim()) return;
+    try {
+      for (const name of formulaIdentifiers(expression)) {
+        const id = byVariable.get(name);
+        if (id) refs.add(id);
+      }
+    } catch {}
+  };
   const walk = (children) => {
     for (const node of children || []) {
       if (!node || typeof node !== 'object') continue;
       if (node.durationParamId) refs.add(node.durationParamId);
       if (node.timeCapParamId) refs.add(node.timeCapParamId);
       if (node.countParamId) refs.add(node.countParamId);
-      if (node.type === 'repeat' || node.type === 'section') walk(node.children);
+      collectFormula(node.durationFormula);
+      collectFormula(node.timeCapFormula);
+      collectFormula(node.countFormula);
+      collectFormula(node.workFormula);
+      collectFormula(node.restFormula);
+      if (node.type === 'repeat' || node.type === 'section' || node.type === 'random') walk(node.children);
     }
   };
   walk(nodes);
@@ -249,6 +483,7 @@ function validateCustomSource({ title, nodes, parameters, blocksById, scope = 'R
   const issues = validateCustomParameters(parameters, { scope });
   const seenIds = new Set();
   const parameterMap = new Map((parameters || []).map((parameter) => [parameter.id, parameter]));
+  const formulaVars = (parameters || []).filter((parameter) => ['duration', 'number'].includes(parameter.type)).map(formulaVariableName).filter(Boolean);
   const add = (code, message, path = []) => issues.push({ code, message, path });
   const requireParameter = (id, type, label, path) => {
     if (!id) return false;
@@ -257,12 +492,23 @@ function validateCustomSource({ title, nodes, parameters, blocksById, scope = 'R
     else if (parameter.type !== type) add('PARAMETER_TYPE_MISMATCH', `${label} requires a ${type} parameter.`, path);
     return Boolean(parameter && parameter.type === type);
   };
+  const checkFormula = (expression, label, path) => {
+    const result = validateFormula(expression, formulaVars);
+    if (!result.ok) add('INVALID_FORMULA', `${label}: ${result.error}`, path);
+    return result.ok;
+  };
 
   if (!String(title || '').trim()) add('MISSING_TITLE', `${scope} name is required.`);
   if (!Array.isArray(nodes) || nodes.length === 0) {
     add('EMPTY_ROUTINE', `${scope} must contain at least one step.`);
     return issues;
   }
+
+  const validateCountSource = (node, label, path) => {
+    if (String(node.countFormula || '').trim()) checkFormula(node.countFormula, `${label} formula`, path);
+    else if (node.countParamId) requireParameter(node.countParamId, 'number', label, path);
+    else if (!Number.isInteger(node.count) || node.count < 1 || node.count > 1000) add('INVALID_REPEAT', `${label} must be an integer from 1 to 1000.`, path);
+  };
 
   const walk = (children, path = [], depth = 0) => {
     if (!Array.isArray(children)) {
@@ -284,20 +530,37 @@ function validateCustomSource({ title, nodes, parameters, blocksById, scope = 'R
       else seenIds.add(node.id);
 
       if (node.type === 'timed') {
-        if (node.durationParamId) requireParameter(node.durationParamId, 'duration', `${node.label || 'Timed step'} duration`, nodePath);
+        if (String(node.durationFormula || '').trim()) checkFormula(node.durationFormula, `${node.label || 'Timed step'} duration formula`, nodePath);
+        else if (node.durationParamId) requireParameter(node.durationParamId, 'duration', `${node.label || 'Timed step'} duration`, nodePath);
         else if (!Number.isFinite(node.durationMs) || node.durationMs <= 0) add('INVALID_DURATION', `${node.label || 'Timed step'} must have a positive duration.`, nodePath);
       } else if (node.type === 'manual') {
-        if (node.timeCapParamId) requireParameter(node.timeCapParamId, 'duration', `${node.label || 'Manual step'} time cap`, nodePath);
+        if (String(node.timeCapFormula || '').trim()) checkFormula(node.timeCapFormula, `${node.label || 'Manual step'} cap formula`, nodePath);
+        else if (node.timeCapParamId) requireParameter(node.timeCapParamId, 'duration', `${node.label || 'Manual step'} time cap`, nodePath);
         else if (node.timeCapMs != null && (!Number.isFinite(node.timeCapMs) || node.timeCapMs <= 0)) add('INVALID_CAP', `${node.label || 'Manual step'} has an invalid time cap.`, nodePath);
       } else if (node.type === 'repeat') {
-        if (node.countParamId) requireParameter(node.countParamId, 'number', 'Repeat count', nodePath);
-        else if (!Number.isInteger(node.count) || node.count < 1 || node.count > 1000) add('INVALID_REPEAT', 'Repeat count must be an integer from 1 to 1000.', nodePath);
+        validateCountSource(node, 'Repeat count', nodePath);
         if (!Array.isArray(node.children) || node.children.length === 0) add('EMPTY_REPEAT', 'Repeat block must contain at least one item.', nodePath);
         else walk(node.children, nodePath, depth + 1);
       } else if (node.type === 'section') {
         if (!String(node.label || '').trim()) add('MISSING_SECTION_NAME', 'Section name is required.', nodePath);
         if (!Array.isArray(node.children) || node.children.length === 0) add('EMPTY_SECTION', `${node.label || 'Section'} must contain at least one item.`, nodePath);
         else walk(node.children, nodePath, depth + 1);
+      } else if (node.type === 'progression') {
+        validateCountSource(node, 'Progression rounds', nodePath);
+        if (!Number.isFinite(node.workBaseMs) || node.workBaseMs <= 0) add('INVALID_DURATION', 'Progression work base must be positive.', nodePath);
+        if (node.restBaseMs != null && (!Number.isFinite(node.restBaseMs) || node.restBaseMs < 0)) add('INVALID_DURATION', 'Progression rest base is invalid.', nodePath);
+        checkFormula(node.workFormula || 'base', 'Progression work formula', nodePath);
+        if (String(node.restFormula || '').trim()) checkFormula(node.restFormula, 'Progression rest formula', nodePath);
+      } else if (node.type === 'random') {
+        if (!['choose', 'shuffle'].includes(node.mode || 'choose')) add('INVALID_RANDOM_MODE', 'Random generator mode is invalid.', nodePath);
+        if (!Array.isArray(node.children) || node.children.length === 0) add('EMPTY_RANDOM_POOL', 'Random generator needs at least one pool item.', nodePath);
+        else {
+          if ((node.mode || 'choose') === 'choose') {
+            validateCountSource(node, 'Random pick count', nodePath);
+            if (!node.allowRepeats && !node.countFormula && !node.countParamId && Number(node.count) > node.children.length) add('RANDOM_POOL_TOO_SMALL', 'Random pick count exceeds the pool size while repeats are disabled.', nodePath);
+          }
+          walk(node.children, nodePath, depth + 1);
+        }
       } else if (node.type === 'block') {
         if (!node.blockId || typeof node.blockId !== 'string') add('MISSING_BLOCK', 'Linked block is missing its block ID.', nodePath);
         else if (blocksById && !blocksById.has(node.blockId)) add('UNKNOWN_BLOCK', 'Linked block no longer exists.', nodePath);
@@ -338,7 +601,7 @@ function validateBlockLibrary(blocks = []) {
   const walkRefs = (nodes, stack) => {
     for (const node of nodes || []) {
       if (node?.type === 'block' && node.blockId) visit(node.blockId, stack);
-      if (node?.type === 'repeat' || node?.type === 'section') walkRefs(node.children, stack);
+      if (['repeat','section','random'].includes(node?.type)) walkRefs(node.children, stack);
     }
   };
   const visit = (id, stack = []) => {
@@ -367,13 +630,49 @@ export function validateCustomRoutine({ title = 'Custom Routine', nodes = [], pa
   ];
 }
 
-function customRuntimeId(nodeId, repeatPath, blockPath) {
+function customRuntimeId(nodeId, repeatPath, blockPath, generatorPath = []) {
   const blockSuffix = blockPath.length ? blockPath.map((part) => `${part.refNodeId}:${part.blockId}@${part.revision}`).join('/') : 'root';
   const repeatSuffix = repeatPath.length ? repeatPath.map((r) => `${r.nodeId}:${r.current}`).join('/') : 'base';
-  return `${blockSuffix}|${nodeId}@${repeatSuffix}`;
+  const generatorSuffix = generatorPath.length ? generatorPath.map((g) => `${g.nodeId}:${g.type}:${g.current ?? g.pick ?? 0}:${g.sourceIndex ?? ''}`).join('/') : 'plain';
+  return `${blockSuffix}|${nodeId}@${repeatSuffix}|${generatorSuffix}`;
 }
 
-export function buildCustomRoutine({ title = 'Custom Routine', nodes = [], parameters = [], parameterValues = {}, blocks = [] } = {}) {
+function scaleCompiledSteps(steps, factor) {
+  factor = Number(factor);
+  if (!Number.isFinite(factor) || factor <= 0 || factor > 20) throw new Error('Duration scale must be greater than 0 and no more than 20×.');
+  if (Math.abs(factor - 1) < 1e-9) return;
+  for (const item of steps) {
+    if (Number.isFinite(item.durationMs)) item.durationMs = Math.max(1000, Math.round(item.durationMs * factor));
+    if (Number.isFinite(item.timeCapMs)) item.timeCapMs = Math.max(1000, Math.round(item.timeCapMs * factor));
+  }
+}
+
+function fitCompiledStepsToDuration(steps, targetDurationMs) {
+  targetDurationMs = Math.round(Number(targetDurationMs));
+  if (!Number.isFinite(targetDurationMs) || targetDurationMs <= 0) throw new Error('Target duration must be positive.');
+  if (steps.some((item) => item.manual && !item.timeCapMs)) throw new Error('A target duration cannot be applied while the routine contains uncapped manual steps.');
+  const getDuration = (item) => item.manual ? item.timeCapMs : item.durationMs;
+  const current = steps.reduce((sum, item) => sum + (Number(getDuration(item)) || 0), 0);
+  if (current <= 0) throw new Error('Routine has no scalable duration.');
+  if (targetDurationMs < steps.length * 1000) throw new Error(`Target duration is too short for ${steps.length} compiled steps.`);
+  scaleCompiledSteps(steps, targetDurationMs / current);
+  let actual = steps.reduce((sum, item) => sum + (Number(getDuration(item)) || 0), 0);
+  let diff = targetDurationMs - actual;
+  if (diff) {
+    for (let i = steps.length - 1; i >= 0 && diff; i--) {
+      const item = steps[i];
+      const key = item.manual ? 'timeCapMs' : 'durationMs';
+      if (!Number.isFinite(item[key])) continue;
+      const next = Math.max(1000, item[key] + diff);
+      const applied = next - item[key];
+      item[key] = next;
+      diff -= applied;
+    }
+  }
+  if (diff) throw new Error('Target duration could not be fitted without producing invalid step durations.');
+}
+
+export function buildCustomRoutine({ title = 'Custom Routine', nodes = [], parameters = [], parameterValues = {}, blocks = [], seed = 'preview', durationScale = 1, targetDurationMs } = {}) {
   const issues = validateCustomRoutine({ title, nodes, parameters, blocks });
   if (issues.length) {
     const error = new Error(issues.map((issue) => issue.message).join(' '));
@@ -387,36 +686,162 @@ export function buildCustomRoutine({ title = 'Custom Routine', nodes = [], param
   const steps = [];
   const MAX_STEPS = 50000;
   const blockRevisions = {};
+  const random = createSeededRandom(seed);
+  const formulaCache = new Map();
 
-  const resolveCount = (node, values) => {
-    const count = node.countParamId ? Number(values[node.countParamId]) : Number(node.count);
-    if (!Number.isInteger(count) || count < 1 || count > 1000) throw new Error('Resolved repeat count must be an integer from 1 to 1000.');
+  const parseCached = (expression) => {
+    const key = String(expression || '').trim();
+    if (!formulaCache.has(key)) formulaCache.set(key, parseFormula(key));
+    return formulaCache.get(key);
+  };
+  const formulaVars = (context, values, parameterDefs, base = 0, previous = 0) => {
+    const generator = context.generatorPath.at(-1);
+    const repeat = context.repeatPath.at(-1);
+    const outerRepeat = generator ? repeat : context.repeatPath.at(-2);
+    const current = generator?.current ?? repeat?.current ?? 1;
+    const total = generator?.total ?? repeat?.total ?? 1;
+    return {
+      round: current,
+      rounds: total,
+      outerRound: outerRepeat?.current ?? 1,
+      outerRounds: outerRepeat?.total ?? 1,
+      level: current,
+      cycle: current,
+      cycles: total,
+      index: steps.length + 1,
+      base: Number(base) || 0,
+      previous: Number(previous) || 0,
+      ...parameterFormulaVariables(parameterDefs, values)
+    };
+  };
+  const evalExpr = (expression, context, values, parameterDefs, base = 0, previous = 0) => evaluateFormulaAst(parseCached(expression), formulaVars(context, values, parameterDefs, base, previous));
+  const resolveCount = (node, context, values, parameterDefs) => {
+    let count;
+    if (String(node.countFormula || '').trim()) {
+      try { count = evalExpr(node.countFormula, context, values, parameterDefs, Number(node.count) || 1, Number(node.count) || 1); }
+      catch (error) { throw new Error(`${node.label || node.type || 'Count'} formula failed: ${error.message}`); }
+    } else count = node.countParamId ? Number(values[node.countParamId]) : Number(node.count);
+    count = Math.round(count);
+    if (!Number.isInteger(count) || count < 1 || count > 1000) throw new Error(`${node.label || 'Generated count'} resolved outside the allowed range 1–1000.`);
     return count;
   };
-  const resolveDuration = (node, values, key, paramKey) => {
-    const value = node[paramKey] ? Number(values[node[paramKey]]) : Number(node[key]);
-    if (!Number.isFinite(value) || value <= 0) throw new Error(`${node.label || 'Step'} resolved to an invalid duration.`);
+  const resolveDuration = (node, context, values, parameterDefs, key, paramKey, formulaKey) => {
+    let value;
+    const baseMs = Number(node[key]);
+    if (String(node[formulaKey] || '').trim()) {
+      const previousMs = steps.at(-1)?.durationMs ?? steps.at(-1)?.timeCapMs ?? baseMs;
+      try { value = evalExpr(node[formulaKey], context, values, parameterDefs, Number.isFinite(baseMs) ? baseMs / 1000 : 0, Number(previousMs || 0) / 1000) * 1000; }
+      catch (error) {
+        const pos = context.generatorPath.at(-1)?.current ?? context.repeatPath.at(-1)?.current;
+        throw new Error(`${node.label || 'Step'} formula failed${pos ? ` at round ${pos}` : ''}: ${error.message}`);
+      }
+    } else value = node[paramKey] ? Number(values[node[paramKey]]) : baseMs;
+    value = Math.round(value);
+    if (!Number.isFinite(value) || value <= 0 || value > 24 * 3600000) throw new Error(`${node.label || 'Step'} resolved to an invalid duration.`);
     return value;
   };
+  const shuffledIndices = (length) => {
+    const values = Array.from({ length }, (_, index) => index);
+    for (let i = values.length - 1; i > 0; i--) {
+      const j = Math.floor(random() * (i + 1));
+      [values[i], values[j]] = [values[j], values[i]];
+    }
+    return values;
+  };
 
-  const compileNodes = (children, context, values, blockStack = []) => {
+  const compileNodes = (children, context, values, parameterDefs, blockStack = []) => {
     for (const node of children) {
       if (steps.length >= MAX_STEPS) throw new Error('Custom routine expands to too many steps.');
       if (node.type === 'section') {
         compileNodes(node.children, {
           ...context,
           sectionPath: [...context.sectionPath, { id: node.id, label: node.label }]
-        }, values, blockStack);
+        }, values, parameterDefs, blockStack);
         continue;
       }
       if (node.type === 'repeat') {
-        const count = resolveCount(node, values);
+        const count = resolveCount(node, context, values, parameterDefs);
         for (let r = 1; r <= count; r++) {
           compileNodes(node.children, {
             ...context,
             repeatPath: [...context.repeatPath, { nodeId: node.id, current: r, total: count }]
-          }, values, blockStack);
+          }, values, parameterDefs, blockStack);
         }
+        continue;
+      }
+      if (node.type === 'progression') {
+        const count = resolveCount(node, context, values, parameterDefs);
+        let previousWork = Number(node.workBaseMs || 30000) / 1000;
+        let previousRest = Number(node.restBaseMs || 0) / 1000;
+        for (let r = 1; r <= count; r++) {
+          const generatorPath = [...context.generatorPath, { nodeId: node.id, type: 'progression', current: r, total: count }];
+          const generatedContext = { ...context, generatorPath };
+          let workSeconds;
+          try { workSeconds = evalExpr(node.workFormula || 'base', generatedContext, values, parameterDefs, Number(node.workBaseMs || 30000) / 1000, previousWork); }
+          catch (error) { throw new Error(`Progression work formula failed at round ${r}: ${error.message}`); }
+          if (!Number.isFinite(workSeconds) || workSeconds <= 0 || workSeconds > 86400) throw new Error(`Progression work formula produced an invalid duration at round ${r}.`);
+          previousWork = workSeconds;
+          const common = {
+            sourceNodeId: node.id,
+            sectionPath: context.sectionPath,
+            repeatPath: context.repeatPath,
+            blockPath: context.blockPath,
+            generatorPath,
+            round: { current: r, total: count }
+          };
+          steps.push(step({
+            ...common,
+            id: customRuntimeId(`${node.id}:work`, context.repeatPath, context.blockPath, generatorPath),
+            label: node.workLabel || 'Work',
+            phase: PHASES.includes(node.workPhase) ? node.workPhase : 'work',
+            durationMs: Math.round(workSeconds * 1000),
+            target: node.target || undefined
+          }));
+          const hasRest = String(node.restFormula || '').trim() || Number(node.restBaseMs) > 0;
+          if (hasRest && (r < count || node.finalRest)) {
+            let restSeconds;
+            if (String(node.restFormula || '').trim()) {
+              try { restSeconds = evalExpr(node.restFormula, generatedContext, values, parameterDefs, Number(node.restBaseMs || 0) / 1000, previousRest); }
+              catch (error) { throw new Error(`Progression rest formula failed at round ${r}: ${error.message}`); }
+            } else restSeconds = Number(node.restBaseMs || 0) / 1000;
+            if (!Number.isFinite(restSeconds) || restSeconds < 0 || restSeconds > 86400) throw new Error(`Progression rest formula produced an invalid duration at round ${r}.`);
+            previousRest = restSeconds;
+            if (restSeconds > 0) steps.push(step({
+              ...common,
+              id: customRuntimeId(`${node.id}:rest`, context.repeatPath, context.blockPath, generatorPath),
+              label: node.restLabel || 'Rest',
+              phase: PHASES.includes(node.restPhase) ? node.restPhase : 'rest',
+              durationMs: Math.round(restSeconds * 1000)
+            }));
+          }
+        }
+        continue;
+      }
+      if (node.type === 'random') {
+        const pool = node.children || [];
+        let selected = [];
+        if ((node.mode || 'choose') === 'shuffle') selected = shuffledIndices(pool.length);
+        else {
+          const count = resolveCount(node, context, values, parameterDefs);
+          if (!node.allowRepeats) {
+            if (count > pool.length) throw new Error('Random pick count exceeds the pool size while repeats are disabled.');
+            selected = shuffledIndices(pool.length).slice(0, count);
+          } else {
+            let previous = -1;
+            for (let i = 0; i < count; i++) {
+              let pick = Math.floor(random() * pool.length);
+              if (node.avoidImmediateRepeat && pool.length > 1 && pick === previous) pick = (pick + 1 + Math.floor(random() * (pool.length - 1))) % pool.length;
+              selected.push(pick);
+              previous = pick;
+            }
+          }
+        }
+        selected.forEach((sourceIndex, pick) => {
+          compileNodes([pool[sourceIndex]], {
+            ...context,
+            generatorPath: [...context.generatorPath, { nodeId: node.id, type: 'random', current: pick + 1, total: selected.length, pick: pick + 1, sourceIndex }]
+          }, values, parameterDefs, blockStack);
+        });
         continue;
       }
       if (node.type === 'block') {
@@ -428,13 +853,13 @@ export function buildCustomRoutine({ title = 'Custom Routine', nodes = [], param
         compileNodes(block.nodes || [], {
           ...context,
           blockPath: [...context.blockPath, { refNodeId: node.id, blockId: block.id, title: block.title || 'Block', revision: block.revision || 1 }]
-        }, blockValues, [...blockStack, block.id]);
+        }, blockValues, block.parameters || [], [...blockStack, block.id]);
         continue;
       }
 
-      const innerRound = context.repeatPath.at(-1);
+      const innerRound = context.generatorPath.at(-1) || context.repeatPath.at(-1);
       const common = {
-        id: customRuntimeId(node.id, context.repeatPath, context.blockPath),
+        id: customRuntimeId(node.id, context.repeatPath, context.blockPath, context.generatorPath),
         sourceNodeId: node.id,
         label: node.label,
         phase: PHASES.includes(node.phase) ? node.phase : 'custom',
@@ -442,23 +867,34 @@ export function buildCustomRoutine({ title = 'Custom Routine', nodes = [], param
         sectionPath: context.sectionPath,
         repeatPath: context.repeatPath,
         blockPath: context.blockPath,
+        generatorPath: context.generatorPath,
         round: innerRound ? { current: innerRound.current, total: innerRound.total } : undefined
       };
       if (node.type === 'manual') {
-        const timeCapMs = node.timeCapParamId ? resolveDuration(node, values, 'timeCapMs', 'timeCapParamId') : node.timeCapMs;
+        let timeCapMs;
+        if (String(node.timeCapFormula || '').trim() || node.timeCapParamId || node.timeCapMs != null) timeCapMs = resolveDuration(node, context, values, parameterDefs, 'timeCapMs', 'timeCapParamId', 'timeCapFormula');
         steps.push(step({ ...common, manual: true, timeCapMs }));
       } else {
-        steps.push(step({ ...common, durationMs: resolveDuration(node, values, 'durationMs', 'durationParamId') }));
+        steps.push(step({ ...common, durationMs: resolveDuration(node, context, values, parameterDefs, 'durationMs', 'durationParamId', 'durationFormula') }));
       }
     }
   };
 
-  compileNodes(nodes, { sectionPath: [], repeatPath: [], blockPath: [] }, rootValues, []);
+  compileNodes(nodes, { sectionPath: [], repeatPath: [], blockPath: [], generatorPath: [] }, rootValues, parameters, []);
+  scaleCompiledSteps(steps, durationScale);
+  if (targetDurationMs != null && Number(targetDurationMs) > 0) fitCompiledStepsToDuration(steps, targetDurationMs);
   return {
     kind: 'timeline',
     title: String(title || 'Custom Routine'),
     steps,
-    meta: { mode: 'custom', parameterValues: structuredClone(rootValues), blockRevisions }
+    meta: {
+      mode: 'custom',
+      parameterValues: structuredClone(rootValues),
+      blockRevisions,
+      randomSeed: String(seed),
+      durationScale: Number(durationScale) || 1,
+      targetDurationMs: targetDurationMs ? Number(targetDurationMs) : undefined
+    }
   };
 }
 
