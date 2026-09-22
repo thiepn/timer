@@ -957,6 +957,7 @@ export class TimerEngine {
 
   logicalNow() { return this.anchorWall + (this.clock.monoNow() - this.anchorMono); }
   rebaseToWall() { this.anchorWall = this.clock.wallNow(); this.anchorMono = this.clock.monoNow(); }
+  rebaseToLogical(logicalNow = this.logicalNow()) { this.anchorWall = Number(logicalNow); this.anchorMono = this.clock.monoNow(); }
 
   start(plan, meta = {}) {
     const errors = validatePlan(plan);
@@ -974,6 +975,8 @@ export class TimerEngine {
       startedAt: now,
       endedAt: undefined,
       pausedTotalMs: 0,
+      pausedMonoAt: undefined,
+      finalElapsedMs: undefined,
       sequence: 0,
       completionReason: undefined,
       currentStartedAt: now,
@@ -1031,6 +1034,7 @@ export class TimerEngine {
         engine.session.segmentStartedAt = engine.session.currentStartedAt || engine.session.startedAt || clock.wallNow();
       }
     }
+    if (engine.session) engine.session.pausedMonoAt = undefined;
     engine.rebaseToWall();
     if (engine.session?.status === 'running') engine.reconcile();
     return engine;
@@ -1081,10 +1085,13 @@ export class TimerEngine {
     this.recordSegment(now);
     this.session.status = 'paused';
     this.session.pausedAt = this.clock.wallNow();
+    this.session.pausedMonoAt = this.clock.monoNow();
     this.session.pauseState = {
       currentRemainingMs: this.session.currentEndsAt != null ? Math.max(0, this.session.currentEndsAt - now) : undefined,
       manualElapsedMs: this.session.plan.kind === 'timeline' ? Math.max(0, now - this.session.currentStartedAt) : undefined,
-      sessionRemainingMs: this.session.sessionEndsAt != null ? Math.max(0, this.session.sessionEndsAt - now) : undefined
+      sessionRemainingMs: this.session.sessionEndsAt != null ? Math.max(0, this.session.sessionEndsAt - now) : undefined,
+      logicalAtPause: now,
+      activeElapsedMs: Math.max(0, now - this.session.startedAt - this.session.pausedTotalMs)
     };
     this.emit('session-paused');
     return true;
@@ -1093,15 +1100,22 @@ export class TimerEngine {
   resume() {
     if (!this.session || this.session.status !== 'paused') return false;
     const nowWall = this.clock.wallNow();
-    const pausedFor = Math.max(0, nowWall - (this.session.pausedAt || nowWall));
+    const nowMono = this.clock.monoNow();
+    const pausedFor = Number.isFinite(this.session.pausedMonoAt)
+      ? Math.max(0, nowMono - this.session.pausedMonoAt)
+      : Math.max(0, nowWall - (this.session.pausedAt || nowWall));
+    const logicalAtPause = Number.isFinite(this.session.pauseState?.logicalAtPause)
+      ? this.session.pauseState.logicalAtPause
+      : (this.session.pausedAt || nowWall);
     this.session.pausedTotalMs += pausedFor;
-    this.rebaseToWall();
-    const now = this.logicalNow();
+    const now = logicalAtPause + pausedFor;
+    this.rebaseToLogical(now);
     if (this.session.pauseState?.currentRemainingMs != null) this.session.currentEndsAt = now + this.session.pauseState.currentRemainingMs;
     if (this.session.plan.kind === 'timeline' && this.session.pauseState?.manualElapsedMs != null) this.session.currentStartedAt = now - this.session.pauseState.manualElapsedMs;
     if (this.session.pauseState?.sessionRemainingMs != null) this.session.sessionEndsAt = now + this.session.pauseState.sessionRemainingMs;
     this.session.status = 'running';
     this.session.pausedAt = undefined;
+    this.session.pausedMonoAt = undefined;
     this.session.pauseState = undefined;
     this.session.segmentStartedAt = now;
     this.session.segmentPhase = this.session.currentManualResting ? 'rest' : (this.currentStep()?.phase || 'work');
@@ -1199,14 +1213,20 @@ export class TimerEngine {
   finish(reason = 'finished') {
     if (!this.session || ['completed', 'cancelled'].includes(this.session.status)) return false;
     const nowWall = this.clock.wallNow();
+    const finalElapsedMs = this.elapsedMs();
     if (this.session.status === 'running') {
       this.recordSegment(this.logicalNow());
     } else if (this.session.status === 'paused') {
-      const pausedFor = Math.max(0, nowWall - (this.session.pausedAt || nowWall));
+      const nowMono = this.clock.monoNow();
+      const pausedFor = Number.isFinite(this.session.pausedMonoAt)
+        ? Math.max(0, nowMono - this.session.pausedMonoAt)
+        : Math.max(0, nowWall - (this.session.pausedAt || nowWall));
       this.session.pausedTotalMs += pausedFor;
       this.session.pausedAt = undefined;
+      this.session.pausedMonoAt = undefined;
       this.session.pauseState = undefined;
     }
+    this.session.finalElapsedMs = finalElapsedMs;
     this.session.status = reason === 'cancelled' ? 'cancelled' : 'completed';
     this.session.completionReason = reason;
     this.session.endedAt = nowWall;
@@ -1216,7 +1236,11 @@ export class TimerEngine {
 
   complete(reason = 'finished', at) {
     if (!this.session || ['completed', 'cancelled'].includes(this.session.status)) return this.view();
+    const finalElapsedMs = Number.isFinite(at)
+      ? Math.max(0, at - this.session.startedAt - this.session.pausedTotalMs)
+      : this.elapsedMs();
     if (this.session.status === 'running') this.recordSegment(at ?? this.logicalNow());
+    this.session.finalElapsedMs = finalElapsedMs;
     this.session.status = 'completed';
     this.session.completionReason = reason;
     this.session.endedAt = at ?? this.clock.wallNow();
@@ -1228,7 +1252,13 @@ export class TimerEngine {
 
   elapsedMs() {
     if (!this.session) return 0;
-    const end = this.session.endedAt ?? (this.session.status === 'paused' ? this.session.pausedAt : this.logicalNow());
+    if (Number.isFinite(this.session.finalElapsedMs)) return Math.max(0, this.session.finalElapsedMs);
+    if (this.session.status === 'paused' && Number.isFinite(this.session.pauseState?.activeElapsedMs)) {
+      return Math.max(0, this.session.pauseState.activeElapsedMs);
+    }
+    const end = this.session.status === 'paused'
+      ? (this.session.pauseState?.logicalAtPause ?? this.session.pausedAt ?? this.logicalNow())
+      : this.logicalNow();
     return Math.max(0, end - this.session.startedAt - this.session.pausedTotalMs);
   }
 
