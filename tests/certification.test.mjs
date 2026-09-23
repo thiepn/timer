@@ -100,14 +100,15 @@ test('paused session survives process loss without consuming active workout time
 });
 
 test('all historical backup payload versions remain accepted', async () => {
-  for (const version of [1, 2, 3, 4]) {
+  for (const version of [1, 2, 3, 4, 5]) {
     const db = new TimerDB();
     await db.open();
     const backup = {
       format: 'thiepn-timer-backup', version,
       routines: [], sessions: [], settings: {},
       ...(version >= 2 ? { blocks: [] } : {}),
-      ...(version >= 3 ? { cueProfiles: [], customSounds: [] } : {})
+      ...(version >= 3 ? { cueProfiles: [], customSounds: [] } : {}),
+      ...(version >= 5 ? { queues: [] } : {})
     };
     await db.importData(backup, { replace: true });
     assert.deepEqual(await db.all('routines'), []);
@@ -167,22 +168,26 @@ test('service-worker shell includes every local application module import', () =
 
 test('v2.1 persistence source declares multi-runtime schema and singleton migration', () => {
   const dbSource = fs.readFileSync(path.join(repoRoot, 'src/db.js'), 'utf8');
-  assert.match(dbSource, /const DB_VERSION = 6/);
+  assert.match(dbSource, /const DB_VERSION = 7/);
   assert.match(dbSource, /createObjectStore\('activeSessions'/);
   assert.match(dbSource, /legacyActive\.get\('current'\)/);
   assert.match(dbSource, /legacyActive\.delete\('current'\)/);
 });
 
-test('v2.4 release metadata includes workspace and completion orchestration', () => {
+test('v2.5 release metadata includes queues and automation', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
   const sw = fs.readFileSync(path.join(repoRoot, 'sw.js'), 'utf8');
-  assert.equal(pkg.version, '2.4.0');
-  assert.match(sw, /thiepn-timer-v16/);
+  assert.equal(pkg.version, '2.5.0');
+  assert.match(sw, /thiepn-timer-v17/);
   assert.match(sw, /\.\/src\/coordinator\.js/);
   assert.match(sw, /\.\/src\/quick\.js/);
   assert.match(sw, /\.\/src\/saved\.js/);
+  assert.match(sw, /\.\/src\/queue\.js/);
   const app = fs.readFileSync(path.join(repoRoot, 'src/app.js'), 'utf8');
   assert.match(app, /Multi-Timer Workspace/);
   assert.match(app, /workspace-stop-all/);
   assert.match(app, /completionNextRoutineId/);
+  assert.match(app, /Active Queue/);
+  assert.match(app, /queue-from-selection/);
+  assert.match(app, /queue-skip/);
 });
