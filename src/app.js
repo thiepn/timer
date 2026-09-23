@@ -261,11 +261,13 @@ function quickInputResult(value = state.quickInput) {
 function quickDialModel(milliseconds) {
   const msValue = Math.max(1000, Number(milliseconds) || 1000);
   const dial = quickDurationDial(msValue);
+  const time = formatClock(msValue);
   return {
-    time: formatClock(msValue),
+    time,
     caption: durationLabel(msValue),
     sweep: dial.sweepDegrees,
-    scale: dial.hours > 0 ? `${dial.hours}h · minute dial` : '60-minute dial'
+    scale: dial.hours > 0 ? `${dial.hours}h · minute dial` : '60-minute dial',
+    numeralSize: time.length >= 8 ? 'long' : time.length >= 7 ? 'medium' : 'short'
   };
 }
 
@@ -280,6 +282,7 @@ function updateQuickHeroVisual(result) {
   if (!result.ok) return;
   const model = quickDialModel(result.ms);
   instrument.style.setProperty('--quick-sweep', `${model.sweep}deg`);
+  instrument.dataset.quickNumeralSize = model.numeralSize;
   if (time) time.textContent = model.time;
   if (caption) caption.textContent = model.caption;
   if (scale) scale.textContent = model.scale;
@@ -848,7 +851,7 @@ function renderTimerHome() {
         <div class="active-timer-grid home-active-grid">${coordinator.list().map(activeTimerCard).join('')}</div>
       </section>` : ''}
 
-      <section class="quick-instrument ${parsed.ok ? '' : 'invalid'}" data-quick-instrument style="--quick-sweep:${dial.sweep}deg">
+      <section class="quick-instrument ${parsed.ok ? '' : 'invalid'}" data-quick-instrument data-quick-numeral-size="${dial.numeralSize}" style="--quick-sweep:${dial.sweep}deg">
         <div class="quick-instrument-ambient" aria-hidden="true"></div>
         <div class="quick-instrument-head">
           <div><span class="quick-label">Quick Timer</span><p>Type any duration or choose a preset.</p></div>
