@@ -703,31 +703,74 @@ function applyTheme() {
   scheduleLocalization(document.body);
 }
 
-function setRoute(route) {
-  state.route = route;
-  state.builder = null;
-  state.builderEditingId = null;
-  state.builderEditingBlockId = null;
-  if (route === 'history') {
-    state.historyVisible = 100;
-    ensureFullHistory();
+function runViewTransition(update, name = 'route') {
+  const reduce = reduceMotionEnabled(state.settings.reduceMotion);
+  if (!document.startViewTransition || reduce) {
+    update();
+    return Promise.resolve();
   }
-  render();
-  focusMainHeading(main);
+  document.documentElement.dataset.viewTransition = name;
+  const transition = document.startViewTransition(() => update());
+  return transition.finished.catch(() => {}).finally(() => {
+    if (document.documentElement.dataset.viewTransition === name) delete document.documentElement.dataset.viewTransition;
+  });
+}
+
+function setRoute(route) {
+  return runViewTransition(() => {
+    state.route = route;
+    state.builder = null;
+    state.builderEditingId = null;
+    state.builderEditingBlockId = null;
+    if (route === 'history') {
+      state.historyVisible = 100;
+      ensureFullHistory();
+    }
+    render();
+    focusMainHeading(main);
+  }, 'route');
 }
 
 function setNavActive() {
-  $$('.nav-item').forEach((b) => {
-    const active = b.dataset.route === state.route;
+  const navRoute = state.route === 'workspace' ? 'timer' : state.route;
+  $('.nav-item').forEach((b) => {
+    const active = b.dataset.route === navRoute;
     b.classList.toggle('active', active);
     if (active) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   });
+  const shellState = state.builder ? 'builder' : state.route;
+  appShell.dataset.shellRoute = shellState;
+  const context = state.builder
+    ? { kicker: 'Create', title: BUILDER_META[state.builder.type]?.name || 'Timer Builder' }
+    : ({
+        timer: { kicker: 'Timer', title: 'Quick Timer' },
+        workspace: { kicker: 'Timer', title: 'Workspace' },
+        library: { kicker: 'Library', title: 'Saved Timers' },
+        history: { kicker: 'Insights', title: 'History' },
+        settings: { kicker: 'System', title: 'Settings' }
+      })[state.route] || { kicker: 'Timer', title: 'Timer' };
+  const kicker = $('#shell-context-kicker');
+  const title = $('#shell-context-title');
+  if (kicker) kicker.textContent = context.kicker;
+  if (title) title.textContent = context.title;
 }
+
+let shellScrollRaf = 0;
+function updateShellScrollState() {
+  shellScrollRaf = 0;
+  header.classList.toggle('scrolled', window.scrollY > 10);
+}
+window.addEventListener('scroll', () => {
+  if (shellScrollRaf) return;
+  shellScrollRaf = requestAnimationFrame(updateShellScrollState);
+}, { passive: true });
+updateShellScrollState();
 
 function setLiveMode(on) {
   document.body.classList.toggle('live-mode', on);
   header.classList.toggle('hidden', on);
   bottomNav.classList.toggle('hidden', on);
+  $('#shell-rail')?.classList.toggle('hidden', on);
 }
 
 function render() {
@@ -1392,7 +1435,7 @@ function showCreateSheet() {
 
 function showSheet(title, content) {
   const root = $('#sheet-root');
-  root.innerHTML = `<div class="sheet-backdrop" data-action="close-sheet"><section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" data-sheet tabindex="-1"><div class="sheet-handle" aria-hidden="true"></div><div class="row-between"><h2 id="sheet-title" class="sheet-title">${esc(title)}</h2><button class="icon-btn" data-action="close-sheet" aria-label="Close">×</button></div>${content}</section></div>`;
+  root.innerHTML = `<div class="sheet-backdrop" data-action="close-sheet"><section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" data-sheet tabindex="-1"><div class="sheet-handle" aria-hidden="true"></div><div class="row-between sheet-heading"><h2 id="sheet-title" class="sheet-title">${esc(title)}</h2><button class="icon-btn sheet-close" data-action="close-sheet" aria-label="Close"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="./icons.svg#i-close"></use></svg></button></div>${content}</section></div>`;
   const sheet = $('[data-sheet]', root);
   sheet?.addEventListener('click', (e) => e.stopPropagation());
   scheduleLocalization(root);
