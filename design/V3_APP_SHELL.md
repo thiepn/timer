@@ -61,3 +61,7 @@ Those remain V4–V8 work.
 ## Next
 
 V4 — Home 3.0: Signature Timer Surface.
+
+## Performance budget
+
+V3 adds a persistent responsive shell plus offline SVG sprite. The release budget therefore advances from V2's 134/135 KiB thresholds to **138 KiB soft / 140 KiB hard**. The measured pre-budget V3 shell was 137.2 KiB gzip. Further visual phases must account for additional shell growth explicitly rather than silently bypassing these gates.
