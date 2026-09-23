@@ -92,6 +92,7 @@ export const defaultSettings = {
   quickRecentDurations: [],
   quickAdjustments: [...DEFAULT_QUICK_ADJUSTMENTS],
   savedTimerCollections: [...DEFAULT_SAVED_TIMER_COLLECTIONS],
+  workspaceLayout: 'grid',
   startPresetImmediately: false, // retained for backup compatibility; v2.2 pinned durations are always one-tap starts
   wallAutoHide: true
 };
@@ -400,7 +401,15 @@ export class TimerDB {
     const rows = await this.all('activeSessions');
     return rows
       .filter((row) => row?.snapshot && (row.overtime || !['completed', 'cancelled'].includes(row.snapshot.status)))
-      .sort((a, b) => (a.createdAt || a.snapshot.startedAt || 0) - (b.createdAt || b.snapshot.startedAt || 0));
+      .sort((a, b) => {
+        const ao = Number(a.order);
+        const bo = Number(b.order);
+        const aHas = Number.isFinite(ao);
+        const bHas = Number.isFinite(bo);
+        if (aHas && bHas && ao !== bo) return ao - bo;
+        if (aHas !== bHas) return aHas ? -1 : 1;
+        return (a.createdAt || a.snapshot.startedAt || 0) - (b.createdAt || b.snapshot.startedAt || 0);
+      });
   }
 
   async clearActiveSession(runtimeId, expectedSessionId = null) {
