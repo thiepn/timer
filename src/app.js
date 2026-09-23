@@ -1701,6 +1701,48 @@ async function startRoutine(id) {
   await startSession(plan, { ...metaForType(routine.type, routine.config, routine.cueOverrides), title: routine.title, routineId: routine.id, completionNextRoutineId: routine.completionNextRoutineId || '' }, { completionAction: routine.completionAction });
 }
 
+
+async function startSavedRoutineAutomated(id, { background = true, backgroundRoute = 'workspace', workspaceGroup = '', workspaceColor = 'default' } = {}) {
+  const routine = state.routines.find((item) => item.id === id);
+  if (!routine || routine.archived) return null;
+  let parameterValues = {};
+  if (routine.type === 'custom' && (routine.config?.parameters || []).length) {
+    try {
+      parameterValues = resolveCustomParameterValues(
+        routine.config.parameters,
+        { ...defaultParameterValues(routine.config.parameters), ...(routine.lastParameterValues || {}) }
+      );
+    } catch { return null; }
+  }
+  let plan;
+  try {
+    plan = planFromType(routine.type, routine.config, {
+      parameterValues,
+      blocks: state.blocks,
+      seed: routine.type === 'custom' && routine.config?.randomMode !== 'fixed' ? uid('seed') : undefined
+    });
+  } catch { return null; }
+  routine.useCount = (routine.useCount || 0) + 1;
+  routine.lastUsedAt = Date.now();
+  if (Object.keys(parameterValues).length) routine.lastParameterValues = structuredClone(parameterValues);
+  await state.db.saveRoutine(routine);
+  await loadCollections();
+  const meta = {
+    ...metaForType(routine.type, routine.config, routine.cueOverrides),
+    title: routine.title,
+    routineId: routine.id,
+    parameterValues,
+    completionNextRoutineId: routine.completionNextRoutineId || '',
+    workspaceGroup,
+    workspaceColor
+  };
+  return startSession(plan, meta, {
+    background,
+    backgroundRoute,
+    completionAction: routine.completionAction || COMPLETION_ACTIONS.STOP
+  });
+}
+
 async function startSession(plan, meta, options = {}) {
   if (!ownership.isOwner() && !await ownership.acquire()) {
     const records = await state.db.getActiveSessions().catch(() => []);
