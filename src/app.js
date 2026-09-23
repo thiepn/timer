@@ -14,6 +14,7 @@ import { FocusTrap, Announcer, focusMainHeading, isInteractiveTarget, timerEvent
 import { PerformanceMetrics, MaintenanceCoordinator, liveSchedulerPolicy, reduceMotionEnabled } from './performance.js';
 import { TimerCoordinator, COMPLETION_ACTIONS } from './coordinator.js';
 import { parseDurationInput, durationInputText, normalizeDurationList, pushRecentDuration, DEFAULT_QUICK_PRESETS, DEFAULT_QUICK_ADJUSTMENTS } from './quick.js';
+import { DEFAULT_SAVED_TIMER_COLLECTIONS, SAVED_TIMER_ACCENTS, normalizeSavedTimerRecord, normalizeSavedTimerTags, normalizeSavedTimerCollections, needsSavedTimerMigration, savedTimerSearchText, savedTimerMatchesView, sortSavedTimers, duplicateSavedTimerRecord } from './saved.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -24,9 +25,10 @@ const ms = (seconds) => Math.max(0, Math.round(Number(seconds || 0) * 1000));
 const sec = (milliseconds) => Math.round(Number(milliseconds || 0) / 1000);
 const mins = (minutes) => ms(Number(minutes || 0) * 60);
 const pct = (n) => `${Math.round(clamp(n || 0, 0, 1) * 100)}%`;
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.3.0';
 
 const BUILDER_META = {
+  countdown: { name: 'Countdown', desc: 'Reusable fixed-duration countdown' },
   interval: { name: 'Interval', desc: 'Work / rest repetitions' },
   tabata: { name: 'Tabata', desc: 'Classic 20 / 10 intervals' },
   circuit: { name: 'Circuit', desc: 'Timed and manual exercise sequence' },
@@ -37,12 +39,13 @@ const BUILDER_META = {
   'run-walk': { name: 'Run / Walk', desc: 'Alternating running and recovery' },
   ladder: { name: 'Ladder', desc: 'Progressively changing work intervals' },
   pyramid: { name: 'Pyramid', desc: 'Ramp up and back down' },
-  custom: { name: 'Custom Routine', desc: 'Nested sections, repeats, timed and manual steps' },
+  custom: { name: 'Sequence Timer', desc: 'Nested sections, repeats, timed and manual steps' },
   stopwatch: { name: 'Stopwatch', desc: 'Open-ended timer with laps' }
 };
 
 function defaultConfig(type) {
   switch (type) {
+    case 'countdown': return { title: 'Countdown', duration: 300 };
     case 'tabata': return { title: 'Tabata', work: 20, rest: 10, rounds: 8, prepare: 10, finalRest: false };
     case 'circuit': return { title: 'Circuit', rounds: 3, prepare: 10, between: 0, items: [
       { label: 'Push-ups', seconds: 40, phase: 'work', manual: false },
@@ -75,6 +78,7 @@ function parseMovements(text = '') {
 
 function planFromType(type, c, options = {}) {
   switch (type) {
+    case 'countdown': return buildCountdown({ durationMs: ms(c.duration), label: c.title || 'Countdown' });
     case 'tabata':
     case 'interval': return buildInterval({ workMs: ms(c.work), restMs: ms(c.rest), rounds: c.rounds, prepareMs: ms(c.prepare), finalRest: !!c.finalRest, workLabel: 'Work', restLabel: 'Rest' });
     case 'circuit': return buildCircuit({
@@ -106,6 +110,7 @@ function metaForType(type, config, cueOverrides = {}) {
 
 function typeSummary(type, c) {
   switch (type) {
+    case 'countdown': return durationLabel(ms(c.duration));
     case 'interval':
     case 'tabata': return `${c.work}s / ${c.rest}s · ${c.rounds} rounds`;
     case 'circuit': return `${c.rounds} rounds · ${(c.items || []).length} steps`;
@@ -172,6 +177,11 @@ const state = {
   storageEstimate: null,
   libraryQuery: '',
   librarySearchActive: false,
+  libraryView: 'all',
+  librarySort: 'recent',
+  savedSelectMode: false,
+  savedSelected: new Set(),
+  pendingSavedMoveIds: [],
   customClipboard: null,
   pendingStart: null,
   historyView: 'list',
@@ -277,6 +287,25 @@ async function startQuickDuration(milliseconds, { background = false } = {}) {
   void rememberQuickDuration(duration);
   const title = `${durationLabel(duration)} Timer`;
   return startSession(buildCountdown({ durationMs: duration, label: title }), { mode: 'countdown', title, config: { durationMs: duration }, source: 'quick' }, { background });
+}
+
+
+async function saveQuickTimerPreset() {
+  const input = $('[data-quick-input]');
+  const result = parseDurationInput(input?.value || state.quickInput);
+  if (!result.ok) return toast(result.error, 4200);
+  const title = `${durationLabel(result.ms)} Countdown`;
+  const timer = normalizeSavedTimerRecord({
+    id: uid('routine'),
+    type: 'countdown',
+    title,
+    config: { title, duration: Math.max(1, Math.round(result.ms / 1000)) },
+    durationMs: result.ms,
+    createdAt: Date.now()
+  });
+  await state.db.saveRoutine(timer);
+  await loadCollections();
+  toast('Countdown saved to Saved Timers.');
 }
 
 const cue = new CueManager(() => ({ ...state.settings, voice: state.settings.screenReaderOptimized ? false : state.settings.voice }), () => state.cueProfiles, async (id) => state.db.get('customSounds', id));
@@ -710,7 +739,7 @@ function renderTimerHome() {
     ${coordinator.size() ? `<section class="section active-timers-section home-active-section"><div class="row-between"><div><h2 class="section-title" style="margin:0">Active Timers</h2><div class="small muted" style="margin-top:4px">All timers keep running independently.</div></div><span class="pill">${coordinator.size()}</span></div><div class="active-timer-grid">${coordinator.list().map(activeTimerCard).join('')}</div></section>` : ''}
 
     <section class="card quick-card quick-card-v2">
-      <div class="row-between quick-card-head"><div><div class="quick-label">Quick Timer</div><div class="small muted">Try 90s, 1:30, 3m, or 1h 20m.</div></div><button class="btn ghost compact-btn" data-action="customize-quick">Customize</button></div>
+      <div class="row-between quick-card-head"><div><div class="quick-label">Quick Timer</div><div class="small muted">Try 90s, 1:30, 3m, or 1h 20m.</div></div><div class="row quick-head-actions"><button class="btn ghost compact-btn" data-action="save-quick-timer">Save</button><button class="btn ghost compact-btn" data-action="customize-quick">Customize</button></div></div>
       <form class="quick-entry" data-quick-form novalidate>
         <label class="sr-only" for="quick-duration-input">Quick Timer duration</label>
         <input id="quick-duration-input" class="quick-duration-input" data-quick-input inputmode="text" autocomplete="off" spellcheck="false" value="${esc(state.quickInput)}" placeholder="3m" aria-describedby="quick-duration-preview" aria-invalid="${parsed.ok ? 'false' : 'true'}">
@@ -899,7 +928,9 @@ function renderBuilder() {
   const m = BUILDER_META[type];
   const editingBlock = state.builderEditingBlockId ? state.blocks.find((block) => block.id === state.builderEditingBlockId) : null;
   let body = '';
-  if (type === 'interval' || type === 'tabata') {
+  if (type === 'countdown') {
+    body = `${field('Duration', 'duration', c.duration, { min: 1, max: 604800, suffix: 'sec' })}<div class="small muted">Save reusable countdown presets for cooking, study, music, church, workouts, or anything else.</div>`;
+  } else if (type === 'interval' || type === 'tabata') {
     body = `${field('Work', 'work', c.work, { min: 1, max: 3600, suffix: 'sec' })}${field('Rest', 'rest', c.rest, { min: 1, max: 3600, suffix: 'sec' })}${field('Rounds', 'rounds', c.rounds, { min: 1, max: 10000 })}${field('Preparation', 'prepare', c.prepare, { min: 0, max: 3600, suffix: 'sec' })}${toggleField('Final rest', 'finalRest', !!c.finalRest, 'Include rest after the last work interval')}`;
   } else if (type === 'circuit') {
     body = `${field('Rounds', 'rounds', c.rounds, { min: 1, max: 1000 })}${field('Preparation', 'prepare', c.prepare, { min: 0, max: 3600, suffix: 'sec' })}${field('Between rounds', 'between', c.between, { min: 0, max: 3600, suffix: 'sec' })}
@@ -1431,7 +1462,13 @@ function showCustomPreview() {
 async function saveBuilder() {
   const { type, config } = state.builder;
   const validationBlocks = blocksForCurrentBuilder();
-  try { planFromType(type, config, { blocks: validationBlocks }); } catch (error) { return toast(error.issues?.[0]?.message || error.message || 'This routine is not valid.', 4200); }
+  let compiledPlan;
+  try { compiledPlan = planFromType(type, config, { blocks: validationBlocks }); } catch (error) { return toast(error.issues?.[0]?.message || error.message || 'This timer is not valid.', 4200); }
+  let durationMs = null;
+  try {
+    const estimate = estimatePlanDuration(compiledPlan);
+    if (Number.isFinite(estimate) && estimate >= 0) durationMs = estimate;
+  } catch {}
 
   if (state.builderEditingBlockId) {
     const current = state.blocks.find((block) => block.id === state.builderEditingBlockId);
@@ -1450,21 +1487,22 @@ async function saveBuilder() {
   }
 
   const previous = state.routines.find((r) => r.id === state.builderEditingId);
-  const routine = {
+  const routine = normalizeSavedTimerRecord({
+    ...(previous || {}),
     id: state.builderEditingId || uid('routine'),
     type,
     title: config.title?.trim() || BUILDER_META[type].name,
     config: structuredClone(config),
-    favorite: previous?.favorite || false,
+    durationMs,
     createdAt: previous?.createdAt || Date.now(),
     useCount: previous?.useCount || 0,
     lastParameterValues: previous?.lastParameterValues || undefined,
     cueOverrides: structuredClone(state.builderCueOverrides || previous?.cueOverrides || {})
-  };
+  });
   await state.db.saveRoutine(routine);
   await loadCollections();
   state.builderEditingId = routine.id;
-  toast('Routine saved.');
+  toast('Saved timer updated.');
 }
 
 function showParameterizedStart({ type, config, routineId, title, savedValues, source, cueOverrides = {} }) {
@@ -1521,7 +1559,7 @@ async function startBuilder() {
 
 async function startRoutine(id) {
   const routine = state.routines.find((r) => r.id === id);
-  if (!routine) return toast('Routine not found.');
+  if (!routine) return toast('Saved timer not found.');
   if (routine.type === 'custom' && (routine.config?.parameters || []).length) {
     return showParameterizedStart({ type: routine.type, config: routine.config, routineId: routine.id, title: routine.title, savedValues: routine.lastParameterValues, source: 'library', cueOverrides: routine.cueOverrides });
   }
