@@ -28,7 +28,8 @@ All v2.4 certification scenarios remain required, plus:
 - Database tests cover Saved Queue round-trip, active queue recovery state and backup v5.
 - Compatibility tests verify pre-v5 replace restores cannot erase queue presets.
 - Static certification verifies the queue module is in the offline shell and queue UI/control wiring exists.
-- Static release certification validates v2.5/v17 metadata.
+- Visual V2 tests certify the M0–M5 material hierarchy, T0–T5 typography roles, shape/motion scales, semantic state colors, theme propagation, accent state, reduced motion, forced colors and offline visual-system loading.
+- Static release certification validates v2.5/v18 metadata.
 - Existing twenty-runtime isolation, per-runtime persistence, cue arbitration, overtime recovery, historical backup compatibility and adversarial engine tests continue to pass.
 
 ## Environment-limited checks
