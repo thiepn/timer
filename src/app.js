@@ -787,6 +787,131 @@ function activeTimerCard(runtime) {
   </article>`;
 }
 
+
+function workspaceTitle(runtime) {
+  return runtime?.meta?.workspaceTitle || runtime?.meta?.title || coordinator.view(runtime?.id)?.title || 'Timer';
+}
+
+function workspaceColor(runtime) {
+  const color = runtime?.meta?.workspaceColor || 'default';
+  return SAVED_TIMER_ACCENTS.includes(color) ? color : 'default';
+}
+
+function completionActionLabel(action) {
+  return ({ stop: 'Stop', overtime: 'Overtime', repeat: 'Repeat', 'start-next': 'Start Next' })[action] || 'Stop';
+}
+
+function openWorkspace() {
+  closeSheet();
+  stopLiveScheduler();
+  syncFocusedRuntime(null);
+  mediaSession.disable();
+  state.completion = null;
+  state.route = 'workspace';
+  render();
+  focusMainHeading(main);
+}
+
+function workspaceRuntimeCard(runtime, index, total) {
+  const view = coordinator.view(runtime.id);
+  if (!view) return '';
+  const current = view.current || {};
+  const value = view.status === 'overtime' ? view.overtimeMs : (current.remainingMs != null ? current.remainingMs : current.elapsedMs);
+  const time = `${view.status === 'overtime' ? '+' : ''}${formatClock(value || 0, { tenths: view.mode === 'stopwatch', countUp: current.remainingMs == null })}`;
+  const phase = view.status === 'paused' ? 'Paused' : view.status === 'overtime' ? 'Overtime' : translateBuiltInLabel(current.label || view.title, currentLocale());
+  const group = String(runtime.meta?.workspaceGroup || '').trim();
+  const next = runtime.meta?.completionNextRoutineId ? state.routines.find((item) => item.id === runtime.meta.completionNextRoutineId) : null;
+  const automation = runtime.completionAction === COMPLETION_ACTIONS.START_NEXT && next ? `Start ${next.title}` : completionActionLabel(runtime.completionAction);
+  return `<article class="workspace-timer-card" data-workspace-runtime="${esc(runtime.id)}" data-saved-accent="${esc(workspaceColor(runtime))}">
+    <button class="workspace-timer-main" data-action="focus-active" data-id="${esc(runtime.id)}">
+      <span class="workspace-timer-copy"><strong>${esc(workspaceTitle(runtime))}</strong><small>${esc(group || 'Ungrouped')} · ${esc(phase)}</small></span>
+      <span class="workspace-time">${esc(time)}</span>
+    </button>
+    <div class="workspace-automation"><span>${esc(automation)}</span><button class="text-btn" data-action="workspace-edit-timer" data-id="${esc(runtime.id)}">Edit</button></div>
+    <div class="workspace-card-actions">
+      <button class="btn compact-btn" data-action="active-toggle" data-id="${esc(runtime.id)}">${view.status === 'paused' ? 'Resume' : 'Pause'}</button>
+      <button class="btn compact-btn" data-action="workspace-move" data-id="${esc(runtime.id)}" data-delta="-1" ${index === 0 ? 'disabled' : ''} aria-label="Move timer earlier">↑</button>
+      <button class="btn compact-btn" data-action="workspace-move" data-id="${esc(runtime.id)}" data-delta="1" ${index === total - 1 ? 'disabled' : ''} aria-label="Move timer later">↓</button>
+      <button class="btn compact-btn danger" data-action="workspace-stop" data-id="${esc(runtime.id)}">Stop</button>
+    </div>
+  </article>`;
+}
+
+function renderMultiTimerWorkspace() {
+  setLiveMode(false);
+  const runtimes = coordinator.list();
+  if (state.workspaceFocusId && !coordinator.has(state.workspaceFocusId)) state.workspaceFocusId = null;
+  const layout = ['grid','compact','focus'].includes(state.settings.workspaceLayout) ? state.settings.workspaceLayout : 'grid';
+  const groups = new Map();
+  for (const runtime of runtimes) {
+    const group = String(runtime.meta?.workspaceGroup || '').trim() || 'Ungrouped';
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(runtime);
+  }
+  const layoutButton = (value, label) => `<button class="${layout === value ? 'active' : ''}" data-action="workspace-layout" data-layout="${value}" aria-pressed="${layout === value}">${label}</button>`;
+  const focusId = state.workspaceFocusId || runtimes[0]?.id;
+  const groupSections = [...groups.entries()].map(([group, items]) => {
+    const shown = layout === 'focus' ? items.filter((runtime) => runtime.id === focusId) : items;
+    if (!shown.length) return '';
+    const cards = shown.map((runtime) => workspaceRuntimeCard(runtime, runtimes.indexOf(runtime), runtimes.length)).join('');
+    return `<section class="workspace-group"><div class="row-between"><h2>${esc(group)}</h2><span class="pill">${items.length}</span></div><div class="workspace-timer-grid">${cards}</div></section>`;
+  }).join('');
+  main.innerHTML = `<div class="page-head workspace-head"><div><h1>Multi-Timer Workspace</h1><p>Control, group, order and chain every active timer.</p></div><div class="row"><button class="btn" data-action="workspace-launch-saved">＋ Saved</button><button class="btn primary" data-action="create">＋ New</button></div></div>
+    <section class="workspace-toolbar card card-pad">
+      <div class="segmented workspace-layout-switch" role="group" aria-label="Workspace layout">${layoutButton('grid','Grid')}${layoutButton('compact','Compact')}${layoutButton('focus','Focus')}</div>
+      <div class="workspace-bulk-actions"><button class="btn compact-btn" data-action="workspace-pause-all" ${runtimes.length ? '' : 'disabled'}>Pause all</button><button class="btn compact-btn" data-action="workspace-resume-all" ${runtimes.length ? '' : 'disabled'}>Resume all</button><button class="btn compact-btn danger" data-action="workspace-stop-all" ${runtimes.length ? '' : 'disabled'}>Stop all</button></div>
+    </section>
+    ${runtimes.length ? `<div class="workspace-groups layout-${layout}">${groupSections}</div>` : `<div class="card empty workspace-empty"><h2>No active timers</h2><p>Launch a saved timer or create a new one.</p><div class="row" style="justify-content:center;flex-wrap:wrap"><button class="btn primary" data-action="workspace-launch-saved">Launch Saved Timer</button><button class="btn" data-action="create">Create Timer</button></div></div>`}`;
+}
+
+function showWorkspaceLaunchSheet() {
+  const timers = state.routines.filter((item) => !item.archived);
+  showSheet('Launch Saved Timer', `<div class="sheet-list">${timers.length ? timers.map((timer) => `<button class="sheet-item" data-action="workspace-launch-routine" data-id="${esc(timer.id)}"><div><strong>${esc(timer.title)}</strong><div class="small muted">${esc(BUILDER_META[timer.type]?.name || timer.type)} · ${esc(typeSummary(timer.type, timer.config || {}))}</div></div><span>▶</span></button>`).join('') : '<div class="empty">No Saved Timers yet.</div>'}</div>`);
+}
+
+function showWorkspaceTimerSettings(id) {
+  const runtime = coordinator.get(id);
+  if (!runtime) return toast('Active timer not found.');
+  const nextId = runtime.meta?.completionNextRoutineId || '';
+  const completion = runtime.completionAction || COMPLETION_ACTIONS.STOP;
+  const nextOptions = state.routines.filter((item) => !item.archived).map((timer) => `<option value="${esc(timer.id)}" ${timer.id === nextId ? 'selected' : ''}>${esc(timer.title)}</option>`).join('');
+  showSheet('Timer Workspace Settings', `<div class="stack">
+    <label class="field"><span>Workspace name</span><input class="input" data-workspace-field="title" maxlength="120" value="${esc(workspaceTitle(runtime))}"></label>
+    <div class="input-row"><label class="field"><span>Group</span><input class="input" data-workspace-field="group" maxlength="40" value="${esc(runtime.meta?.workspaceGroup || '')}" placeholder="Kitchen, Study, Workout"></label><label class="field"><span>Color</span><select class="select" data-workspace-field="color">${SAVED_TIMER_ACCENTS.map((color) => `<option value="${color}" ${workspaceColor(runtime) === color ? 'selected' : ''}>${color[0].toUpperCase()+color.slice(1)}</option>`).join('')}</select></label></div>
+    <label class="field"><span>When this timer finishes</span><select class="select" data-workspace-field="completion"><option value="stop" ${completion === 'stop' ? 'selected' : ''}>Stop</option><option value="overtime" ${completion === 'overtime' ? 'selected' : ''}>Count overtime</option><option value="repeat" ${completion === 'repeat' ? 'selected' : ''}>Repeat automatically</option><option value="start-next" ${completion === 'start-next' ? 'selected' : ''}>Start a Saved Timer</option></select></label>
+    <label class="field"><span>Next Saved Timer</span><select class="select" data-workspace-field="next"><option value="">Choose timer</option>${nextOptions}</select><small class="muted">Used by Start Next. The target can continue the chain with its own completion action.</small></label>
+    <button class="btn primary" data-action="workspace-save-timer" data-id="${esc(id)}">Save</button>
+  </div>`);
+}
+
+async function saveWorkspaceTimerSettings(id) {
+  const runtime = coordinator.get(id);
+  const root = $('#sheet-root');
+  if (!runtime || !root) return;
+  const value = (field) => root.querySelector(`[data-workspace-field="${field}"]`)?.value ?? '';
+  const completionAction = value('completion') || COMPLETION_ACTIONS.STOP;
+  const nextRoutineId = value('next');
+  if (completionAction === COMPLETION_ACTIONS.START_NEXT && (!nextRoutineId || !state.routines.some((item) => item.id === nextRoutineId && !item.archived))) return toast('Choose a Saved Timer for Start Next.');
+  coordinator.updateRuntime(id, {
+    meta: {
+      workspaceTitle: String(value('title')).trim().slice(0, 120) || runtime.meta?.title || 'Timer',
+      workspaceGroup: String(value('group')).trim().slice(0, 40),
+      workspaceColor: SAVED_TIMER_ACCENTS.includes(value('color')) ? value('color') : 'default',
+      completionNextRoutineId: completionAction === COMPLETION_ACTIONS.START_NEXT ? nextRoutineId : ''
+    },
+    completionAction
+  });
+  await persistRuntime(id);
+  closeSheet();
+  broadcastActiveSnapshot();
+  renderMultiTimerWorkspace();
+  toast('Timer workspace settings saved.');
+}
+
+async function persistWorkspaceOrder() {
+  await Promise.allSettled(coordinator.list().map((runtime) => persistRuntime(runtime.id)));
+  broadcastActiveSnapshot();
+}
 function showQuickCustomizeSheet() {
   const pinned = [...quickPresets()];
   while (pinned.length < 6) pinned.push(DEFAULT_QUICK_PRESETS[pinned.length] || 60000);
