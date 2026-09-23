@@ -794,6 +794,264 @@ function activeTimerCard(runtime) {
 }
 
 
+
+function queueTimerById(id) {
+  return state.routines.find((timer) => timer.id === id) || null;
+}
+
+function queueTimerTitle(item) {
+  return queueTimerById(item?.savedTimerId)?.title || item?.title || 'Missing Saved Timer';
+}
+
+function queueStepActionLabel(action) {
+  return ({
+    [QUEUE_STEP_ACTIONS.ADVANCE]: 'Advance',
+    [QUEUE_STEP_ACTIONS.OVERTIME]: 'Overtime',
+    [QUEUE_STEP_ACTIONS.REPEAT]: 'Repeat step',
+    [QUEUE_STEP_ACTIONS.STOP]: 'Stop queue'
+  })[normalizeQueueStepAction(action)] || 'Advance';
+}
+
+function queueStepRuntimeAction(action) {
+  action = normalizeQueueStepAction(action);
+  if (action === QUEUE_STEP_ACTIONS.OVERTIME) return COMPLETION_ACTIONS.OVERTIME;
+  if (action === QUEUE_STEP_ACTIONS.REPEAT) return COMPLETION_ACTIONS.REPEAT;
+  return COMPLETION_ACTIONS.STOP;
+}
+
+async function persistActiveQueue() {
+  if (!state.activeQueue?.id) return false;
+  state.activeQueue.updatedAt = Date.now();
+  await state.db.saveActiveQueue(state.activeQueue);
+  return true;
+}
+
+async function clearActiveQueueState() {
+  const id = state.activeQueue?.id;
+  state.activeQueue = null;
+  if (id) await state.db.clearActiveQueue(id).catch(() => {});
+}
+
+async function startQueueCurrentItem({ focus = false, preserveFocus = false } = {}) {
+  if (!state.activeQueue || state.activeQueue.status !== 'running') return null;
+  let attempts = 0;
+  while (state.activeQueue && attempts < Math.max(1, state.activeQueue.items.length)) {
+    const item = queueCurrentItem(state.activeQueue);
+    if (!item) {
+      await clearActiveQueueState();
+      return null;
+    }
+    const timer = queueTimerById(item.savedTimerId);
+    if (!timer || timer.archived) {
+      const advanced = advanceQueueRun(state.activeQueue, { skipped: true });
+      state.activeQueue = advanced.run;
+      if (advanced.finished) {
+        await clearActiveQueueState();
+        toast('Queue ended because remaining Saved Timers are unavailable.', 4200);
+        return null;
+      }
+      await persistActiveQueue();
+      attempts += 1;
+      continue;
+    }
+    const runtime = await startSavedRoutineAutomated(item.savedTimerId, {
+      background: !focus,
+      backgroundRoute: 'workspace',
+      preserveFocus,
+      completionActionOverride: queueStepRuntimeAction(item.action),
+      metaPatch: {
+        queueRunId: state.activeQueue.id,
+        queuePresetId: state.activeQueue.queueId || '',
+        queueItemId: item.id,
+        queueStepIndex: state.activeQueue.currentIndex,
+        queueStepAction: item.action,
+        workspaceGroup: `Queue · ${state.activeQueue.title}`
+      }
+    });
+    if (!runtime) {
+      const advanced = advanceQueueRun(state.activeQueue, { skipped: true });
+      state.activeQueue = advanced.run;
+      if (advanced.finished) {
+        await clearActiveQueueState();
+        toast('Queue could not start any remaining Saved Timer.', 4200);
+        return null;
+      }
+      await persistActiveQueue();
+      attempts += 1;
+      continue;
+    }
+    state.activeQueue.currentRuntimeId = runtime.id;
+    await persistActiveQueue();
+    return runtime;
+  }
+  return null;
+}
+
+async function startQueue(queueOrId, { focus = false } = {}) {
+  if (state.activeQueue && ['running','paused'].includes(state.activeQueue.status)) {
+    openWorkspace();
+    return toast('A queue is already active. Stop it before starting another queue.', 4200);
+  }
+  const source = typeof queueOrId === 'string' ? state.queues.find((queue) => queue.id === queueOrId) : queueOrId;
+  const queue = normalizeQueuePreset(source || {});
+  if (!queue.items.length) return toast('Add at least one Saved Timer to the queue.');
+  if (!queue.items.some((item) => queueTimerById(item.savedTimerId) && !queueTimerById(item.savedTimerId).archived)) return toast('This queue has no available Saved Timers.');
+  state.activeQueue = createQueueRun(queue, { id: uid('queue_run') });
+  if (source?.id) {
+    const stored = state.queues.find((item) => item.id === source.id);
+    if (stored) {
+      stored.useCount = (stored.useCount || 0) + 1;
+      stored.lastUsedAt = Date.now();
+      await state.db.saveQueue(stored);
+      await loadCollections();
+    }
+  }
+  await persistActiveQueue();
+  state.route = 'workspace';
+  const runtime = await startQueueCurrentItem({ focus, preserveFocus: false });
+  render();
+  if (!runtime) return toast('Queue could not be started.', 4200);
+  return runtime;
+}
+
+async function pauseActiveQueue() {
+  const run = state.activeQueue;
+  if (!run || run.status !== 'running') return false;
+  run.status = 'paused';
+  const runtimeId = run.currentRuntimeId;
+  if (runtimeId && coordinator.has(runtimeId)) {
+    coordinator.pause(runtimeId);
+    await persistRuntime(runtimeId);
+  }
+  await persistActiveQueue();
+  broadcastActiveSnapshot();
+  updateActiveTimerCards();
+  return true;
+}
+
+async function resumeActiveQueue() {
+  const run = state.activeQueue;
+  if (!run || run.status !== 'paused') return false;
+  run.status = 'running';
+  const runtimeId = run.currentRuntimeId;
+  if (runtimeId && coordinator.has(runtimeId)) {
+    coordinator.resume(runtimeId);
+    await persistRuntime(runtimeId);
+  } else {
+    await startQueueCurrentItem({ focus: false, preserveFocus: Boolean(state.activeTimerId) });
+  }
+  await persistActiveQueue();
+  broadcastActiveSnapshot();
+  updateActiveTimerCards();
+  return true;
+}
+
+async function skipActiveQueueStep() {
+  const run = state.activeQueue;
+  if (!run || !['running','paused'].includes(run.status)) return false;
+  const oldRuntimeId = run.currentRuntimeId;
+  const advanced = advanceQueueRun(run, { skipped: true });
+  state.activeQueue = advanced.run;
+  if (oldRuntimeId) state.queueTransitionRuntimeIds.add(oldRuntimeId);
+  if (advanced.finished) await clearActiveQueueState();
+  else {
+    state.activeQueue.status = 'running';
+    await persistActiveQueue();
+    await startQueueCurrentItem({ focus: false, preserveFocus: Boolean(state.activeTimerId && state.activeTimerId !== oldRuntimeId) });
+  }
+  if (oldRuntimeId && coordinator.has(oldRuntimeId)) coordinator.command(oldRuntimeId, 'stop', 'queue-skipped');
+  if (oldRuntimeId) queueMicrotask(() => state.queueTransitionRuntimeIds.delete(oldRuntimeId));
+  if (state.route === 'workspace' && !state.engine) renderMultiTimerWorkspace();
+  return true;
+}
+
+async function stopActiveQueue() {
+  const run = state.activeQueue;
+  if (!run) return false;
+  const runtimeId = run.currentRuntimeId;
+  if (runtimeId) state.queueTransitionRuntimeIds.add(runtimeId);
+  await clearActiveQueueState();
+  if (runtimeId && coordinator.has(runtimeId)) coordinator.command(runtimeId, 'stop', 'queue-stopped');
+  if (runtimeId) queueMicrotask(() => state.queueTransitionRuntimeIds.delete(runtimeId));
+  if (state.route === 'workspace' && !state.engine) renderMultiTimerWorkspace();
+  return true;
+}
+
+async function handleQueueRuntimeTerminal(runtime, event) {
+  const run = state.activeQueue;
+  if (!run || runtime?.meta?.queueRunId !== run.id || run.currentRuntimeId !== runtime.id) return false;
+  if (state.queueTransitionRuntimeIds.has(runtime.id)) return true;
+  const item = queueCurrentItem(run);
+  if (!item || event.cancelled) {
+    await clearActiveQueueState();
+    return true;
+  }
+  const action = normalizeQueueStepAction(item.action);
+  if (action === QUEUE_STEP_ACTIONS.STOP) {
+    const advanced = advanceQueueRun(run, { skipped: false });
+    advanced.run.status = 'stopped';
+    state.activeQueue = advanced.run;
+    await clearActiveQueueState();
+    return true;
+  }
+  const advanced = advanceQueueRun(run, { skipped: false });
+  state.activeQueue = advanced.run;
+  if (advanced.finished) {
+    await clearActiveQueueState();
+    return true;
+  }
+  await persistActiveQueue();
+  await startQueueCurrentItem({
+    focus: state.activeTimerId === runtime.id,
+    preserveFocus: Boolean(state.activeTimerId && state.activeTimerId !== runtime.id)
+  });
+  return true;
+}
+
+async function restoreActiveQueueRuns(runs = []) {
+  const live = (runs || []).map((run) => normalizeQueueRun(run)).find((run) => ['running','paused'].includes(run.status));
+  if (!live) return false;
+  state.activeQueue = live;
+  if (live.currentRuntimeId && coordinator.has(live.currentRuntimeId)) {
+    if (live.status === 'paused') coordinator.pause(live.currentRuntimeId);
+    await persistActiveQueue();
+    return true;
+  }
+  const wantedPaused = live.status === 'paused';
+  state.activeQueue.status = 'running';
+  const runtime = await startQueueCurrentItem({ focus: false, preserveFocus: Boolean(state.activeTimerId) });
+  if (runtime && wantedPaused) {
+    state.activeQueue.status = 'paused';
+    coordinator.pause(runtime.id);
+    await persistRuntime(runtime.id);
+    await persistActiveQueue();
+  }
+  return Boolean(runtime);
+}
+
+function renderActiveQueuePanel() {
+  const run = state.activeQueue;
+  if (!run || !['running','paused'].includes(run.status)) return '';
+  const progress = queueProgress(run);
+  const current = queueCurrentItem(run);
+  const rows = run.items.map((item, index) => {
+    const stateClass = index < run.currentIndex ? 'done' : index === run.currentIndex ? 'current' : 'queued';
+    const status = index < run.currentIndex ? 'Done' : index === run.currentIndex ? (run.status === 'paused' ? 'Paused' : 'Now') : 'Queued';
+    return `<div class="queue-run-item ${stateClass}"><span class="queue-run-index">${index + 1}</span><span class="queue-run-copy"><strong>${esc(queueTimerTitle(item))}</strong><small>${esc(queueStepActionLabel(item.action))}</small></span><span class="queue-run-status">${status}</span></div>`;
+  }).join('');
+  return `<section class="active-queue-panel card card-pad">
+    <div class="row-between"><div><div class="quick-label">Active Queue</div><h2>${esc(run.title)}</h2></div><span class="pill">Cycle ${progress.cycle}</span></div>
+    <div class="queue-progress-copy"><strong>${progress.current} / ${progress.total}</strong><span>${current ? esc(queueTimerTitle(current)) : 'Complete'} · ${progress.completedSteps} completed · ${progress.skippedSteps} skipped</span></div>
+    <div class="queue-progress-track"><span style="transform:scaleX(${Math.max(0, Math.min(1, progress.percent))})"></span></div>
+    <div class="queue-run-list">${rows}</div>
+    <div class="queue-control-row">
+      <button class="btn primary" data-action="${run.status === 'paused' ? 'queue-resume' : 'queue-pause'}">${run.status === 'paused' ? 'Resume queue' : 'Pause queue'}</button>
+      <button class="btn" data-action="queue-skip">Skip</button>
+      <button class="btn danger" data-action="queue-stop">Stop queue</button>
+    </div>
+  </section>`;
+}
+
 function workspaceTitle(runtime) {
   return runtime?.meta?.workspaceTitle || runtime?.meta?.title || coordinator.view(runtime?.id)?.title || 'Timer';
 }
