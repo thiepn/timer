@@ -2541,9 +2541,9 @@ function updateActiveTimerCards() {
       const use = $('use', toggle);
       if (use) use.setAttribute('href', `./icons.svg#${view.status === 'paused' ? 'i-play' : 'i-pause'}`);
     }
-    for (const adjust of $('[data-action="active-adjust"]', card)) adjust.disabled = view.status === 'paused' || view.status === 'overtime';
+    for (const adjust of $$('[data-action="active-adjust"]', card)) adjust.disabled = view.status === 'paused' || view.status === 'overtime';
   }
-  for (const card of $('[data-workspace-runtime]')) {
+  for (const card of $$('[data-workspace-runtime]')) {
     const runtimeId = card.dataset.workspaceRuntime;
     const runtime = coordinator.get(runtimeId);
     const view = coordinator.view(runtimeId);
