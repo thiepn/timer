@@ -1702,7 +1702,7 @@ async function startRoutine(id) {
 }
 
 
-async function startSavedRoutineAutomated(id, { background = true, backgroundRoute = 'workspace', workspaceGroup = '', workspaceColor = 'default' } = {}) {
+async function startSavedRoutineAutomated(id, { background = true, backgroundRoute = 'workspace', preserveFocus = false, workspaceGroup = '', workspaceColor = 'default' } = {}) {
   const routine = state.routines.find((item) => item.id === id);
   if (!routine || routine.archived) return null;
   let parameterValues = {};
@@ -1739,6 +1739,7 @@ async function startSavedRoutineAutomated(id, { background = true, backgroundRou
   return startSession(plan, meta, {
     background,
     backgroundRoute,
+    preserveFocus,
     completionAction: routine.completionAction || COMPLETION_ACTIONS.STOP
   });
 }
@@ -1767,10 +1768,14 @@ async function startSession(plan, meta, options = {}) {
   broadcastActiveSnapshot();
   renderUpdateBanner();
   if (options.background) {
-    state.route = options.backgroundRoute || (state.route === 'workspace' ? 'workspace' : 'timer');
-    syncFocusedRuntime(null);
-    mediaSession.disable();
-    render();
+    if (options.preserveFocus && state.activeTimerId && coordinator.has(state.activeTimerId)) {
+      updateActiveTimerCards();
+    } else {
+      state.route = options.backgroundRoute || (state.route === 'workspace' ? 'workspace' : 'timer');
+      syncFocusedRuntime(null);
+      mediaSession.disable();
+      render();
+    }
   } else {
     focusRuntime(runtime.id);
   }
@@ -1917,7 +1922,22 @@ async function handleCoordinatorEvent(event) {
     return;
   }
   if (event.type === 'runtime-terminal') {
+    const wasFocused = state.activeTimerId === runtimeId;
+    let chained = null;
+    if (event.startNext && !event.cancelled) {
+      const nextRoutineId = runtime?.meta?.completionNextRoutineId;
+      if (nextRoutineId) {
+        chained = await startSavedRoutineAutomated(nextRoutineId, {
+          background: !wasFocused,
+          backgroundRoute: state.route === 'workspace' ? 'workspace' : 'timer',
+          preserveFocus: !wasFocused && Boolean(state.activeTimerId),
+          workspaceGroup: runtime?.meta?.workspaceGroup || '',
+          workspaceColor: runtime?.meta?.workspaceColor || 'default'
+        });
+      }
+    }
     await finalizeRuntime(runtimeId, event.snapshot, Boolean(event.cancelled));
+    if (event.startNext && !chained) toast('The configured next Saved Timer could not be started.', 4200);
   }
 }
 
