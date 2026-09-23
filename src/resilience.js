@@ -6,6 +6,7 @@ export const BACKUP_ENTITY_LIMITS = Object.freeze({
   blocks: 5000,
   cueProfiles: 1000,
   customSounds: 500,
+  queues: 2000,
   sessions: 100000
 });
 
@@ -80,6 +81,7 @@ export function backupCounts(payload = {}) {
     blocks: Array.isArray(payload.blocks) ? payload.blocks.length : 0,
     cueProfiles: Array.isArray(payload.cueProfiles) ? payload.cueProfiles.length : 0,
     customSounds: Array.isArray(payload.customSounds) ? payload.customSounds.length : 0,
+    queues: Array.isArray(payload.queues) ? payload.queues.length : 0,
     sessions: Array.isArray(payload.sessions) ? payload.sessions.length : 0
   };
 }
@@ -172,7 +174,7 @@ export async function decryptBackupArchive(envelope, password) {
 }
 
 export function isLegacyBackup(value) {
-  return value?.format === 'thiepn-timer-backup' && [1, 2, 3, 4].includes(Number(value.version));
+  return value?.format === 'thiepn-timer-backup' && [1, 2, 3, 4, 5].includes(Number(value.version));
 }
 
 export function isEncryptedBackup(value) {
