@@ -1,14 +1,21 @@
-# Timer v2.2 Release Scope
+# Timer v2.3 Release Scope
 
-Timer v2.2 is the Quick Timer 2.0 and Home redesign release built on the v2.1 multi-timer kernel.
+Timer v2.3 generalizes the former workout-oriented Routine library into universal Saved Timers while preserving the established storage and sync boundary.
 
 Production scope includes:
 
-- Deterministic Quick Timer parsing for bare seconds, unit notation, `m:ss`, and `h:mm:ss`, bounded from 1 second through the Quick Timer maximum.
-- One-tap pinned durations and a bounded recent-duration list stored in normal Settings data.
-- A utility-first Home with prominent Active Timers, direct pause/resume, direct positive adjustments on adjustable countdowns, Repeat Last, Stopwatch, Interval and More Timers shortcuts.
-- User customization of pinned Quick Timer durations and three Home adjustment buttons using the same parser as the main Quick Timer field.
-- Starting any pinned/recent/custom Quick Timer adds a new coordinator runtime without disturbing existing timers.
-- Existing v2.1 ownership, recovery, cue, Wake Lock, notification and multi-runtime guarantees remain unchanged.
+- Saved countdown presets, stopwatch presets, intervals, sequence/advanced timers and all specialized timer builders.
+- One-tap Quick Timer saving and a first-class reusable Countdown builder.
+- Pin, favorite and archive states; icon, accent and description metadata.
+- Collections with Cooking, Study, Workout, Church and Music defaults, plus user-created collections and tags.
+- Search across timer metadata, collection, tags, type and timer summary.
+- Recent, most-used, alphabetical and duration sorting.
+- Duplicate and multi-select organization with bulk move, archive/restore and delete.
+- In-place normalization of all legacy routine records with their IDs, timer configs, cue overrides, timestamps, usage data and history links retained.
+- Existing v2.2 Quick Timer and v2.1 multi-runtime ownership/recovery behavior remains unchanged.
 
-This release deliberately does **not** implement Saved Timer metadata/collections, the full Sequence Timer UX, the dedicated Multi-Timer Workspace, QR sharing or native Android exact alarms/widgets. Those remain later roadmap phases.
+Compatibility boundary:
+
+- IndexedDB remains v6 and continues to use the existing `routines` store as the durable Saved Timer store.
+- Backup payload remains v4 and backup versions v1-v4 remain importable.
+- No destructive rename or copy migration is performed.

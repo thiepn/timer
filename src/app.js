@@ -14,6 +14,7 @@ import { FocusTrap, Announcer, focusMainHeading, isInteractiveTarget, timerEvent
 import { PerformanceMetrics, MaintenanceCoordinator, liveSchedulerPolicy, reduceMotionEnabled } from './performance.js';
 import { TimerCoordinator, COMPLETION_ACTIONS } from './coordinator.js';
 import { parseDurationInput, durationInputText, normalizeDurationList, pushRecentDuration, DEFAULT_QUICK_PRESETS, DEFAULT_QUICK_ADJUSTMENTS } from './quick.js';
+import { DEFAULT_SAVED_TIMER_COLLECTIONS, SAVED_TIMER_ACCENTS, normalizeSavedTimerRecord, normalizeSavedTimerTags, normalizeSavedTimerCollections, needsSavedTimerMigration, savedTimerSearchText, savedTimerMatchesView, sortSavedTimers, duplicateSavedTimerRecord } from './saved.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -24,9 +25,10 @@ const ms = (seconds) => Math.max(0, Math.round(Number(seconds || 0) * 1000));
 const sec = (milliseconds) => Math.round(Number(milliseconds || 0) / 1000);
 const mins = (minutes) => ms(Number(minutes || 0) * 60);
 const pct = (n) => `${Math.round(clamp(n || 0, 0, 1) * 100)}%`;
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.3.0';
 
 const BUILDER_META = {
+  countdown: { name: 'Countdown', desc: 'Reusable fixed-duration countdown' },
   interval: { name: 'Interval', desc: 'Work / rest repetitions' },
   tabata: { name: 'Tabata', desc: 'Classic 20 / 10 intervals' },
   circuit: { name: 'Circuit', desc: 'Timed and manual exercise sequence' },
@@ -37,12 +39,13 @@ const BUILDER_META = {
   'run-walk': { name: 'Run / Walk', desc: 'Alternating running and recovery' },
   ladder: { name: 'Ladder', desc: 'Progressively changing work intervals' },
   pyramid: { name: 'Pyramid', desc: 'Ramp up and back down' },
-  custom: { name: 'Custom Routine', desc: 'Nested sections, repeats, timed and manual steps' },
+  custom: { name: 'Sequence Timer', desc: 'Nested sections, repeats, timed and manual steps' },
   stopwatch: { name: 'Stopwatch', desc: 'Open-ended timer with laps' }
 };
 
 function defaultConfig(type) {
   switch (type) {
+    case 'countdown': return { title: 'Countdown', duration: 300 };
     case 'tabata': return { title: 'Tabata', work: 20, rest: 10, rounds: 8, prepare: 10, finalRest: false };
     case 'circuit': return { title: 'Circuit', rounds: 3, prepare: 10, between: 0, items: [
       { label: 'Push-ups', seconds: 40, phase: 'work', manual: false },
@@ -57,7 +60,7 @@ function defaultConfig(type) {
     case 'run-walk': return { title: 'Run / Walk', rounds: 10, runMinutes: 2, walkMinutes: 1, warmupMinutes: 5, cooldownMinutes: 5, finalWalk: true };
     case 'ladder': return { title: 'Ascending Ladder', start: 20, step: 10, levels: 5, rest: 10, direction: 'up' };
     case 'pyramid': return { title: 'Pyramid', start: 20, peak: 60, step: 10, rest: 10 };
-    case 'custom': return { title: 'Custom Routine', parameters: [], durationScale: 1, targetDurationMinutes: 0, randomMode: 'new', fixedSeed: 'timer-seed', nodes: [{ id: uid('node'), type: 'repeat', count: 3, children: [
+    case 'custom': return { title: 'Sequence Timer', parameters: [], durationScale: 1, targetDurationMinutes: 0, randomMode: 'new', fixedSeed: 'timer-seed', nodes: [{ id: uid('node'), type: 'repeat', count: 3, children: [
       { id: uid('node'), type: 'timed', label: 'Work', phase: 'work', durationMs: 40000 },
       { id: uid('node'), type: 'timed', label: 'Rest', phase: 'rest', durationMs: 20000 }
     ] }] };
@@ -75,6 +78,7 @@ function parseMovements(text = '') {
 
 function planFromType(type, c, options = {}) {
   switch (type) {
+    case 'countdown': return buildCountdown({ durationMs: ms(c.duration), label: c.title || 'Countdown' });
     case 'tabata':
     case 'interval': return buildInterval({ workMs: ms(c.work), restMs: ms(c.rest), rounds: c.rounds, prepareMs: ms(c.prepare), finalRest: !!c.finalRest, workLabel: 'Work', restLabel: 'Rest' });
     case 'circuit': return buildCircuit({
@@ -94,7 +98,7 @@ function planFromType(type, c, options = {}) {
     case 'run-walk': return buildRunWalk({ rounds: c.rounds, runMs: mins(c.runMinutes), walkMs: mins(c.walkMinutes), warmupMs: mins(c.warmupMinutes), cooldownMs: mins(c.cooldownMinutes), finalWalk: !!c.finalWalk });
     case 'ladder': return buildLadder({ title: c.title || 'Ladder', startMs: ms(c.start), stepMs: ms(c.step), levels: c.levels, restMs: ms(c.rest), direction: c.direction });
     case 'pyramid': return buildPyramid({ title: c.title || 'Pyramid', startMs: ms(c.start), peakMs: ms(c.peak), stepMs: ms(c.step), restMs: ms(c.rest) });
-    case 'custom': return buildCustomRoutine({ title: c.title || 'Custom Routine', nodes: c.nodes || [], parameters: c.parameters || [], parameterValues: options.parameterValues || {}, blocks: options.blocks || state.blocks || [], seed: options.seed ?? (c.randomMode === 'fixed' ? (c.fixedSeed || 'timer-seed') : 'preview'), durationScale: Number(c.durationScale || 1), targetDurationMs: Number(c.targetDurationMinutes) > 0 ? mins(c.targetDurationMinutes) : undefined });
+    case 'custom': return buildCustomRoutine({ title: c.title || 'Sequence Timer', nodes: c.nodes || [], parameters: c.parameters || [], parameterValues: options.parameterValues || {}, blocks: options.blocks || state.blocks || [], seed: options.seed ?? (c.randomMode === 'fixed' ? (c.fixedSeed || 'timer-seed') : 'preview'), durationScale: Number(c.durationScale || 1), targetDurationMs: Number(c.targetDurationMinutes) > 0 ? mins(c.targetDurationMinutes) : undefined });
     case 'stopwatch': return buildStopwatch();
     default: throw new Error(`Unknown builder type: ${type}`);
   }
@@ -106,6 +110,7 @@ function metaForType(type, config, cueOverrides = {}) {
 
 function typeSummary(type, c) {
   switch (type) {
+    case 'countdown': return durationLabel(ms(c.duration));
     case 'interval':
     case 'tabata': return `${c.work}s / ${c.rest}s · ${c.rounds} rounds`;
     case 'circuit': return `${c.rounds} rounds · ${(c.items || []).length} steps`;
@@ -172,6 +177,11 @@ const state = {
   storageEstimate: null,
   libraryQuery: '',
   librarySearchActive: false,
+  libraryView: 'all',
+  librarySort: 'recent',
+  savedSelectMode: false,
+  savedSelected: new Set(),
+  pendingSavedMoveIds: [],
   customClipboard: null,
   pendingStart: null,
   historyView: 'list',
@@ -277,6 +287,25 @@ async function startQuickDuration(milliseconds, { background = false } = {}) {
   void rememberQuickDuration(duration);
   const title = `${durationLabel(duration)} Timer`;
   return startSession(buildCountdown({ durationMs: duration, label: title }), { mode: 'countdown', title, config: { durationMs: duration }, source: 'quick' }, { background });
+}
+
+
+async function saveQuickTimerPreset() {
+  const input = $('[data-quick-input]');
+  const result = parseDurationInput(input?.value || state.quickInput);
+  if (!result.ok) return toast(result.error, 4200);
+  const title = `${durationLabel(result.ms)} Countdown`;
+  const timer = normalizeSavedTimerRecord({
+    id: uid('routine'),
+    type: 'countdown',
+    title,
+    config: { title, duration: Math.max(1, result.ms / 1000) },
+    durationMs: result.ms,
+    createdAt: Date.now()
+  });
+  await state.db.saveRoutine(timer);
+  await loadCollections();
+  toast('Countdown saved to Saved Timers.');
 }
 
 const cue = new CueManager(() => ({ ...state.settings, voice: state.settings.screenReaderOptimized ? false : state.settings.voice }), () => state.cueProfiles, async (id) => state.db.get('customSounds', id));
@@ -710,7 +739,7 @@ function renderTimerHome() {
     ${coordinator.size() ? `<section class="section active-timers-section home-active-section"><div class="row-between"><div><h2 class="section-title" style="margin:0">Active Timers</h2><div class="small muted" style="margin-top:4px">All timers keep running independently.</div></div><span class="pill">${coordinator.size()}</span></div><div class="active-timer-grid">${coordinator.list().map(activeTimerCard).join('')}</div></section>` : ''}
 
     <section class="card quick-card quick-card-v2">
-      <div class="row-between quick-card-head"><div><div class="quick-label">Quick Timer</div><div class="small muted">Try 90s, 1:30, 3m, or 1h 20m.</div></div><button class="btn ghost compact-btn" data-action="customize-quick">Customize</button></div>
+      <div class="row-between quick-card-head"><div><div class="quick-label">Quick Timer</div><div class="small muted">Try 90s, 1:30, 3m, or 1h 20m.</div></div><div class="row quick-head-actions"><button class="btn ghost compact-btn" data-action="save-quick-timer">Save</button><button class="btn ghost compact-btn" data-action="customize-quick">Customize</button></div></div>
       <form class="quick-entry" data-quick-form novalidate>
         <label class="sr-only" for="quick-duration-input">Quick Timer duration</label>
         <input id="quick-duration-input" class="quick-duration-input" data-quick-input inputmode="text" autocomplete="off" spellcheck="false" value="${esc(state.quickInput)}" placeholder="3m" aria-describedby="quick-duration-preview" aria-invalid="${parsed.ok ? 'false' : 'true'}">
@@ -885,7 +914,7 @@ function cueSoundOptions(selected = '') {
 }
 
 function renderRoutineCueOverrides(overrides = {}) {
-  return `<section class="card form-card cue-override-card"><h2 class="section-title">Routine cues</h2><div class="small muted">Optional. A routine profile overrides the global cue profile only while this routine is running.</div><div class="field"><label>Cue profile</label><select class="select" data-builder-cue-field="profileId">${cueProfileOptions(overrides.profileId || '', { inherit: true })}</select></div><div class="field"><label>Sound pack</label><select class="select" data-builder-cue-field="soundPack">${soundPackOptions(overrides.soundPack || '', { inherit: true })}</select></div><div class="generator-grid"><label class="custom-number-label">Warning seconds<input class="input" type="number" min="0" max="60" value="${overrides.warningSeconds ?? ''}" placeholder="Inherit" data-builder-cue-field="warningSeconds"></label><label class="custom-number-label">Halfway cue<select class="select" data-builder-cue-field="halfwayCue"><option value="" ${overrides.halfwayCue == null ? 'selected' : ''}>Inherit</option><option value="true" ${overrides.halfwayCue === true || overrides.halfwayCue === 'true' ? 'selected' : ''}>On</option><option value="false" ${overrides.halfwayCue === false || overrides.halfwayCue === 'false' ? 'selected' : ''}>Off</option></select></label></div></section>`;
+  return `<section class="card form-card cue-override-card"><h2 class="section-title">Timer cues</h2><div class="small muted">Optional. A timer profile overrides the global cue profile only while this timer is running.</div><div class="field"><label>Cue profile</label><select class="select" data-builder-cue-field="profileId">${cueProfileOptions(overrides.profileId || '', { inherit: true })}</select></div><div class="field"><label>Sound pack</label><select class="select" data-builder-cue-field="soundPack">${soundPackOptions(overrides.soundPack || '', { inherit: true })}</select></div><div class="generator-grid"><label class="custom-number-label">Warning seconds<input class="input" type="number" min="0" max="60" value="${overrides.warningSeconds ?? ''}" placeholder="Inherit" data-builder-cue-field="warningSeconds"></label><label class="custom-number-label">Halfway cue<select class="select" data-builder-cue-field="halfwayCue"><option value="" ${overrides.halfwayCue == null ? 'selected' : ''}>Inherit</option><option value="true" ${overrides.halfwayCue === true || overrides.halfwayCue === 'true' ? 'selected' : ''}>On</option><option value="false" ${overrides.halfwayCue === false || overrides.halfwayCue === 'false' ? 'selected' : ''}>Off</option></select></label></div></section>`;
 }
 
 function renderStepCueOverrides(node, path) {
@@ -899,7 +928,9 @@ function renderBuilder() {
   const m = BUILDER_META[type];
   const editingBlock = state.builderEditingBlockId ? state.blocks.find((block) => block.id === state.builderEditingBlockId) : null;
   let body = '';
-  if (type === 'interval' || type === 'tabata') {
+  if (type === 'countdown') {
+    body = `${field('Duration', 'duration', c.duration, { min: 1, max: 604800, suffix: 'sec' })}<div class="small muted">Save reusable countdown presets for cooking, study, music, church, workouts, or anything else.</div>`;
+  } else if (type === 'interval' || type === 'tabata') {
     body = `${field('Work', 'work', c.work, { min: 1, max: 3600, suffix: 'sec' })}${field('Rest', 'rest', c.rest, { min: 1, max: 3600, suffix: 'sec' })}${field('Rounds', 'rounds', c.rounds, { min: 1, max: 10000 })}${field('Preparation', 'prepare', c.prepare, { min: 0, max: 3600, suffix: 'sec' })}${toggleField('Final rest', 'finalRest', !!c.finalRest, 'Include rest after the last work interval')}`;
   } else if (type === 'circuit') {
     body = `${field('Rounds', 'rounds', c.rounds, { min: 1, max: 1000 })}${field('Preparation', 'prepare', c.prepare, { min: 0, max: 3600, suffix: 'sec' })}${field('Between rounds', 'between', c.between, { min: 0, max: 3600, suffix: 'sec' })}
@@ -920,7 +951,7 @@ function renderBuilder() {
     body = `${field('Start', 'start', c.start, { min: 1, max: 3600, suffix: 'sec' })}${field('Peak', 'peak', c.peak, { min: 1, max: 3600, suffix: 'sec' })}${field('Step', 'step', c.step, { min: 1, max: 3600, suffix: 'sec' })}${field('Rest', 'rest', c.rest, { min: 0, max: 3600, suffix: 'sec' })}`;
   } else if (type === 'custom') {
     c.parameters ||= [];
-    body = `${renderCustomParameters(c.parameters)}${editingBlock ? '' : renderCustomCompileOptions(c)}<div class="field"><div class="row-between"><div><div class="field-label">Routine structure</div><div class="small muted">Nest patterns, formulas, generators, sections and reusable blocks. Formulas resolve before the timer starts.</div></div><button class="btn" data-action="custom-add" data-parent="">＋ Add</button></div><div class="custom-tree">${renderCustomTree(c.nodes || [])}</div>${!(c.nodes || []).length ? `<div class="empty">Add a step, repeat, generator, section, or reusable block to begin.</div>` : ''}<div class="row" style="flex-wrap:wrap"><button class="btn" data-action="custom-preview">Preview compiled plan</button>${state.blocks.length ? `<span class="pill">${state.blocks.length} reusable block${state.blocks.length === 1 ? '' : 's'}</span>` : ''}</div></div>`;
+    body = `${renderCustomParameters(c.parameters)}${editingBlock ? '' : renderCustomCompileOptions(c)}<div class="field"><div class="row-between"><div><div class="field-label">Sequence structure</div><div class="small muted">Nest patterns, formulas, generators, sections and reusable blocks. Formulas resolve before the timer starts.</div></div><button class="btn" data-action="custom-add" data-parent="">＋ Add</button></div><div class="custom-tree">${renderCustomTree(c.nodes || [])}</div>${!(c.nodes || []).length ? `<div class="empty">Add a step, repeat, generator, section, or reusable block to begin.</div>` : ''}<div class="row" style="flex-wrap:wrap"><button class="btn" data-action="custom-preview">Preview compiled plan</button>${state.blocks.length ? `<span class="pill">${state.blocks.length} reusable block${state.blocks.length === 1 ? '' : 's'}</span>` : ''}</div></div>`;
   } else if (type === 'stopwatch') {
     body = `<div class="card card-pad"><strong>Stopwatch</strong><p class="muted">Open-ended timing with pause, resume and lap recording.</p></div>`;
   }
@@ -937,7 +968,7 @@ function renderBuilder() {
       </section>
       ${editingBlock ? '' : renderRoutineCueOverrides(state.builderCueOverrides || {})}
       <button class="btn primary big block" data-action="start-builder">${editingBlock ? 'Test Reusable Block' : `Start ${esc(m.name)}`}</button>
-      ${state.builderEditingId ? `<div class="row" style="flex-wrap:wrap"><button class="btn" data-action="export-routine-package" data-id="${esc(state.builderEditingId)}">Export portable routine</button><button class="btn danger" data-action="delete-routine" data-id="${esc(state.builderEditingId)}">Delete saved routine</button></div>` : state.builderEditingBlockId ? `<button class="btn danger block" data-action="delete-block" data-id="${esc(state.builderEditingBlockId)}">Delete reusable block</button>` : ''}
+      ${state.builderEditingId ? `<div class="row" style="flex-wrap:wrap"><button class="btn" data-action="export-routine-package" data-id="${esc(state.builderEditingId)}">Export portable timer</button><button class="btn danger" data-action="delete-routine" data-id="${esc(state.builderEditingId)}">Delete Saved Timer</button></div>` : state.builderEditingBlockId ? `<button class="btn danger block" data-action="delete-block" data-id="${esc(state.builderEditingBlockId)}">Delete reusable block</button>` : ''}
     </div>`;
 }
 
@@ -1431,7 +1462,13 @@ function showCustomPreview() {
 async function saveBuilder() {
   const { type, config } = state.builder;
   const validationBlocks = blocksForCurrentBuilder();
-  try { planFromType(type, config, { blocks: validationBlocks }); } catch (error) { return toast(error.issues?.[0]?.message || error.message || 'This routine is not valid.', 4200); }
+  let compiledPlan;
+  try { compiledPlan = planFromType(type, config, { blocks: validationBlocks }); } catch (error) { return toast(error.issues?.[0]?.message || error.message || 'This timer is not valid.', 4200); }
+  let durationMs = null;
+  try {
+    const estimate = estimatePlanDuration(compiledPlan);
+    if (Number.isFinite(estimate) && estimate >= 0) durationMs = estimate;
+  } catch {}
 
   if (state.builderEditingBlockId) {
     const current = state.blocks.find((block) => block.id === state.builderEditingBlockId);
@@ -1450,21 +1487,22 @@ async function saveBuilder() {
   }
 
   const previous = state.routines.find((r) => r.id === state.builderEditingId);
-  const routine = {
+  const routine = normalizeSavedTimerRecord({
+    ...(previous || {}),
     id: state.builderEditingId || uid('routine'),
     type,
     title: config.title?.trim() || BUILDER_META[type].name,
     config: structuredClone(config),
-    favorite: previous?.favorite || false,
+    durationMs,
     createdAt: previous?.createdAt || Date.now(),
     useCount: previous?.useCount || 0,
     lastParameterValues: previous?.lastParameterValues || undefined,
     cueOverrides: structuredClone(state.builderCueOverrides || previous?.cueOverrides || {})
-  };
+  });
   await state.db.saveRoutine(routine);
   await loadCollections();
   state.builderEditingId = routine.id;
-  toast('Routine saved.');
+  toast('Saved timer updated.');
 }
 
 function showParameterizedStart({ type, config, routineId, title, savedValues, source, cueOverrides = {} }) {
@@ -1521,7 +1559,7 @@ async function startBuilder() {
 
 async function startRoutine(id) {
   const routine = state.routines.find((r) => r.id === id);
-  if (!routine) return toast('Routine not found.');
+  if (!routine) return toast('Saved timer not found.');
   if (routine.type === 'custom' && (routine.config?.parameters || []).length) {
     return showParameterizedStart({ type: routine.type, config: routine.config, routineId: routine.id, title: routine.title, savedValues: routine.lastParameterValues, source: 'library', cueOverrides: routine.cueOverrides });
   }
@@ -1994,18 +2032,71 @@ function renderCompletion() {
   </div>`;
 }
 
-function renderLibrary() {
+function savedTimerCollections() {
+  const actual = state.routines.map((timer) => timer.collection).filter(Boolean);
+  return normalizeSavedTimerCollections([...(state.settings.savedTimerCollections || DEFAULT_SAVED_TIMER_COLLECTIONS), ...actual]);
+}
+
+function savedTimerDuration(timer) {
+  if (timer?.durationMs != null && Number.isFinite(Number(timer.durationMs))) return Math.max(0, Number(timer.durationMs));
+  try {
+    const estimate = estimatePlanDuration(planFromType(timer.type, timer.config || {}, { blocks: state.blocks }));
+    return Number.isFinite(estimate) && estimate >= 0 ? estimate : null;
+  } catch { return null; }
+}
+
+function libraryViewLabel(view = state.libraryView) {
+  if (view === 'all') return 'All Saved Timers';
+  if (view === 'pinned') return 'Pinned';
+  if (view === 'favorites') return 'Favorites';
+  if (view === 'archived') return 'Archive';
+  if (view.startsWith('collection:')) return view.slice('collection:'.length);
+  return 'Saved Timers';
+}
+
+function visibleSavedTimers() {
   const query = state.libraryQuery.trim().toLowerCase();
-  const matches = (r) => !query || `${r.title || ''} ${BUILDER_META[r.type]?.name || r.type || ''} ${typeSummary(r.type, r.config || {})}`.toLowerCase().includes(query);
+  return state.routines.filter((timer) => {
+    if (!savedTimerMatchesView(timer, state.libraryView)) return false;
+    if (!query) return true;
+    return savedTimerSearchText(
+      timer,
+      BUILDER_META[timer.type]?.name || timer.type || '',
+      typeSummary(timer.type, timer.config || {})
+    ).includes(query);
+  });
+}
+
+function renderLibrary() {
+  for (const id of [...state.savedSelected]) if (!state.routines.some((timer) => timer.id === id)) state.savedSelected.delete(id);
+  const query = state.libraryQuery.trim().toLowerCase();
+  const routines = sortSavedTimers(visibleSavedTimers(), state.librarySort, savedTimerDuration);
   const blockMatches = (block) => !query || `${block.title || ''} reusable block ${(block.parameters || []).map((parameter) => parameter.label).join(' ')}`.toLowerCase().includes(query);
-  const favorites = state.routines.filter((r) => r.favorite && matches(r));
-  const routines = [...state.routines].filter(matches).sort((a, b) => (b.lastUsedAt || b.updatedAt || 0) - (a.lastUsedAt || a.updatedAt || 0));
   const blocks = [...state.blocks].filter(blockMatches).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-  main.innerHTML = `<div class="page-head"><div><h1>Library</h1><p>Saved timers, routines, and reusable blocks.</p></div><button class="btn primary" data-action="create">＋ Create</button></div>
-    <div class="field"><label for="library-search">Search library</label><input id="library-search" class="input" type="search" data-library-search value="${esc(state.libraryQuery)}" placeholder="Search routines or blocks"></div>
-    ${favorites.length ? `<section class="section"><h2 class="section-title">Favorites</h2><div class="list">${favorites.map(routineRow).join('')}</div></section>` : ''}
-    <section class="section"><div class="row-between"><h2 class="section-title" style="margin:0">My Routines</h2><span class="pill">${routines.length}</span></div><div class="list" style="margin-top:12px">${routines.length ? routines.map(routineRow).join('') : `<div class="card empty"><p>${query ? 'No routines match your search.' : 'No saved routines yet.'}</p>${query ? '' : '<button class="btn primary" data-action="create">Create timer</button>'}</div>`}</div></section>
-    ${(blocks.length || (!query && state.blocks.length === 0)) ? `<section class="section"><div class="row-between"><div><h2 class="section-title" style="margin:0">Reusable Blocks</h2><div class="small muted" style="margin-top:5px">Linked building blocks for Custom Routines.</div></div><span class="pill">${blocks.length}</span></div><div class="list" style="margin-top:12px">${blocks.length ? blocks.map(blockRow).join('') : `<div class="card empty">Create a Custom Routine, then use ▣ on an item to extract it as a reusable block.</div>`}</div></section>` : ''}`;
+  const collections = savedTimerCollections();
+  const selectedCount = state.savedSelected.size;
+  const viewChip = (value, label) => `<button class="library-filter-chip ${state.libraryView === value ? 'active' : ''}" data-action="saved-view" data-view="${esc(value)}">${esc(label)}</button>`;
+
+  main.innerHTML = `<div class="page-head"><div><h1>Saved Timers</h1><p>Presets, sequences and specialized timers in one library.</p></div><button class="btn primary" data-action="create">+ Create</button></div>
+    <div class="saved-library-toolbar card card-pad">
+      <div class="field"><label for="library-search">Search saved timers or blocks</label><input id="library-search" class="input" type="search" data-library-search value="${esc(state.libraryQuery)}" placeholder="Name, description, collection, tag, or timer type"></div>
+      <div class="library-filter-strip" aria-label="Saved timer views">
+        ${viewChip('all','All')}${viewChip('pinned','Pinned')}${viewChip('favorites','Favorites')}${viewChip('archived','Archive')}
+        ${collections.map((name) => viewChip(`collection:${name}`, name)).join('')}
+      </div>
+      <div class="library-control-row">
+        <label class="library-sort-label"><span>Sort</span><select class="select" data-saved-sort>
+          <option value="recent" ${state.librarySort === 'recent' ? 'selected' : ''}>Recent</option>
+          <option value="most-used" ${state.librarySort === 'most-used' ? 'selected' : ''}>Most used</option>
+          <option value="alphabetical" ${state.librarySort === 'alphabetical' ? 'selected' : ''}>Alphabetical</option>
+          <option value="duration" ${state.librarySort === 'duration' ? 'selected' : ''}>Duration</option>
+        </select></label>
+        <div class="row library-toolbar-actions"><button class="btn" data-action="manage-saved-collections">Collections</button><button class="btn ${state.savedSelectMode ? 'primary' : ''}" data-action="toggle-saved-select-mode">${state.savedSelectMode ? 'Done' : 'Select'}</button></div>
+      </div>
+    </div>
+    ${state.savedSelectMode ? `<div class="saved-bulk-bar card"><strong>${selectedCount} selected</strong><div class="saved-bulk-actions"><button class="btn compact-btn" data-action="select-all-visible">All</button><button class="btn compact-btn" data-action="bulk-saved-move" ${selectedCount ? '' : 'disabled'}>Move</button><button class="btn compact-btn" data-action="${state.libraryView === 'archived' ? 'bulk-saved-restore' : 'bulk-saved-archive'}" ${selectedCount ? '' : 'disabled'}>${state.libraryView === 'archived' ? 'Restore' : 'Archive'}</button><button class="btn compact-btn danger" data-action="bulk-saved-delete" ${selectedCount ? '' : 'disabled'}>Delete</button></div></div>` : ''}
+    <section class="section"><div class="row-between"><div><h2 class="section-title" style="margin:0">${esc(libraryViewLabel())}</h2><div class="small muted" style="margin-top:5px">${esc(state.librarySort === 'most-used' ? 'Sorted by usage' : state.librarySort === 'alphabetical' ? 'Sorted A-Z' : state.librarySort === 'duration' ? 'Shortest finite duration first' : 'Most recently used or changed first')}</div></div><span class="pill">${routines.length}</span></div><div class="saved-timer-list" style="margin-top:12px">${routines.length ? routines.map(routineRow).join('') : `<div class="card empty"><p>${query ? 'No saved timers match your search.' : state.libraryView === 'archived' ? 'Archive is empty.' : 'No saved timers in this view.'}</p>${query || state.libraryView === 'archived' ? '' : '<button class="btn primary" data-action="create">Create timer</button>'}</div>`}</div></section>
+    ${(blocks.length || (!query && state.blocks.length === 0)) ? `<section class="section"><div class="row-between"><div><h2 class="section-title" style="margin:0">Reusable Blocks</h2><div class="small muted" style="margin-top:5px">Linked building blocks for Sequence Timers.</div></div><span class="pill">${blocks.length}</span></div><div class="list" style="margin-top:12px">${blocks.length ? blocks.map(blockRow).join('') : `<div class="card empty">Create a Sequence Timer, then extract steps as reusable blocks.</div>`}</div></section>` : ''}`;
   if (state.librarySearchActive) {
     requestAnimationFrame(() => {
       const input = $('#library-search');
@@ -2018,8 +2109,152 @@ function renderLibrary() {
 }
 
 function routineRow(r) {
-  const params = r.type === 'custom' && r.config?.parameters?.length ? ` · ${r.config.parameters.length} parameter${r.config.parameters.length === 1 ? '' : 's'}` : '';
-  return `<div class="list-row"><button class="favorite-btn ${r.favorite ? 'on' : ''}" data-action="favorite-routine" data-id="${esc(r.id)}" aria-label="${r.favorite ? 'Remove from' : 'Add to'} favorites">★</button><button class="list-row-main" data-action="edit-routine" data-id="${esc(r.id)}"><div class="list-row-title">${esc(r.title)}</div><div class="list-row-meta">${esc(BUILDER_META[r.type]?.name || r.type)} · ${esc(typeSummary(r.type, r.config))}${params}</div></button><button class="play-btn" data-action="start-routine" data-id="${esc(r.id)}" aria-label="Start ${esc(r.title)}">▶</button></div>`;
+  r = normalizeSavedTimerRecord(r);
+  const params = r.type === 'custom' && r.config?.parameters?.length ? ` - ${r.config.parameters.length} param${r.config.parameters.length === 1 ? '' : 's'}` : '';
+  const duration = savedTimerDuration(r);
+  const collection = r.collection ? ` - ${r.collection}` : '';
+  const usage = r.useCount ? ` - used ${r.useCount}x` : '';
+  const selected = state.savedSelected.has(r.id);
+  const mainAction = state.savedSelectMode ? 'select-saved' : 'edit-routine';
+  return `<article class="saved-timer-row ${selected ? 'selected' : ''}" data-saved-accent="${esc(r.accent || 'default')}">
+    ${state.savedSelectMode ? `<button class="saved-select-check" data-action="select-saved" data-id="${esc(r.id)}" aria-pressed="${selected}" aria-label="${selected ? 'Deselect' : 'Select'} ${esc(r.title)}">${selected ? '&#10003;' : ''}</button>` : ''}
+    <div class="saved-timer-icon" aria-hidden="true">${esc(r.icon)}</div>
+    <button class="saved-timer-main" data-action="${mainAction}" data-id="${esc(r.id)}">
+      <span class="saved-timer-title">${esc(r.title)}</span>
+      <span class="saved-timer-meta">${esc(BUILDER_META[r.type]?.name || r.type)} - ${esc(duration != null ? durationLabel(duration) : typeSummary(r.type, r.config || {}))}${esc(collection)}${params}${usage}</span>
+      ${r.description ? `<span class="saved-timer-description">${esc(r.description)}</span>` : ''}
+      ${r.tags.length ? `<span class="saved-tag-row">${r.tags.slice(0,4).map((tag) => `<span class="saved-tag">#${esc(tag)}</span>`).join('')}</span>` : ''}
+    </button>
+    <div class="saved-timer-row-actions">
+      <button class="saved-mini-action ${r.pinned ? 'on' : ''}" data-action="pin-saved" data-id="${esc(r.id)}" aria-label="${r.pinned ? 'Unpin' : 'Pin'} ${esc(r.title)}">&#9670;</button>
+      <button class="saved-mini-action favorite ${r.favorite ? 'on' : ''}" data-action="favorite-routine" data-id="${esc(r.id)}" aria-label="${r.favorite ? 'Remove from' : 'Add to'} favorites">&#9733;</button>
+      <button class="saved-mini-action" data-action="saved-menu" data-id="${esc(r.id)}" aria-label="More actions for ${esc(r.title)}">...</button>
+      <button class="play-btn" data-action="start-routine" data-id="${esc(r.id)}" aria-label="Start ${esc(r.title)}">&#9654;</button>
+    </div>
+  </article>`;
+}
+
+function showSavedTimerMenu(id) {
+  const timer = state.routines.find((item) => item.id === id);
+  if (!timer) return toast('Saved timer not found.');
+  showSheet(timer.title, `<div class="sheet-list">
+    <button class="sheet-item" data-action="edit-routine" data-id="${esc(id)}"><div><strong>Edit timer</strong><div class="small muted">Change duration, sequence or timer-specific settings</div></div></button>
+    <button class="sheet-item" data-action="edit-saved-meta" data-id="${esc(id)}"><div><strong>Details & organization</strong><div class="small muted">Icon, accent, description, collection and tags</div></div></button>
+    <button class="sheet-item" data-action="move-saved" data-id="${esc(id)}"><div><strong>Move to collection</strong><div class="small muted">${esc(timer.collection || 'Unsorted')}</div></div></button>
+    <button class="sheet-item" data-action="duplicate-saved" data-id="${esc(id)}"><div><strong>Duplicate</strong><div class="small muted">Create an independent copy</div></div></button>
+    <button class="sheet-item" data-action="archive-saved" data-id="${esc(id)}"><div><strong>${timer.archived ? 'Restore from archive' : 'Archive'}</strong><div class="small muted">Keep it without showing it in normal views</div></div></button>
+    <button class="sheet-item" data-action="export-routine-package" data-id="${esc(id)}"><div><strong>Export</strong><div class="small muted">Portable Timer package</div></div></button>
+    <button class="sheet-item danger-text" data-action="delete-routine" data-id="${esc(id)}"><div><strong>Delete</strong><div class="small muted">Session history is kept</div></div></button>
+  </div>`);
+}
+
+function showSavedTimerMetadata(id) {
+  const timer = state.routines.find((item) => item.id === id);
+  if (!timer) return toast('Saved timer not found.');
+  const r = normalizeSavedTimerRecord(timer);
+  const collections = savedTimerCollections();
+  showSheet('Saved Timer Details', `<div class="stack">
+    <div class="saved-meta-preview" data-saved-accent="${esc(r.accent)}"><div class="saved-timer-icon">${esc(r.icon)}</div><div><strong>${esc(r.title)}</strong><div class="small muted">${esc(BUILDER_META[r.type]?.name || r.type)}</div></div></div>
+    <label class="field"><span>Name</span><input class="input" data-saved-meta="title" maxlength="120" value="${esc(r.title)}"></label>
+    <div class="input-row"><label class="field"><span>Icon</span><input class="input" data-saved-meta="icon" maxlength="8" value="${esc(r.icon)}"></label><label class="field"><span>Accent</span><select class="select" data-saved-meta="accent">${SAVED_TIMER_ACCENTS.map((accent) => `<option value="${accent}" ${r.accent === accent ? 'selected' : ''}>${accent[0].toUpperCase()+accent.slice(1)}</option>`).join('')}</select></label></div>
+    <label class="field"><span>Description</span><textarea class="input" rows="3" maxlength="500" data-saved-meta="description" placeholder="Optional note about when or why you use this timer">${esc(r.description)}</textarea></label>
+    <label class="field"><span>Collection</span><select class="select" data-saved-meta="collection"><option value="">Unsorted</option>${collections.map((name) => `<option value="${esc(name)}" ${r.collection === name ? 'selected' : ''}>${esc(name)}</option>`).join('')}</select></label>
+    <label class="field"><span>Tags</span><input class="input" data-saved-meta="tags" value="${esc(r.tags.join(', '))}" placeholder="study, focus, evening"></label>
+    <div class="row" style="flex-wrap:wrap"><button class="btn primary" data-action="save-saved-meta" data-id="${esc(id)}">Save details</button><button class="btn" data-action="manage-saved-collections">Manage collections</button></div>
+  </div>`);
+}
+
+async function saveSavedTimerMetadata(id) {
+  const timer = state.routines.find((item) => item.id === id);
+  const root = $('#sheet-root');
+  if (!timer || !root) return;
+  const value = (field) => root.querySelector(`[data-saved-meta="${field}"]`)?.value ?? '';
+  const nextTitle = String(value('title')).trim() || timer.title || 'Saved Timer';
+  const next = normalizeSavedTimerRecord({
+    ...timer,
+    title: nextTitle,
+    config: timer.config ? { ...structuredClone(timer.config), title: nextTitle } : timer.config,
+    icon: value('icon'),
+    accent: value('accent'),
+    description: value('description'),
+    collection: value('collection'),
+    tags: normalizeSavedTimerTags(value('tags'))
+  });
+  await state.db.saveRoutine(next);
+  await loadCollections();
+  closeSheet();
+  renderLibrary();
+  toast('Saved Timer details updated.');
+}
+
+function showMoveSavedTimers(ids) {
+  const valid = [...new Set(ids)].filter((id) => state.routines.some((timer) => timer.id === id));
+  if (!valid.length) return toast('Select at least one Saved Timer.');
+  state.pendingSavedMoveIds = valid;
+  const collections = savedTimerCollections();
+  showSheet(valid.length === 1 ? 'Move Saved Timer' : `Move ${valid.length} Saved Timers`, `<div class="stack"><label class="field"><span>Collection</span><select class="select" data-saved-move-collection><option value="">Unsorted</option>${collections.map((name) => `<option value="${esc(name)}">${esc(name)}</option>`).join('')}</select></label><button class="btn primary" data-action="apply-saved-move">Move</button></div>`);
+}
+
+async function applySavedMove() {
+  const collection = $('#sheet-root [data-saved-move-collection]')?.value || '';
+  for (const id of state.pendingSavedMoveIds) {
+    const timer = state.routines.find((item) => item.id === id);
+    if (timer) await state.db.saveRoutine({ ...timer, collection });
+  }
+  state.pendingSavedMoveIds = [];
+  await loadCollections();
+  closeSheet();
+  renderLibrary();
+  toast('Saved Timers moved.');
+}
+
+function showSavedCollectionsManager() {
+  const collections = savedTimerCollections();
+  showSheet('Collections', `<div class="stack"><div class="small muted">Start with Cooking, Study, Workout, Church and Music, then add whatever else you need.</div><div class="saved-collection-list">${collections.length ? collections.map((name) => { const count = state.routines.filter((timer) => timer.collection === name).length; return `<div class="saved-collection-row"><span><strong>${esc(name)}</strong><small>${count} timer${count === 1 ? '' : 's'}</small></span><button class="icon-btn danger-text" data-action="delete-saved-collection" data-collection="${esc(name)}" aria-label="Delete collection ${esc(name)}">x</button></div>`; }).join('') : '<div class="empty">No collections yet.</div>'}</div><div class="row"><input class="input" data-new-saved-collection maxlength="40" placeholder="New collection name"><button class="btn primary" data-action="add-saved-collection">Add</button></div></div>`);
+}
+
+async function addSavedCollection() {
+  const input = $('#sheet-root [data-new-saved-collection]');
+  const name = normalizeSavedTimerCollections([input?.value || ''])[0];
+  if (!name) return toast('Enter a collection name.');
+  const current = savedTimerCollections();
+  if (current.some((item) => item.toLowerCase() === name.toLowerCase())) return toast('That collection already exists.');
+  state.settings.savedTimerCollections = normalizeSavedTimerCollections([...(state.settings.savedTimerCollections || []), name]);
+  await state.db.saveSettings(state.settings);
+  showSavedCollectionsManager();
+}
+
+async function deleteSavedCollection(name) {
+  name = String(name || '');
+  if (!name) return;
+  const affected = state.routines.filter((timer) => timer.collection === name);
+  if (affected.length && !confirm(`Remove collection "${name}" and move ${affected.length} timer${affected.length === 1 ? '' : 's'} to Unsorted?`)) return;
+  for (const timer of affected) await state.db.saveRoutine({ ...timer, collection: '' });
+  state.settings.savedTimerCollections = normalizeSavedTimerCollections((state.settings.savedTimerCollections || []).filter((item) => item !== name));
+  await state.db.saveSettings(state.settings);
+  await loadCollections();
+  if (state.libraryView === `collection:${name}`) state.libraryView = 'all';
+  showSavedCollectionsManager();
+}
+
+async function duplicateSavedTimer(id) {
+  const timer = state.routines.find((item) => item.id === id);
+  if (!timer) return toast('Saved timer not found.');
+  const copy = duplicateSavedTimerRecord(timer, { id: uid('routine') });
+  await state.db.saveRoutine(copy);
+  await loadCollections();
+  closeSheet();
+  renderLibrary();
+  toast('Saved Timer duplicated.');
+}
+
+async function setSavedTimerFlag(id, key, value = null) {
+  const timer = state.routines.find((item) => item.id === id);
+  if (!timer) return;
+  const next = { ...timer, [key]: value == null ? !timer[key] : Boolean(value) };
+  await state.db.saveRoutine(next);
+  await loadCollections();
+  if (state.route === 'library') renderLibrary();
 }
 
 function nodesReferenceBlock(nodes, blockId) {
@@ -2680,8 +2915,13 @@ async function loadCollections({ fullHistory = (state.route === 'history' && sta
     state.db.listCustomSoundMetadata().catch(() => []),
     state.db.recentSessions(historyLimit).catch(() => [])
   ]);
-  state.routines = routines;
   state.blocks = blocks;
+  const normalized = routines.map((timer) => normalizeSavedTimerRecord(timer));
+  state.routines = normalized;
+  const migrations = routines.map((timer, index) => needsSavedTimerMigration(timer)
+    ? state.db.saveRoutine(normalized[index], { preserveUpdatedAt: true }).catch(() => null)
+    : null).filter(Boolean);
+  if (migrations.length) await Promise.allSettled(migrations);
   state.cueProfiles = cueProfiles;
   state.customSounds = customSounds;
   state.sessions = sessions;
@@ -2901,6 +3141,7 @@ document.addEventListener('submit', async (e) => {
 
 document.addEventListener('change', async (e) => {
   updateBuilderInput(e.target); updateBuilderCueInput(e.target); updateCircuitInput(e.target); updateCustomInput(e.target); updateCustomCueInput(e.target); updateCustomParameterInput(e.target); updateBlockParameterInput(e.target);
+  if (e.target.matches?.('[data-saved-sort]')) { state.librarySort = e.target.value || 'recent'; return renderLibrary(); }
   if (e.target.matches?.('[data-history-mode]')) { state.historyMode = e.target.value || 'all'; state.historyVisible = 100; return renderHistory(); }
   if (e.target.dataset.setting) {
     const key = e.target.dataset.setting;
@@ -2996,19 +3237,62 @@ document.addEventListener('click', async (e) => {
     return renderTimerHome();
   }
   if (action === 'customize-quick') return showQuickCustomizeSheet();
+  if (action === 'save-quick-timer') return saveQuickTimerPreset();
   if (action === 'save-quick-customize') return saveQuickCustomizeSheet();
   if (action === 'reset-quick-customize') return resetQuickCustomizeSheet();
 
+  if (action === 'saved-view') { state.libraryView = btn.dataset.view || 'all'; state.savedSelected.clear(); return renderLibrary(); }
+  if (action === 'toggle-saved-select-mode') { state.savedSelectMode = !state.savedSelectMode; if (!state.savedSelectMode) state.savedSelected.clear(); return renderLibrary(); }
+  if (action === 'select-saved') { const id = btn.dataset.id; if (state.savedSelected.has(id)) state.savedSelected.delete(id); else state.savedSelected.add(id); return renderLibrary(); }
+  if (action === 'select-all-visible') { for (const timer of visibleSavedTimers()) state.savedSelected.add(timer.id); return renderLibrary(); }
+  if (action === 'saved-menu') return showSavedTimerMenu(btn.dataset.id);
+  if (action === 'edit-saved-meta') return showSavedTimerMetadata(btn.dataset.id);
+  if (action === 'save-saved-meta') return saveSavedTimerMetadata(btn.dataset.id);
+  if (action === 'pin-saved') return setSavedTimerFlag(btn.dataset.id, 'pinned');
+  if (action === 'duplicate-saved') return duplicateSavedTimer(btn.dataset.id);
+  if (action === 'archive-saved') {
+    const timer = state.routines.find((item) => item.id === btn.dataset.id);
+    if (timer) { await setSavedTimerFlag(timer.id, 'archived'); closeSheet(); }
+    return;
+  }
+  if (action === 'move-saved') return showMoveSavedTimers([btn.dataset.id]);
+  if (action === 'bulk-saved-move') return showMoveSavedTimers([...state.savedSelected]);
+  if (action === 'apply-saved-move') return applySavedMove();
+  if (action === 'bulk-saved-archive' || action === 'bulk-saved-restore') {
+    const archived = action === 'bulk-saved-archive';
+    for (const id of state.savedSelected) {
+      const timer = state.routines.find((item) => item.id === id);
+      if (timer) await state.db.saveRoutine({ ...timer, archived });
+    }
+    state.savedSelected.clear();
+    await loadCollections();
+    renderLibrary();
+    return toast(archived ? 'Saved Timers archived.' : 'Saved Timers restored.');
+  }
+  if (action === 'bulk-saved-delete') {
+    const ids = [...state.savedSelected];
+    if (!ids.length || !confirm(`Delete ${ids.length} Saved Timer${ids.length === 1 ? '' : 's'}? Session history will be kept.`)) return;
+    for (const id of ids) await state.db.delete('routines', id);
+    state.savedSelected.clear();
+    await loadCollections();
+    renderLibrary();
+    return toast('Saved Timers deleted.');
+  }
+  if (action === 'manage-saved-collections') return showSavedCollectionsManager();
+  if (action === 'add-saved-collection') return addSavedCollection();
+  if (action === 'delete-saved-collection') return deleteSavedCollection(btn.dataset.collection);
   if (action === 'start-routine') return startRoutine(btn.dataset.id);
-  if (action === 'edit-routine') { const r = state.routines.find((x) => x.id === btn.dataset.id); if (r) return openBuilder(r.type, r); }
+  if (action === 'edit-routine') { const r = state.routines.find((x) => x.id === btn.dataset.id); if (r) { closeSheet(); return openBuilder(r.type, r); } }
   if (action === 'edit-block') { const block = state.blocks.find((item) => item.id === btn.dataset.id); if (block) return openBlockEditor(block); }
   if (action === 'favorite-routine') { const r = state.routines.find((x) => x.id === btn.dataset.id); if (r) { r.favorite = !r.favorite; await state.db.saveRoutine(r); await loadCollections(); renderLibrary(); } return; }
   if (action === 'delete-routine') {
     const r = state.routines.find((x) => x.id === btn.dataset.id);
-    if (r && confirm(`Delete “${r.title}”? Session history will be kept.`)) {
+    if (r && confirm(`Delete "${r.title}"? Session history will be kept.`)) {
       await state.db.delete('routines', r.id);
+      state.savedSelected.delete(r.id);
       state.builder = null; state.builderEditingId = null; state.route = 'library';
-      await loadCollections(); render(); toast('Routine deleted.');
+      closeSheet();
+      await loadCollections(); render(); toast('Saved Timer deleted.');
     }
     return;
   }

@@ -1,5 +1,6 @@
 import { canonicalStringify, hashCanonical } from './resilience.js';
 import { DEFAULT_QUICK_PRESETS, DEFAULT_QUICK_ADJUSTMENTS } from './quick.js';
+import { DEFAULT_SAVED_TIMER_COLLECTIONS, normalizeSavedTimerRecord } from './saved.js';
 
 const DB_NAME = 'thiepn-timer';
 const DB_VERSION = 6;
@@ -90,6 +91,7 @@ export const defaultSettings = {
   quickPresets: [...DEFAULT_QUICK_PRESETS],
   quickRecentDurations: [],
   quickAdjustments: [...DEFAULT_QUICK_ADJUSTMENTS],
+  savedTimerCollections: [...DEFAULT_SAVED_TIMER_COLLECTIONS],
   startPresetImmediately: false, // retained for backup compatibility; v2.2 pinned durations are always one-tap starts
   wallAutoHide: true
 };
@@ -442,16 +444,17 @@ export class TimerDB {
     });
   }
 
-  async saveRoutine(routine) {
+  async saveRoutine(routine, { preserveUpdatedAt = false } = {}) {
     const now = Date.now();
     const previous = routine?.id ? await this.get('routines', routine.id).catch(() => null) : null;
-    return this.put('routines', {
+    const normalized = normalizeSavedTimerRecord({
       favorite: false,
       createdAt: previous?.createdAt || routine?.createdAt || now,
       useCount: previous?.useCount || 0,
       ...routine,
-      updatedAt: now
+      updatedAt: preserveUpdatedAt ? (routine?.updatedAt || previous?.updatedAt || now) : now
     });
+    return this.put('routines', normalized);
   }
 
   async saveBlock(block) {
@@ -539,7 +542,7 @@ export class TimerDB {
       const { dataBase64, ...rest } = sound;
       await this.put('customSounds', { ...rest, data: base64ToArrayBuffer(dataBase64) });
     }
-    if (selected.routines) for (const routine of data.routines) if (routine?.id && routine?.type && routine?.config) await this.put('routines', routine);
+    if (selected.routines) for (const routine of data.routines) if (routine?.id && routine?.type && routine?.config) await this.put('routines', normalizeSavedTimerRecord(routine));
     if (selected.sessions) for (const session of data.sessions) if (session?.id && Number.isFinite(session?.startedAt)) await this.put('sessions', session);
     if (selected.settings && data.settings) await this.saveSettings({ ...defaultSettings, ...data.settings });
     for (const item of quarantine || []) await this.quarantineRecord(item);

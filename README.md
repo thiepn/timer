@@ -1,6 +1,6 @@
 # Timer
 
-Current app version: **2.2.0**.
+Current app version: **2.3.0**.
 
 A local-first universal timer built as a zero-build PWA for GitHub Pages, ranging from simple countdowns and stopwatches to programmable interval and sequence timers.
 
@@ -16,8 +16,8 @@ A local-first universal timer built as a zero-build PWA for GitHub Pages, rangin
 - Boxing rounds with correct optional final-rest behavior
 - Run / Walk intervals
 - Ladder and pyramid generators
-- Custom routines with nested sections/patterns, timed/manual steps, launch parameters, safe arithmetic formulas, progression generators, seeded random pools, reusable linked blocks, duration scaling/target fitting, deterministic compilation and plan preview
-- Saved routine library + favorites + search + routine deletion
+- Sequence timers with nested sections/patterns, timed/manual steps, launch parameters, safe arithmetic formulas, progression generators, seeded random pools, reusable linked blocks, duration scaling/target fitting, deterministic compilation and plan preview
+- Universal Saved Timers for countdowns, stopwatches, intervals, sequences and specialized templates, with pin/favorite/archive, icons, accents, descriptions, collections, tags, sorting, duplicate and bulk organization
 - Session history with semantic event timelines, calendar/stats views, actual-vs-planned review, objective comparable records, mode-specific analytics, notes, filtering and CSV/JSON export
 - Focus, Classic, Strength and Wall live layouts
 - Pause/resume, skip, previous, restart, time adjustment and fullscreen
