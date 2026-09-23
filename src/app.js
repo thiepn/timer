@@ -2325,8 +2325,9 @@ async function handleCoordinatorEvent(event) {
   }
   if (event.type === 'runtime-terminal') {
     const wasFocused = state.activeTimerId === runtimeId;
+    const queueHandled = await handleQueueRuntimeTerminal(runtime, event);
     let chained = null;
-    if (event.startNext && !event.cancelled) {
+    if (!queueHandled && event.startNext && !event.cancelled) {
       const nextRoutineId = runtime?.meta?.completionNextRoutineId;
       if (nextRoutineId) {
         chained = await startSavedRoutineAutomated(nextRoutineId, {
@@ -2339,7 +2340,7 @@ async function handleCoordinatorEvent(event) {
       }
     }
     await finalizeRuntime(runtimeId, event.snapshot, Boolean(event.cancelled));
-    if (event.startNext && !chained) toast('The configured next Saved Timer could not be started.', 4200);
+    if (!queueHandled && event.startNext && !chained) toast('The configured next Saved Timer could not be started.', 4200);
   }
 }
 
