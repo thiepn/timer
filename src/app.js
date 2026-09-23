@@ -25,7 +25,7 @@ const ms = (seconds) => Math.max(0, Math.round(Number(seconds || 0) * 1000));
 const sec = (milliseconds) => Math.round(Number(milliseconds || 0) / 1000);
 const mins = (minutes) => ms(Number(minutes || 0) * 60);
 const pct = (n) => `${Math.round(clamp(n || 0, 0, 1) * 100)}%`;
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.4.0';
 
 const BUILDER_META = {
   countdown: { name: 'Countdown', desc: 'Reusable fixed-duration countdown' },
@@ -182,6 +182,7 @@ const state = {
   savedSelectMode: false,
   savedSelected: new Set(),
   pendingSavedMoveIds: [],
+  workspaceFocusId: null,
   customClipboard: null,
   pendingStart: null,
   historyView: 'list',
@@ -720,6 +721,7 @@ function render() {
   document.title = state.builder ? `${translateSource(BUILDER_META[state.builder.type]?.name || 'Builder', currentLocale())} — Timer` : `${translateSource(state.route[0].toUpperCase() + state.route.slice(1), currentLocale())} — Timer`;
   if (state.completion) return renderCompletion();
   if (state.builder) return renderBuilder();
+  if (state.route === 'workspace') return renderMultiTimerWorkspace();
   if (state.route === 'library') return renderLibrary();
   if (state.route === 'history') return renderHistory();
   if (state.route === 'settings') return renderSettings();
@@ -736,7 +738,7 @@ function renderTimerHome() {
   main.innerHTML = `
     <div class="page-head home-head"><div><h1>Timer</h1><p>One timer or many. Start in seconds.</p></div>${coordinator.size() ? `<span class="pill active-count-pill">${coordinator.size()} active</span>` : ''}</div>
 
-    ${coordinator.size() ? `<section class="section active-timers-section home-active-section"><div class="row-between"><div><h2 class="section-title" style="margin:0">Active Timers</h2><div class="small muted" style="margin-top:4px">All timers keep running independently.</div></div><span class="pill">${coordinator.size()}</span></div><div class="active-timer-grid">${coordinator.list().map(activeTimerCard).join('')}</div></section>` : ''}
+    ${coordinator.size() ? `<section class="section active-timers-section home-active-section"><div class="row-between"><div><h2 class="section-title" style="margin:0">Active Timers</h2><div class="small muted" style="margin-top:4px">All timers keep running independently.</div></div><div class="row"><span class="pill">${coordinator.size()}</span><button class="btn compact-btn" data-action="open-workspace">Workspace</button></div></div><div class="active-timer-grid">${coordinator.list().map(activeTimerCard).join('')}</div></section>` : ''}
 
     <section class="card quick-card quick-card-v2">
       <div class="row-between quick-card-head"><div><div class="quick-label">Quick Timer</div><div class="small muted">Try 90s, 1:30, 3m, or 1h 20m.</div></div><div class="row quick-head-actions"><button class="btn ghost compact-btn" data-action="save-quick-timer">Save</button><button class="btn ghost compact-btn" data-action="customize-quick">Customize</button></div></div>
