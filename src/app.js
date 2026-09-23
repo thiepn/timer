@@ -993,6 +993,10 @@ async function handleQueueRuntimeTerminal(runtime, event) {
     await clearActiveQueueState();
     return true;
   }
+  if (event.snapshot?.completionReason === 'user-ended') {
+    await clearActiveQueueState();
+    return true;
+  }
   const action = normalizeQueueStepAction(item.action);
   if (action === QUEUE_STEP_ACTIONS.STOP) {
     const advanced = advanceQueueRun(run, { skipped: false });
