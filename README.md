@@ -78,6 +78,11 @@ The app uses relative paths and is ready to be served from the repository root w
 
 The timer engine is timestamp-based; rendering frequency is not the source of timing truth.
 
+
+## Visual design program
+
+The V2–V10 visual overhaul is governed by the Phase V1 design artifacts in [`design/`](./design/README.md). The locked art direction is **Precision instrument + ambient depth + expressive state**. Production screen restyling begins in V2; V1 establishes the audit, visual contract and QA baseline only.
+
 ## v1.0.1 hardening
 
 - Fixed Boxing always adding a final rest even when disabled.
