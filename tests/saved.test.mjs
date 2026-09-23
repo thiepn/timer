@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { TimerDB } from '../src/db.js';
 import {
   SAVED_TIMER_SCHEMA_VERSION,
   DEFAULT_SAVED_TIMER_COLLECTIONS,
@@ -32,6 +33,37 @@ test('legacy routines normalize into universal saved timers without dropping tim
   assert.deepEqual(migrated.tags, []);
   assert.equal(needsSavedTimerMigration(legacy), true);
   assert.equal(needsSavedTimerMigration(migrated), false);
+});
+
+test('legacy routine persistence upgrades in place without dropping user data', async () => {
+  const db = new TimerDB();
+  await db.open();
+  const legacy = {
+    id: 'legacy-persisted',
+    type: 'interval',
+    title: 'Legacy Focus',
+    config: { title: 'Legacy Focus', work: 50, rest: 10, rounds: 8, prepare: 5, finalRest: false },
+    cueOverrides: { warningSeconds: 7, halfwayCue: true },
+    favorite: true,
+    createdAt: 111,
+    updatedAt: 222,
+    useCount: 9,
+    lastUsedAt: 210
+  };
+  await db.saveRoutine(legacy, { preserveUpdatedAt: true });
+  const saved = await db.get('routines', legacy.id);
+  assert.equal(saved.savedTimerSchemaVersion, SAVED_TIMER_SCHEMA_VERSION);
+  assert.equal(saved.id, legacy.id);
+  assert.equal(saved.title, legacy.title);
+  assert.deepEqual(saved.config, legacy.config);
+  assert.deepEqual(saved.cueOverrides, legacy.cueOverrides);
+  assert.equal(saved.favorite, true);
+  assert.equal(saved.useCount, 9);
+  assert.equal(saved.lastUsedAt, 210);
+  assert.equal(saved.createdAt, 111);
+  assert.equal(saved.updatedAt, 222);
+  assert.deepEqual(saved.tags, []);
+  assert.equal(saved.archived, false);
 });
 
 test('tag and collection normalization is bounded, unique and stable', () => {
