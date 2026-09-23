@@ -3526,14 +3526,16 @@ async function installApp() {
 
 async function loadCollections({ fullHistory = (state.route === 'history' && state.historyLoadedAll) } = {}) {
   const historyLimit = fullHistory ? 10000 : 100;
-  const [routines, blocks, cueProfiles, customSounds, sessions] = await Promise.all([
+  const [routines, queues, blocks, cueProfiles, customSounds, sessions] = await Promise.all([
     state.db.all('routines').catch(() => []),
+    state.db.all('queues').catch(() => []),
     state.db.all('blocks').catch(() => []),
     state.db.all('cueProfiles').catch(() => []),
     state.db.listCustomSoundMetadata().catch(() => []),
     state.db.recentSessions(historyLimit).catch(() => [])
   ]);
   state.blocks = blocks;
+  state.queues = queues.map((queue) => normalizeQueuePreset(queue)).sort((a,b) => (b.lastUsedAt || b.updatedAt || 0) - (a.lastUsedAt || a.updatedAt || 0));
   const normalized = routines.map((timer) => normalizeSavedTimerRecord(timer));
   state.routines = normalized;
   const migrations = routines.map((timer, index) => needsSavedTimerMigration(timer)
