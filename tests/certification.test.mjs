@@ -173,11 +173,12 @@ test('v2.1 persistence source declares multi-runtime schema and singleton migrat
   assert.match(dbSource, /legacyActive\.delete\('current'\)/);
 });
 
-test('v2.2 release metadata and offline shell include coordinator and quick parser', () => {
+test('v2.3 release metadata and offline shell include Saved Timer model', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
   const sw = fs.readFileSync(path.join(repoRoot, 'sw.js'), 'utf8');
-  assert.equal(pkg.version, '2.2.0');
-  assert.match(sw, /thiepn-timer-v14/);
+  assert.equal(pkg.version, '2.3.0');
+  assert.match(sw, /thiepn-timer-v15/);
   assert.match(sw, /\.\/src\/coordinator\.js/);
   assert.match(sw, /\.\/src\/quick\.js/);
+  assert.match(sw, /\.\/src\/saved\.js/);
 });
