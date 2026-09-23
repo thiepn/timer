@@ -51,6 +51,8 @@ const DE = {
   'Ladder': 'Leiter',
   'Pyramid': 'Pyramide',
   'Custom Routine': 'Benutzerdefinierte Routine',
+  'Sequence Timer': 'Sequenz-Timer',
+  'Reusable fixed-duration countdown': 'Wiederverwendbarer Countdown mit fester Dauer',
   'Dark': 'Dunkel',
   'Light': 'Hell',
   'Interval progress': 'Intervallfortschritt',
