@@ -3859,10 +3859,16 @@ document.addEventListener('click', async (e) => {
   if (action === 'focus-active') { closeSheet(); return focusRuntime(btn.dataset.id); }
   if (action === 'active-toggle') {
     const id = btn.dataset.id;
-    coordinator.togglePause(id);
-    await persistRuntime(id);
-    updateActiveTimerCards();
-    broadcastActiveSnapshot();
+    if (state.activeQueue?.currentRuntimeId === id) {
+      if (state.activeQueue.status === 'paused') await resumeActiveQueue();
+      else await pauseActiveQueue();
+    } else {
+      coordinator.togglePause(id);
+      await persistRuntime(id);
+      updateActiveTimerCards();
+      broadcastActiveSnapshot();
+    }
+    if (state.route === 'workspace' && !state.engine) renderMultiTimerWorkspace();
     return;
   }
   if (action === 'active-adjust') {
@@ -4145,7 +4151,13 @@ document.addEventListener('click', async (e) => {
   if (action === 'clear-history') { if (confirm('Clear all session history? Saved routines will remain.')) { await state.db.clear('sessions'); await loadCollections(); renderHistory(); toast('History cleared.'); } return; }
   if (action === 'install') return installApp();
 
-  if (action === 'live-pause') { coordinator.togglePause(state.activeTimerId); updateLiveView(true); startLiveScheduler(); return; }
+  if (action === 'live-pause') {
+    if (state.activeQueue?.currentRuntimeId === state.activeTimerId) {
+      if (state.activeQueue.status === 'paused') await resumeActiveQueue();
+      else await pauseActiveQueue();
+    } else coordinator.togglePause(state.activeTimerId);
+    updateLiveView(true); startLiveScheduler(); return;
+  }
   if (action === 'live-adjust') { coordinator.command(state.activeTimerId, 'adjust', Number(btn.dataset.delta)); updateLiveView(true); return; }
   if (action === 'live-next') { coordinator.command(state.activeTimerId, 'next'); updateLiveView(true); return; }
   if (action === 'live-done') { coordinator.command(state.activeTimerId, 'manual'); updateLiveView(true); return; }
