@@ -2032,18 +2032,71 @@ function renderCompletion() {
   </div>`;
 }
 
-function renderLibrary() {
+function savedTimerCollections() {
+  const actual = state.routines.map((timer) => timer.collection).filter(Boolean);
+  return normalizeSavedTimerCollections([...(state.settings.savedTimerCollections || DEFAULT_SAVED_TIMER_COLLECTIONS), ...actual]);
+}
+
+function savedTimerDuration(timer) {
+  if (timer?.durationMs != null && Number.isFinite(Number(timer.durationMs))) return Math.max(0, Number(timer.durationMs));
+  try {
+    const estimate = estimatePlanDuration(planFromType(timer.type, timer.config || {}, { blocks: state.blocks }));
+    return Number.isFinite(estimate) && estimate >= 0 ? estimate : null;
+  } catch { return null; }
+}
+
+function libraryViewLabel(view = state.libraryView) {
+  if (view === 'all') return 'All Saved Timers';
+  if (view === 'pinned') return 'Pinned';
+  if (view === 'favorites') return 'Favorites';
+  if (view === 'archived') return 'Archive';
+  if (view.startsWith('collection:')) return view.slice('collection:'.length);
+  return 'Saved Timers';
+}
+
+function visibleSavedTimers() {
   const query = state.libraryQuery.trim().toLowerCase();
-  const matches = (r) => !query || `${r.title || ''} ${BUILDER_META[r.type]?.name || r.type || ''} ${typeSummary(r.type, r.config || {})}`.toLowerCase().includes(query);
+  return state.routines.filter((timer) => {
+    if (!savedTimerMatchesView(timer, state.libraryView)) return false;
+    if (!query) return true;
+    return savedTimerSearchText(
+      timer,
+      BUILDER_META[timer.type]?.name || timer.type || '',
+      typeSummary(timer.type, timer.config || {})
+    ).includes(query);
+  });
+}
+
+function renderLibrary() {
+  for (const id of [...state.savedSelected]) if (!state.routines.some((timer) => timer.id === id)) state.savedSelected.delete(id);
+  const query = state.libraryQuery.trim().toLowerCase();
+  const routines = sortSavedTimers(visibleSavedTimers(), state.librarySort, savedTimerDuration);
   const blockMatches = (block) => !query || `${block.title || ''} reusable block ${(block.parameters || []).map((parameter) => parameter.label).join(' ')}`.toLowerCase().includes(query);
-  const favorites = state.routines.filter((r) => r.favorite && matches(r));
-  const routines = [...state.routines].filter(matches).sort((a, b) => (b.lastUsedAt || b.updatedAt || 0) - (a.lastUsedAt || a.updatedAt || 0));
   const blocks = [...state.blocks].filter(blockMatches).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-  main.innerHTML = `<div class="page-head"><div><h1>Library</h1><p>Saved timers, routines, and reusable blocks.</p></div><button class="btn primary" data-action="create">＋ Create</button></div>
-    <div class="field"><label for="library-search">Search library</label><input id="library-search" class="input" type="search" data-library-search value="${esc(state.libraryQuery)}" placeholder="Search routines or blocks"></div>
-    ${favorites.length ? `<section class="section"><h2 class="section-title">Favorites</h2><div class="list">${favorites.map(routineRow).join('')}</div></section>` : ''}
-    <section class="section"><div class="row-between"><h2 class="section-title" style="margin:0">My Routines</h2><span class="pill">${routines.length}</span></div><div class="list" style="margin-top:12px">${routines.length ? routines.map(routineRow).join('') : `<div class="card empty"><p>${query ? 'No routines match your search.' : 'No saved routines yet.'}</p>${query ? '' : '<button class="btn primary" data-action="create">Create timer</button>'}</div>`}</div></section>
-    ${(blocks.length || (!query && state.blocks.length === 0)) ? `<section class="section"><div class="row-between"><div><h2 class="section-title" style="margin:0">Reusable Blocks</h2><div class="small muted" style="margin-top:5px">Linked building blocks for Custom Routines.</div></div><span class="pill">${blocks.length}</span></div><div class="list" style="margin-top:12px">${blocks.length ? blocks.map(blockRow).join('') : `<div class="card empty">Create a Custom Routine, then use ▣ on an item to extract it as a reusable block.</div>`}</div></section>` : ''}`;
+  const collections = savedTimerCollections();
+  const selectedCount = state.savedSelected.size;
+  const viewChip = (value, label) => `<button class="library-filter-chip ${state.libraryView === value ? 'active' : ''}" data-action="saved-view" data-view="${esc(value)}">${esc(label)}</button>`;
+
+  main.innerHTML = `<div class="page-head"><div><h1>Saved Timers</h1><p>Presets, sequences and specialized timers in one library.</p></div><button class="btn primary" data-action="create">+ Create</button></div>
+    <div class="saved-library-toolbar card card-pad">
+      <div class="field"><label for="library-search">Search saved timers or blocks</label><input id="library-search" class="input" type="search" data-library-search value="${esc(state.libraryQuery)}" placeholder="Name, description, collection, tag, or timer type"></div>
+      <div class="library-filter-strip" aria-label="Saved timer views">
+        ${viewChip('all','All')}${viewChip('pinned','Pinned')}${viewChip('favorites','Favorites')}${viewChip('archived','Archive')}
+        ${collections.map((name) => viewChip(`collection:${name}`, name)).join('')}
+      </div>
+      <div class="library-control-row">
+        <label class="library-sort-label"><span>Sort</span><select class="select" data-saved-sort>
+          <option value="recent" ${state.librarySort === 'recent' ? 'selected' : ''}>Recent</option>
+          <option value="most-used" ${state.librarySort === 'most-used' ? 'selected' : ''}>Most used</option>
+          <option value="alphabetical" ${state.librarySort === 'alphabetical' ? 'selected' : ''}>Alphabetical</option>
+          <option value="duration" ${state.librarySort === 'duration' ? 'selected' : ''}>Duration</option>
+        </select></label>
+        <div class="row library-toolbar-actions"><button class="btn" data-action="manage-saved-collections">Collections</button><button class="btn ${state.savedSelectMode ? 'primary' : ''}" data-action="toggle-saved-select-mode">${state.savedSelectMode ? 'Done' : 'Select'}</button></div>
+      </div>
+    </div>
+    ${state.savedSelectMode ? `<div class="saved-bulk-bar card"><strong>${selectedCount} selected</strong><div class="saved-bulk-actions"><button class="btn compact-btn" data-action="select-all-visible">All</button><button class="btn compact-btn" data-action="bulk-saved-move" ${selectedCount ? '' : 'disabled'}>Move</button><button class="btn compact-btn" data-action="${state.libraryView === 'archived' ? 'bulk-saved-restore' : 'bulk-saved-archive'}" ${selectedCount ? '' : 'disabled'}>${state.libraryView === 'archived' ? 'Restore' : 'Archive'}</button><button class="btn compact-btn danger" data-action="bulk-saved-delete" ${selectedCount ? '' : 'disabled'}>Delete</button></div></div>` : ''}
+    <section class="section"><div class="row-between"><div><h2 class="section-title" style="margin:0">${esc(libraryViewLabel())}</h2><div class="small muted" style="margin-top:5px">${esc(state.librarySort === 'most-used' ? 'Sorted by usage' : state.librarySort === 'alphabetical' ? 'Sorted A-Z' : state.librarySort === 'duration' ? 'Shortest finite duration first' : 'Most recently used or changed first')}</div></div><span class="pill">${routines.length}</span></div><div class="saved-timer-list" style="margin-top:12px">${routines.length ? routines.map(routineRow).join('') : `<div class="card empty"><p>${query ? 'No saved timers match your search.' : state.libraryView === 'archived' ? 'Archive is empty.' : 'No saved timers in this view.'}</p>${query || state.libraryView === 'archived' ? '' : '<button class="btn primary" data-action="create">Create timer</button>'}</div>`}</div></section>
+    ${(blocks.length || (!query && state.blocks.length === 0)) ? `<section class="section"><div class="row-between"><div><h2 class="section-title" style="margin:0">Reusable Blocks</h2><div class="small muted" style="margin-top:5px">Linked building blocks for Sequence Timers.</div></div><span class="pill">${blocks.length}</span></div><div class="list" style="margin-top:12px">${blocks.length ? blocks.map(blockRow).join('') : `<div class="card empty">Create a Sequence Timer, then extract steps as reusable blocks.</div>`}</div></section>` : ''}`;
   if (state.librarySearchActive) {
     requestAnimationFrame(() => {
       const input = $('#library-search');
@@ -2056,8 +2109,150 @@ function renderLibrary() {
 }
 
 function routineRow(r) {
-  const params = r.type === 'custom' && r.config?.parameters?.length ? ` · ${r.config.parameters.length} parameter${r.config.parameters.length === 1 ? '' : 's'}` : '';
-  return `<div class="list-row"><button class="favorite-btn ${r.favorite ? 'on' : ''}" data-action="favorite-routine" data-id="${esc(r.id)}" aria-label="${r.favorite ? 'Remove from' : 'Add to'} favorites">★</button><button class="list-row-main" data-action="edit-routine" data-id="${esc(r.id)}"><div class="list-row-title">${esc(r.title)}</div><div class="list-row-meta">${esc(BUILDER_META[r.type]?.name || r.type)} · ${esc(typeSummary(r.type, r.config))}${params}</div></button><button class="play-btn" data-action="start-routine" data-id="${esc(r.id)}" aria-label="Start ${esc(r.title)}">▶</button></div>`;
+  r = normalizeSavedTimerRecord(r);
+  const params = r.type === 'custom' && r.config?.parameters?.length ? ` - ${r.config.parameters.length} param${r.config.parameters.length === 1 ? '' : 's'}` : '';
+  const duration = savedTimerDuration(r);
+  const collection = r.collection ? ` - ${r.collection}` : '';
+  const usage = r.useCount ? ` - used ${r.useCount}x` : '';
+  const selected = state.savedSelected.has(r.id);
+  const mainAction = state.savedSelectMode ? 'select-saved' : 'edit-routine';
+  return `<article class="saved-timer-row ${selected ? 'selected' : ''}" data-saved-accent="${esc(r.accent || 'default')}">
+    ${state.savedSelectMode ? `<button class="saved-select-check" data-action="select-saved" data-id="${esc(r.id)}" aria-pressed="${selected}" aria-label="${selected ? 'Deselect' : 'Select'} ${esc(r.title)}">${selected ? '&#10003;' : ''}</button>` : ''}
+    <div class="saved-timer-icon" aria-hidden="true">${esc(r.icon)}</div>
+    <button class="saved-timer-main" data-action="${mainAction}" data-id="${esc(r.id)}">
+      <span class="saved-timer-title">${esc(r.title)}</span>
+      <span class="saved-timer-meta">${esc(BUILDER_META[r.type]?.name || r.type)} - ${esc(duration != null ? durationLabel(duration) : typeSummary(r.type, r.config || {}))}${esc(collection)}${params}${usage}</span>
+      ${r.description ? `<span class="saved-timer-description">${esc(r.description)}</span>` : ''}
+      ${r.tags.length ? `<span class="saved-tag-row">${r.tags.slice(0,4).map((tag) => `<span class="saved-tag">#${esc(tag)}</span>`).join('')}</span>` : ''}
+    </button>
+    <div class="saved-timer-row-actions">
+      <button class="saved-mini-action ${r.pinned ? 'on' : ''}" data-action="pin-saved" data-id="${esc(r.id)}" aria-label="${r.pinned ? 'Unpin' : 'Pin'} ${esc(r.title)}">&#9670;</button>
+      <button class="saved-mini-action favorite ${r.favorite ? 'on' : ''}" data-action="favorite-routine" data-id="${esc(r.id)}" aria-label="${r.favorite ? 'Remove from' : 'Add to'} favorites">&#9733;</button>
+      <button class="saved-mini-action" data-action="saved-menu" data-id="${esc(r.id)}" aria-label="More actions for ${esc(r.title)}">...</button>
+      <button class="play-btn" data-action="start-routine" data-id="${esc(r.id)}" aria-label="Start ${esc(r.title)}">&#9654;</button>
+    </div>
+  </article>`;
+}
+
+function showSavedTimerMenu(id) {
+  const timer = state.routines.find((item) => item.id === id);
+  if (!timer) return toast('Saved timer not found.');
+  showSheet(timer.title, `<div class="sheet-list">
+    <button class="sheet-item" data-action="edit-routine" data-id="${esc(id)}"><div><strong>Edit timer</strong><div class="small muted">Change duration, sequence or timer-specific settings</div></div></button>
+    <button class="sheet-item" data-action="edit-saved-meta" data-id="${esc(id)}"><div><strong>Details & organization</strong><div class="small muted">Icon, accent, description, collection and tags</div></div></button>
+    <button class="sheet-item" data-action="move-saved" data-id="${esc(id)}"><div><strong>Move to collection</strong><div class="small muted">${esc(timer.collection || 'Unsorted')}</div></div></button>
+    <button class="sheet-item" data-action="duplicate-saved" data-id="${esc(id)}"><div><strong>Duplicate</strong><div class="small muted">Create an independent copy</div></div></button>
+    <button class="sheet-item" data-action="archive-saved" data-id="${esc(id)}"><div><strong>${timer.archived ? 'Restore from archive' : 'Archive'}</strong><div class="small muted">Keep it without showing it in normal views</div></div></button>
+    <button class="sheet-item" data-action="export-routine-package" data-id="${esc(id)}"><div><strong>Export</strong><div class="small muted">Portable Timer package</div></div></button>
+    <button class="sheet-item danger-text" data-action="delete-routine" data-id="${esc(id)}"><div><strong>Delete</strong><div class="small muted">Session history is kept</div></div></button>
+  </div>`);
+}
+
+function showSavedTimerMetadata(id) {
+  const timer = state.routines.find((item) => item.id === id);
+  if (!timer) return toast('Saved timer not found.');
+  const r = normalizeSavedTimerRecord(timer);
+  const collections = savedTimerCollections();
+  showSheet('Saved Timer Details', `<div class="stack">
+    <div class="saved-meta-preview" data-saved-accent="${esc(r.accent)}"><div class="saved-timer-icon">${esc(r.icon)}</div><div><strong>${esc(r.title)}</strong><div class="small muted">${esc(BUILDER_META[r.type]?.name || r.type)}</div></div></div>
+    <label class="field"><span>Name</span><input class="input" data-saved-meta="title" maxlength="120" value="${esc(r.title)}"></label>
+    <div class="input-row"><label class="field"><span>Icon</span><input class="input" data-saved-meta="icon" maxlength="8" value="${esc(r.icon)}"></label><label class="field"><span>Accent</span><select class="select" data-saved-meta="accent">${SAVED_TIMER_ACCENTS.map((accent) => `<option value="${accent}" ${r.accent === accent ? 'selected' : ''}>${accent[0].toUpperCase()+accent.slice(1)}</option>`).join('')}</select></label></div>
+    <label class="field"><span>Description</span><textarea class="input" rows="3" maxlength="500" data-saved-meta="description" placeholder="Optional note about when or why you use this timer">${esc(r.description)}</textarea></label>
+    <label class="field"><span>Collection</span><select class="select" data-saved-meta="collection"><option value="">Unsorted</option>${collections.map((name) => `<option value="${esc(name)}" ${r.collection === name ? 'selected' : ''}>${esc(name)}</option>`).join('')}</select></label>
+    <label class="field"><span>Tags</span><input class="input" data-saved-meta="tags" value="${esc(r.tags.join(', '))}" placeholder="study, focus, evening"></label>
+    <div class="row" style="flex-wrap:wrap"><button class="btn primary" data-action="save-saved-meta" data-id="${esc(id)}">Save details</button><button class="btn" data-action="manage-saved-collections">Manage collections</button></div>
+  </div>`);
+}
+
+async function saveSavedTimerMetadata(id) {
+  const timer = state.routines.find((item) => item.id === id);
+  const root = $('#sheet-root');
+  if (!timer || !root) return;
+  const value = (field) => root.querySelector(`[data-saved-meta="${field}"]`)?.value ?? '';
+  const next = normalizeSavedTimerRecord({
+    ...timer,
+    title: String(value('title')).trim() || timer.title || 'Saved Timer',
+    icon: value('icon'),
+    accent: value('accent'),
+    description: value('description'),
+    collection: value('collection'),
+    tags: normalizeSavedTimerTags(value('tags'))
+  });
+  await state.db.saveRoutine(next);
+  await loadCollections();
+  closeSheet();
+  renderLibrary();
+  toast('Saved Timer details updated.');
+}
+
+function showMoveSavedTimers(ids) {
+  const valid = [...new Set(ids)].filter((id) => state.routines.some((timer) => timer.id === id));
+  if (!valid.length) return toast('Select at least one Saved Timer.');
+  state.pendingSavedMoveIds = valid;
+  const collections = savedTimerCollections();
+  showSheet(valid.length === 1 ? 'Move Saved Timer' : `Move ${valid.length} Saved Timers`, `<div class="stack"><label class="field"><span>Collection</span><select class="select" data-saved-move-collection><option value="">Unsorted</option>${collections.map((name) => `<option value="${esc(name)}">${esc(name)}</option>`).join('')}</select></label><button class="btn primary" data-action="apply-saved-move">Move</button></div>`);
+}
+
+async function applySavedMove() {
+  const collection = $('#sheet-root [data-saved-move-collection]')?.value || '';
+  for (const id of state.pendingSavedMoveIds) {
+    const timer = state.routines.find((item) => item.id === id);
+    if (timer) await state.db.saveRoutine({ ...timer, collection });
+  }
+  state.pendingSavedMoveIds = [];
+  await loadCollections();
+  closeSheet();
+  renderLibrary();
+  toast('Saved Timers moved.');
+}
+
+function showSavedCollectionsManager() {
+  const collections = savedTimerCollections();
+  showSheet('Collections', `<div class="stack"><div class="small muted">Start with Cooking, Study, Workout, Church and Music, then add whatever else you need.</div><div class="saved-collection-list">${collections.length ? collections.map((name) => { const count = state.routines.filter((timer) => timer.collection === name).length; return `<div class="saved-collection-row"><span><strong>${esc(name)}</strong><small>${count} timer${count === 1 ? '' : 's'}</small></span><button class="icon-btn danger-text" data-action="delete-saved-collection" data-collection="${esc(name)}" aria-label="Delete collection ${esc(name)}">x</button></div>`; }).join('') : '<div class="empty">No collections yet.</div>'}</div><div class="row"><input class="input" data-new-saved-collection maxlength="40" placeholder="New collection name"><button class="btn primary" data-action="add-saved-collection">Add</button></div></div>`);
+}
+
+async function addSavedCollection() {
+  const input = $('#sheet-root [data-new-saved-collection]');
+  const name = normalizeSavedTimerCollections([input?.value || ''])[0];
+  if (!name) return toast('Enter a collection name.');
+  const current = savedTimerCollections();
+  if (current.some((item) => item.toLowerCase() === name.toLowerCase())) return toast('That collection already exists.');
+  state.settings.savedTimerCollections = normalizeSavedTimerCollections([...(state.settings.savedTimerCollections || []), name]);
+  await state.db.saveSettings(state.settings);
+  showSavedCollectionsManager();
+}
+
+async function deleteSavedCollection(name) {
+  name = String(name || '');
+  if (!name) return;
+  const affected = state.routines.filter((timer) => timer.collection === name);
+  if (affected.length && !confirm(`Remove collection "${name}" and move ${affected.length} timer${affected.length === 1 ? '' : 's'} to Unsorted?`)) return;
+  for (const timer of affected) await state.db.saveRoutine({ ...timer, collection: '' });
+  state.settings.savedTimerCollections = normalizeSavedTimerCollections((state.settings.savedTimerCollections || []).filter((item) => item !== name));
+  await state.db.saveSettings(state.settings);
+  await loadCollections();
+  if (state.libraryView === `collection:${name}`) state.libraryView = 'all';
+  showSavedCollectionsManager();
+}
+
+async function duplicateSavedTimer(id) {
+  const timer = state.routines.find((item) => item.id === id);
+  if (!timer) return toast('Saved timer not found.');
+  const copy = duplicateSavedTimerRecord(timer, { id: uid('routine') });
+  await state.db.saveRoutine(copy);
+  await loadCollections();
+  closeSheet();
+  renderLibrary();
+  toast('Saved Timer duplicated.');
+}
+
+async function setSavedTimerFlag(id, key, value = null) {
+  const timer = state.routines.find((item) => item.id === id);
+  if (!timer) return;
+  const next = { ...timer, [key]: value == null ? !timer[key] : Boolean(value) };
+  await state.db.saveRoutine(next);
+  await loadCollections();
+  if (state.route === 'library') renderLibrary();
 }
 
 function nodesReferenceBlock(nodes, blockId) {
