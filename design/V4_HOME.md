@@ -69,3 +69,7 @@ V4 does not change:
 ## Next
 
 V5 — Live Timer 3.0: Showcase Experience.
+
+## Performance budget
+
+The signature Home surface increases the measured shell from V3's 137.1 KiB to approximately **141.5 KiB gzip**. V4 therefore advances the explicit visual envelope to **142 KiB soft / 145 KiB hard**. The additional bytes are the Home instrument, responsive preset/runtime system, and associated state/accessibility styling; future phases must continue to account for shell growth explicitly.
