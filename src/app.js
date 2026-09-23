@@ -15,6 +15,7 @@ import { PerformanceMetrics, MaintenanceCoordinator, liveSchedulerPolicy, reduce
 import { TimerCoordinator, COMPLETION_ACTIONS, normalizeCompletionAction } from './coordinator.js';
 import { parseDurationInput, durationInputText, normalizeDurationList, pushRecentDuration, DEFAULT_QUICK_PRESETS, DEFAULT_QUICK_ADJUSTMENTS } from './quick.js';
 import { DEFAULT_SAVED_TIMER_COLLECTIONS, SAVED_TIMER_ACCENTS, normalizeSavedTimerRecord, normalizeSavedTimerTags, normalizeSavedTimerCollections, needsSavedTimerMigration, savedTimerSearchText, savedTimerMatchesView, sortSavedTimers, duplicateSavedTimerRecord } from './saved.js';
+import { QUEUE_STEP_ACTIONS, normalizeQueuePreset, normalizeQueueStepAction, createQueueRun, normalizeQueueRun, queueCurrentItem, queueProgress, advanceQueueRun, reorderQueueItems, queuePresetFromTimerIds } from './queue.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -25,7 +26,7 @@ const ms = (seconds) => Math.max(0, Math.round(Number(seconds || 0) * 1000));
 const sec = (milliseconds) => Math.round(Number(milliseconds || 0) / 1000);
 const mins = (minutes) => ms(Number(minutes || 0) * 60);
 const pct = (n) => `${Math.round(clamp(n || 0, 0, 1) * 100)}%`;
-const APP_VERSION = '2.4.0';
+const APP_VERSION = '2.5.0';
 
 const BUILDER_META = {
   countdown: { name: 'Countdown', desc: 'Reusable fixed-duration countdown' },
@@ -140,6 +141,11 @@ const state = {
   db: new TimerDB(),
   settings: { ...defaultSettings },
   routines: [],
+  queues: [],
+  activeQueue: null,
+  queueDraft: null,
+  queueDragIndex: null,
+  queueTransitionRuntimeIds: new Set(),
   blocks: [],
   cueProfiles: [],
   customSounds: [],
