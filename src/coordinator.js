@@ -37,7 +37,13 @@ export class TimerCoordinator {
   size() { return this.runtimes.size; }
   has(runtimeId) { return this.runtimes.has(runtimeId); }
   get(runtimeId) { return this.runtimes.get(runtimeId); }
-  list() { return [...this.runtimes.values()]; }
+  list() {
+    return [...this.runtimes.values()].sort((a, b) => {
+      const order = (Number(a.order) || 0) - (Number(b.order) || 0);
+      if (order) return order;
+      return (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0);
+    });
+  }
 
   _runtimeRecord(runtime) {
     return {
@@ -46,6 +52,7 @@ export class TimerCoordinator {
       meta: structuredClone(runtime.meta || {}),
       completionAction: runtime.completionAction,
       cycle: runtime.cycle,
+      order: Number(runtime.order) || 0,
       createdAt: runtime.createdAt,
       updatedAt: Date.now(),
       overtime: runtime.overtime ? {
@@ -84,6 +91,7 @@ export class TimerCoordinator {
       plan: structuredClone(plan),
       completionAction: normalizeCompletionAction(options.completionAction ?? meta?.completionAction),
       cycle: Math.max(1, Number(options.cycle) || 1),
+      order: Number.isFinite(Number(options.order)) ? Number(options.order) : (this.list().reduce((max, item) => Math.max(max, Number(item.order) || 0), 0) + 1),
       createdAt: Number(options.createdAt) || Date.now(),
       overtime: null,
       unsubscribe: null
@@ -97,7 +105,16 @@ export class TimerCoordinator {
 
   restore(records = []) {
     const restored = [];
-    for (const record of records || []) {
+    const orderedRecords = [...(records || [])].sort((a, b) => {
+      const ao = Number(a?.order);
+      const bo = Number(b?.order);
+      const aHas = Number.isFinite(ao);
+      const bHas = Number.isFinite(bo);
+      if (aHas && bHas && ao !== bo) return ao - bo;
+      if (aHas !== bHas) return aHas ? -1 : 1;
+      return (Number(a?.createdAt) || Number(a?.snapshot?.startedAt) || 0) - (Number(b?.createdAt) || Number(b?.snapshot?.startedAt) || 0);
+    });
+    for (const record of orderedRecords) {
       if (!record?.snapshot || (!record.overtime && ['completed', 'cancelled'].includes(record.snapshot.status))) continue;
       const runtimeId = record.id || record.runtimeId || this.runtimeIdFactory();
       if (this.runtimes.has(runtimeId)) continue;
@@ -109,6 +126,7 @@ export class TimerCoordinator {
         plan: structuredClone(record.snapshot.plan),
         completionAction: normalizeCompletionAction(record.completionAction ?? record.meta?.completionAction),
         cycle: Math.max(1, Number(record.cycle) || 1),
+        order: Number.isFinite(Number(record.order)) ? Number(record.order) : restored.length + 1,
         createdAt: Number(record.createdAt) || Number(record.snapshot.startedAt) || Date.now(),
         overtime: null,
         unsubscribe: null
@@ -249,6 +267,7 @@ export class TimerCoordinator {
     if (command === 'pause') return this.pause(runtimeId);
     if (command === 'resume') return this.resume(runtimeId);
     if (command === 'toggle-pause') return this.togglePause(runtimeId);
+    if (command === 'stop') return this.finish(runtimeId, typeof value === 'string' ? value : 'user-ended', COMPLETION_ACTIONS.STOP);
     if (runtime.overtime) {
       if (command === 'finish' || command === 'cancel') return this.finish(runtimeId, command === 'cancel' ? 'cancelled' : 'overtime-finished');
       return false;
@@ -265,9 +284,10 @@ export class TimerCoordinator {
     return false;
   }
 
-  finish(runtimeId, reason = 'finished') {
+  finish(runtimeId, reason = 'finished', actionOverride = null) {
     const runtime = this.get(runtimeId);
     if (!runtime) return false;
+    if (actionOverride) runtime.completionAction = normalizeCompletionAction(actionOverride);
     if (!runtime.overtime) return runtime.engine.finish(reason);
     const overtimeMs = this._overtimeElapsed(runtime);
     const snapshot = runtime.engine.snapshot();
@@ -276,8 +296,58 @@ export class TimerCoordinator {
     snapshot.overtimeMs = overtimeMs;
     snapshot.finalElapsedMs = Math.max(0, Number(snapshot.finalElapsedMs) || 0) + overtimeMs;
     snapshot.endedAt = runtime.engine.clock.wallNow();
-    this.emit('runtime-terminal', { runtimeId, snapshot, cancelled: reason === 'cancelled', action: COMPLETION_ACTIONS.OVERTIME });
+    this.emit('runtime-terminal', { runtimeId, snapshot, cancelled: reason === 'cancelled', action: actionOverride ? normalizeCompletionAction(actionOverride) : COMPLETION_ACTIONS.OVERTIME });
     return true;
+  }
+
+  updateRuntime(runtimeId, { meta = null, completionAction, order } = {}) {
+    const runtime = this.get(runtimeId);
+    if (!runtime) return false;
+    if (meta && typeof meta === 'object') runtime.meta = { ...(runtime.meta || {}), ...structuredClone(meta) };
+    if (completionAction !== undefined) runtime.completionAction = normalizeCompletionAction(completionAction);
+    if (Number.isFinite(Number(order))) runtime.order = Number(order);
+    this.emit('runtime-updated', { runtimeId, runtime: this._runtimeRecord(runtime) });
+    return true;
+  }
+
+  reorder(runtimeIds = []) {
+    const seen = new Set();
+    const ordered = [];
+    for (const id of runtimeIds || []) {
+      const runtime = this.get(id);
+      if (!runtime || seen.has(id)) continue;
+      seen.add(id);
+      ordered.push(runtime);
+    }
+    for (const runtime of this.list()) if (!seen.has(runtime.id)) ordered.push(runtime);
+    ordered.forEach((runtime, index) => { runtime.order = index + 1; });
+    this.runtimes = new Map(ordered.map((runtime) => [runtime.id, runtime]));
+    this.emit('workspace-reordered', { runtimeIds: ordered.map((runtime) => runtime.id) });
+    return ordered.map((runtime) => runtime.id);
+  }
+
+  move(runtimeId, delta = 0) {
+    const ids = this.list().map((runtime) => runtime.id);
+    const from = ids.indexOf(runtimeId);
+    if (from < 0) return false;
+    const to = Math.max(0, Math.min(ids.length - 1, from + Math.trunc(Number(delta) || 0)));
+    if (to === from) return false;
+    ids.splice(from, 1);
+    ids.splice(to, 0, runtimeId);
+    this.reorder(ids);
+    return true;
+  }
+
+  pauseAll() {
+    let changed = 0;
+    for (const runtime of this.list()) if (this.pause(runtime.id)) changed += 1;
+    return changed;
+  }
+
+  resumeAll() {
+    let changed = 0;
+    for (const runtime of this.list()) if (this.resume(runtime.id)) changed += 1;
+    return changed;
   }
 
   reconcile(runtimeId) {
