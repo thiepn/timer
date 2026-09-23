@@ -2913,8 +2913,13 @@ async function loadCollections({ fullHistory = (state.route === 'history' && sta
     state.db.listCustomSoundMetadata().catch(() => []),
     state.db.recentSessions(historyLimit).catch(() => [])
   ]);
-  state.routines = routines;
   state.blocks = blocks;
+  const normalized = routines.map((timer) => normalizeSavedTimerRecord(timer));
+  state.routines = normalized;
+  const migrations = routines.map((timer, index) => needsSavedTimerMigration(timer)
+    ? state.db.saveRoutine(normalized[index], { preserveUpdatedAt: true }).catch(() => null)
+    : null).filter(Boolean);
+  if (migrations.length) await Promise.allSettled(migrations);
   state.cueProfiles = cueProfiles;
   state.customSounds = customSounds;
   state.sessions = sessions;
@@ -3134,6 +3139,7 @@ document.addEventListener('submit', async (e) => {
 
 document.addEventListener('change', async (e) => {
   updateBuilderInput(e.target); updateBuilderCueInput(e.target); updateCircuitInput(e.target); updateCustomInput(e.target); updateCustomCueInput(e.target); updateCustomParameterInput(e.target); updateBlockParameterInput(e.target);
+  if (e.target.matches?.('[data-saved-sort]')) { state.librarySort = e.target.value || 'recent'; return renderLibrary(); }
   if (e.target.matches?.('[data-history-mode]')) { state.historyMode = e.target.value || 'all'; state.historyVisible = 100; return renderHistory(); }
   if (e.target.dataset.setting) {
     const key = e.target.dataset.setting;
@@ -3229,19 +3235,62 @@ document.addEventListener('click', async (e) => {
     return renderTimerHome();
   }
   if (action === 'customize-quick') return showQuickCustomizeSheet();
+  if (action === 'save-quick-timer') return saveQuickTimerPreset();
   if (action === 'save-quick-customize') return saveQuickCustomizeSheet();
   if (action === 'reset-quick-customize') return resetQuickCustomizeSheet();
 
+  if (action === 'saved-view') { state.libraryView = btn.dataset.view || 'all'; state.savedSelected.clear(); return renderLibrary(); }
+  if (action === 'toggle-saved-select-mode') { state.savedSelectMode = !state.savedSelectMode; if (!state.savedSelectMode) state.savedSelected.clear(); return renderLibrary(); }
+  if (action === 'select-saved') { const id = btn.dataset.id; if (state.savedSelected.has(id)) state.savedSelected.delete(id); else state.savedSelected.add(id); return renderLibrary(); }
+  if (action === 'select-all-visible') { for (const timer of visibleSavedTimers()) state.savedSelected.add(timer.id); return renderLibrary(); }
+  if (action === 'saved-menu') return showSavedTimerMenu(btn.dataset.id);
+  if (action === 'edit-saved-meta') return showSavedTimerMetadata(btn.dataset.id);
+  if (action === 'save-saved-meta') return saveSavedTimerMetadata(btn.dataset.id);
+  if (action === 'pin-saved') return setSavedTimerFlag(btn.dataset.id, 'pinned');
+  if (action === 'duplicate-saved') return duplicateSavedTimer(btn.dataset.id);
+  if (action === 'archive-saved') {
+    const timer = state.routines.find((item) => item.id === btn.dataset.id);
+    if (timer) { await setSavedTimerFlag(timer.id, 'archived'); closeSheet(); }
+    return;
+  }
+  if (action === 'move-saved') return showMoveSavedTimers([btn.dataset.id]);
+  if (action === 'bulk-saved-move') return showMoveSavedTimers([...state.savedSelected]);
+  if (action === 'apply-saved-move') return applySavedMove();
+  if (action === 'bulk-saved-archive' || action === 'bulk-saved-restore') {
+    const archived = action === 'bulk-saved-archive';
+    for (const id of state.savedSelected) {
+      const timer = state.routines.find((item) => item.id === id);
+      if (timer) await state.db.saveRoutine({ ...timer, archived });
+    }
+    state.savedSelected.clear();
+    await loadCollections();
+    renderLibrary();
+    return toast(archived ? 'Saved Timers archived.' : 'Saved Timers restored.');
+  }
+  if (action === 'bulk-saved-delete') {
+    const ids = [...state.savedSelected];
+    if (!ids.length || !confirm(`Delete ${ids.length} Saved Timer${ids.length === 1 ? '' : 's'}? Session history will be kept.`)) return;
+    for (const id of ids) await state.db.delete('routines', id);
+    state.savedSelected.clear();
+    await loadCollections();
+    renderLibrary();
+    return toast('Saved Timers deleted.');
+  }
+  if (action === 'manage-saved-collections') return showSavedCollectionsManager();
+  if (action === 'add-saved-collection') return addSavedCollection();
+  if (action === 'delete-saved-collection') return deleteSavedCollection(btn.dataset.collection);
   if (action === 'start-routine') return startRoutine(btn.dataset.id);
-  if (action === 'edit-routine') { const r = state.routines.find((x) => x.id === btn.dataset.id); if (r) return openBuilder(r.type, r); }
+  if (action === 'edit-routine') { const r = state.routines.find((x) => x.id === btn.dataset.id); if (r) { closeSheet(); return openBuilder(r.type, r); } }
   if (action === 'edit-block') { const block = state.blocks.find((item) => item.id === btn.dataset.id); if (block) return openBlockEditor(block); }
   if (action === 'favorite-routine') { const r = state.routines.find((x) => x.id === btn.dataset.id); if (r) { r.favorite = !r.favorite; await state.db.saveRoutine(r); await loadCollections(); renderLibrary(); } return; }
   if (action === 'delete-routine') {
     const r = state.routines.find((x) => x.id === btn.dataset.id);
-    if (r && confirm(`Delete “${r.title}”? Session history will be kept.`)) {
+    if (r && confirm(`Delete "${r.title}"? Session history will be kept.`)) {
       await state.db.delete('routines', r.id);
+      state.savedSelected.delete(r.id);
       state.builder = null; state.builderEditingId = null; state.route = 'library';
-      await loadCollections(); render(); toast('Routine deleted.');
+      closeSheet();
+      await loadCollections(); render(); toast('Saved Timer deleted.');
     }
     return;
   }
