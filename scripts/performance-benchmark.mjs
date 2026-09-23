@@ -33,7 +33,7 @@ console.log(`Offline shell gzip sum: ${(shellGzipBytes / 1024).toFixed(1)} KiB`)
 const failures = [];
 if (compile.ms >= PERFORMANCE_BUDGETS.compile1000StepsMs) failures.push('compile budget');
 if (analytics.ms >= PERFORMANCE_BUDGETS.analytics10000SessionsMs) failures.push('analytics budget');
-if (shellGzipBytes > 138 * 1024) failures.push('offline shell size budget');
+if (shellGzipBytes > 142 * 1024) failures.push('offline shell size budget');
 if (failures.length) {
   console.error(`Performance budget failure: ${failures.join(', ')}`);
   process.exitCode = 1;

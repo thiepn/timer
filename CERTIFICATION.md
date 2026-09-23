@@ -31,7 +31,9 @@ All v2.4 certification scenarios remain required, plus:
 - Visual V2 tests certify the M0–M5 material hierarchy, T0–T5 typography roles, shape/motion scales, semantic state colors, theme propagation, accent state, reduced motion, forced colors and offline visual-system loading.
 - Visual V3 tests certify the SVG shell icon system, responsive navigation rail/dock, contextual chrome, Workspace navigation mapping, modal hierarchy, live-mode shell isolation and reduced-motion View Transition fallback.
 - V3 raises the measured offline-shell budget to 138 KiB gzip and the independent hard release ceiling to 140 KiB; the increase is reserved for the new shell/navigation/icon architecture.
-- Static release certification validates v2.5/v19 metadata.
+- Visual V4 tests certify the signature Quick Timer instrument, dial semantics, SVG Home shortcuts, runtime progress/state visuals, responsive composition, OLED/high-contrast/forced-colors paths and the safe Workspace-card updater.
+- V4 raises the measured offline-shell budget to 142 KiB gzip and the independent hard release ceiling to 145 KiB; the increase is reserved for the signature Home instrument and responsive runtime/preset presentation.
+- Static release certification validates v2.5/v20 metadata.
 - Existing twenty-runtime isolation, per-runtime persistence, cue arbitration, overtime recovery, historical backup compatibility and adversarial engine tests continue to pass.
 
 ## Environment-limited checks
