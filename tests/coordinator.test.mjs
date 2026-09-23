@@ -128,3 +128,56 @@ test('overtime restore after pause and resume excludes the paused wall interval'
   restored.restore([checkpoint]);
   assert.equal(Math.round(restored.view('overtime-pause-runtime').overtimeMs), 12000);
 });
+
+
+test('workspace ordering, metadata and completion settings survive snapshots and restore', () => {
+  const first = coordinatorWithClocks();
+  const a = first.coordinator.start(buildCountdown({ durationMs: 30_000 }), { title: 'A' });
+  const b = first.coordinator.start(buildCountdown({ durationMs: 30_000 }), { title: 'B' });
+  const c = first.coordinator.start(buildCountdown({ durationMs: 30_000 }), { title: 'C' });
+  first.coordinator.updateRuntime(b.id, {
+    meta: { workspaceTitle: 'Tea', workspaceGroup: 'Kitchen', workspaceColor: 'orange', completionNextRoutineId: 'routine-next' },
+    completionAction: COMPLETION_ACTIONS.START_NEXT
+  });
+  first.coordinator.reorder([c.id, b.id, a.id]);
+  assert.deepEqual(first.coordinator.list().map((runtime) => runtime.id), [c.id, b.id, a.id]);
+  const bRecord = first.coordinator.snapshot(b.id);
+  assert.equal(bRecord.order, 2);
+  assert.equal(bRecord.meta.workspaceTitle, 'Tea');
+  assert.equal(bRecord.meta.workspaceGroup, 'Kitchen');
+  assert.equal(bRecord.completionAction, COMPLETION_ACTIONS.START_NEXT);
+
+  const second = coordinatorWithClocks();
+  second.coordinator.restore(first.coordinator.snapshots());
+  assert.deepEqual(second.coordinator.list().map((runtime) => runtime.id), [c.id, b.id, a.id]);
+  assert.equal(second.coordinator.get(b.id).meta.workspaceColor, 'orange');
+  assert.equal(second.coordinator.get(b.id).meta.completionNextRoutineId, 'routine-next');
+});
+
+test('workspace move and bulk pause/resume operate independently of timer truth', () => {
+  const { coordinator, clocks } = coordinatorWithClocks();
+  const a = coordinator.start(buildCountdown({ durationMs: 60_000 }), { title: 'A' });
+  const b = coordinator.start(buildCountdown({ durationMs: 60_000 }), { title: 'B' });
+  const c = coordinator.start(buildCountdown({ durationMs: 60_000 }), { title: 'C' });
+  assert.equal(coordinator.move(c.id, -2), true);
+  assert.deepEqual(coordinator.list().map((runtime) => runtime.id), [c.id, a.id, b.id]);
+
+  clocks.forEach((clock) => clock.advance(5_000));
+  assert.equal(coordinator.pauseAll(), 3);
+  clocks.forEach((clock) => clock.advance(10_000));
+  assert.equal(coordinator.get(a.id).engine.elapsedMs(), 5_000);
+  assert.equal(coordinator.resumeAll(), 3);
+  clocks.forEach((clock) => clock.advance(2_000));
+  assert.equal(coordinator.get(a.id).engine.elapsedMs(), 7_000);
+});
+
+test('explicit stop bypasses repeat and start-next completion actions', () => {
+  const { coordinator } = coordinatorWithClocks();
+  const repeat = coordinator.start(buildCountdown({ durationMs: 60_000 }), { title: 'Repeat' }, { completionAction: COMPLETION_ACTIONS.REPEAT });
+  let terminal;
+  coordinator.subscribe((event) => { if (event.type === 'runtime-terminal' && event.runtimeId === repeat.id) terminal = event; });
+  assert.equal(coordinator.command(repeat.id, 'stop', 'user-ended'), true);
+  assert.equal(terminal.action, COMPLETION_ACTIONS.STOP);
+  assert.equal(terminal.snapshot.completionReason, 'user-ended');
+  assert.equal(coordinator.get(repeat.id).cycle, 1);
+});
