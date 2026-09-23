@@ -1,4 +1,4 @@
-# Timer v2.3 Certification
+# Timer v2.4 Certification
 
 ## Automated release gate
 
@@ -11,7 +11,7 @@ The production release must pass `npm run certify`, which runs:
 
 ## Certified automated scenarios
 
-All v2.2 certification scenarios remain required, plus:
+All v2.3 certification scenarios remain required, plus:
 
 - Quick duration parser accepts `90`, `90s`, `1:30`, `3m`, `1h 20m`, `h:mm:ss` and decimal unit notation.
 - Malformed, zero, negative, ambiguous and excessive Quick Timer inputs are rejected before a timer starts.
@@ -20,7 +20,11 @@ All v2.2 certification scenarios remain required, plus:
 - The service-worker shell contains both the coordinator and Quick Timer modules.
 - Saved Timer model tests cover legacy normalization, collection/tag normalization, filtering, all four sort modes and duplication semantics.
 - The service-worker shell contains the Saved Timer module.
-- Static release certification validates v2.3/v15 metadata.
+- Coordinator tests cover persistent workspace order, runtime metadata updates and restore.
+- Bulk pause/resume is certified without changing timer truth while paused.
+- Explicit stop is certified to bypass Repeat and Start Next completion automation.
+- Static certification checks the Multi-Timer Workspace and completion-chain wiring.
+- Static release certification validates v2.4/v16 metadata.
 - Existing twenty-runtime isolation, per-runtime persistence, cue arbitration, overtime recovery, historical backup compatibility and adversarial engine tests continue to pass.
 
 ## Environment-limited checks
