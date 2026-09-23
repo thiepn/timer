@@ -2343,6 +2343,8 @@ function showSavedTimerMetadata(id) {
   if (!timer) return toast('Saved timer not found.');
   const r = normalizeSavedTimerRecord(timer);
   const collections = savedTimerCollections();
+  const completion = normalizeCompletionAction(r.completionAction);
+  const nextOptions = state.routines.filter((item) => item.id !== r.id && !item.archived).map((item) => `<option value="${esc(item.id)}" ${item.id === r.completionNextRoutineId ? 'selected' : ''}>${esc(item.title)}</option>`).join('');
   showSheet('Saved Timer Details', `<div class="stack">
     <div class="saved-meta-preview" data-saved-accent="${esc(r.accent)}"><div class="saved-timer-icon">${esc(r.icon)}</div><div><strong>${esc(r.title)}</strong><div class="small muted">${esc(BUILDER_META[r.type]?.name || r.type)}</div></div></div>
     <label class="field"><span>Name</span><input class="input" data-saved-meta="title" maxlength="120" value="${esc(r.title)}"></label>
@@ -2350,6 +2352,8 @@ function showSavedTimerMetadata(id) {
     <label class="field"><span>Description</span><textarea class="input" rows="3" maxlength="500" data-saved-meta="description" placeholder="Optional note about when or why you use this timer">${esc(r.description)}</textarea></label>
     <label class="field"><span>Collection</span><select class="select" data-saved-meta="collection"><option value="">Unsorted</option>${collections.map((name) => `<option value="${esc(name)}" ${r.collection === name ? 'selected' : ''}>${esc(name)}</option>`).join('')}</select></label>
     <label class="field"><span>Tags</span><input class="input" data-saved-meta="tags" value="${esc(r.tags.join(', '))}" placeholder="study, focus, evening"></label>
+    <label class="field"><span>Default completion action</span><select class="select" data-saved-meta="completion"><option value="stop" ${completion === 'stop' ? 'selected' : ''}>Stop</option><option value="overtime" ${completion === 'overtime' ? 'selected' : ''}>Count overtime</option><option value="repeat" ${completion === 'repeat' ? 'selected' : ''}>Repeat automatically</option><option value="start-next" ${completion === 'start-next' ? 'selected' : ''}>Start another Saved Timer</option></select></label>
+    <label class="field"><span>Next Saved Timer</span><select class="select" data-saved-meta="next"><option value="">Choose timer</option>${nextOptions}</select><small class="muted">Used by Start Next. Each target may define its own completion action.</small></label>
     <div class="row" style="flex-wrap:wrap"><button class="btn primary" data-action="save-saved-meta" data-id="${esc(id)}">Save details</button><button class="btn" data-action="manage-saved-collections">Manage collections</button></div>
   </div>`);
 }
@@ -2360,6 +2364,9 @@ async function saveSavedTimerMetadata(id) {
   if (!timer || !root) return;
   const value = (field) => root.querySelector(`[data-saved-meta="${field}"]`)?.value ?? '';
   const nextTitle = String(value('title')).trim() || timer.title || 'Saved Timer';
+  const completionAction = normalizeCompletionAction(value('completion'));
+  const completionNextRoutineId = value('next');
+  if (completionAction === COMPLETION_ACTIONS.START_NEXT && (!completionNextRoutineId || completionNextRoutineId === id || !state.routines.some((item) => item.id === completionNextRoutineId && !item.archived))) return toast('Choose a different Saved Timer for Start Next.');
   const next = normalizeSavedTimerRecord({
     ...timer,
     title: nextTitle,
@@ -2368,7 +2375,9 @@ async function saveSavedTimerMetadata(id) {
     accent: value('accent'),
     description: value('description'),
     collection: value('collection'),
-    tags: normalizeSavedTimerTags(value('tags'))
+    tags: normalizeSavedTimerTags(value('tags')),
+    completionAction,
+    completionNextRoutineId: completionAction === COMPLETION_ACTIONS.START_NEXT ? completionNextRoutineId : ''
   });
   await state.db.saveRoutine(next);
   await loadCollections();
