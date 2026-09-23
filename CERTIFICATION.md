@@ -30,6 +30,7 @@ All v2.4 certification scenarios remain required, plus:
 - Static certification verifies the queue module is in the offline shell and queue UI/control wiring exists.
 - Visual V2 tests certify the M0–M5 material hierarchy, T0–T5 typography roles, shape/motion scales, semantic state colors, theme propagation, accent state, reduced motion, forced colors and offline visual-system loading.
 - Visual V3 tests certify the SVG shell icon system, responsive navigation rail/dock, contextual chrome, Workspace navigation mapping, modal hierarchy, live-mode shell isolation and reduced-motion View Transition fallback.
+- V3 raises the measured offline-shell budget to 138 KiB gzip and the independent hard release ceiling to 140 KiB; the increase is reserved for the new shell/navigation/icon architecture.
 - Static release certification validates v2.5/v19 metadata.
 - Existing twenty-runtime isolation, per-runtime persistence, cue arbitration, overtime recovery, historical backup compatibility and adversarial engine tests continue to pass.
 
