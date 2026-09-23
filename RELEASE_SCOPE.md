@@ -1,21 +1,27 @@
-# Timer v2.3 Release Scope
+# Timer v2.4 Release Scope
 
-Timer v2.3 generalizes the former workout-oriented Routine library into universal Saved Timers while preserving the established storage and sync boundary.
+Timer v2.4 turns the existing multi-runtime kernel into a user-facing workspace and completes the completion-action orchestration layer.
 
 Production scope includes:
 
-- Saved countdown presets, stopwatch presets, intervals, sequence/advanced timers and all specialized timer builders.
-- One-tap Quick Timer saving and a first-class reusable Countdown builder.
-- Pin, favorite and archive states; icon, accent and description metadata.
-- Collections with Cooking, Study, Workout, Church and Music defaults, plus user-created collections and tags.
-- Search across timer metadata, collection, tags, type and timer summary.
-- Recent, most-used, alphabetical and duration sorting.
-- Duplicate and multi-select organization with bulk move, archive/restore and delete.
-- In-place normalization of all legacy routine records with their IDs, timer configs, cue overrides, timestamps, usage data and history links retained.
-- Existing v2.2 Quick Timer and v2.1 multi-runtime ownership/recovery behavior remains unchanged.
+- A dedicated Multi-Timer Workspace for all locally owned active timers.
+- Grid, compact and focus workspace layouts.
+- Persistent timer order across active-session checkpoints and process-loss restore.
+- Runtime display names, groups and colors without mutating historical timer-plan truth.
+- Per-timer pause/resume, focus, reorder, edit and explicit stop.
+- Bulk Pause All, Resume All and Stop All operations.
+- Direct launching of Saved Timers from the workspace.
+- Completion actions: Stop, Overtime, Repeat and Start Next.
+- Saved Timer completion defaults and Start Next targets.
+- Chained Saved Timer launching with default/last parameter values for parameterized sequence timers.
+- Foreground chains transfer focus to the next timer; background chains preserve another timer's focus.
+- Manual stop/end always bypasses automation.
+- Workspace order, completion configuration and chain targets persist in active recovery records.
 
 Compatibility boundary:
 
-- IndexedDB remains v6 and continues to use the existing `routines` store as the durable Saved Timer store.
-- Backup payload remains v4 and backup versions v1-v4 remain importable.
-- No destructive rename or copy migration is performed.
+- IndexedDB remains v6.
+- Backup payload remains v4; backup versions v1-v4 remain importable.
+- Saved Timer storage remains the existing `routines` store.
+- Active workspace metadata remains recovery state and is not added to portable user backups.
+- Native Android exact alarms, foreground services and widgets remain outside the PWA boundary.
