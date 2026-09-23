@@ -8,7 +8,7 @@ const read = (name) => fs.readFileSync(path.join(root, name), 'utf8');
 const fail = (message) => { throw new Error(`Release certification failed: ${message}`); };
 
 const pkg = JSON.parse(read('package.json'));
-if (pkg.version !== '2.4.0') fail(`package version is ${pkg.version}, expected 2.4.0`);
+if (pkg.version !== '2.5.0') fail(`package version is ${pkg.version}, expected 2.5.0`);
 
 const html = read('index.html');
 if (!/Content-Security-Policy/i.test(html)) fail('Content Security Policy is missing');
@@ -17,7 +17,7 @@ if (/user-scalable\s*=\s*no/i.test(html) || /maximum-scale\s*=\s*1/i.test(html))
 
 const sw = read('sw.js');
 const cacheMatch = sw.match(/const CACHE = 'thiepn-timer-v(\d+)'/);
-if (!cacheMatch || Number(cacheMatch[1]) !== 16) fail('service-worker cache generation must be v16');
+if (!cacheMatch || Number(cacheMatch[1]) !== 17) fail('service-worker cache generation must be v17');
 
 const app = read('src/app.js');
 const appImports = [...app.matchAll(/from\s+['"](\.\/[^'"]+\.js)['"]/g)].map((m) => `./src/${m[1].replace(/^\.\//, '')}`);
@@ -52,7 +52,7 @@ for (const required of ['README.md','CHANGELOG.md','RELEASE_SCOPE.md','CERTIFICA
 }
 
 const readme = read('README.md');
-if (!readme.includes('Current app version: **2.4.0**')) fail('README does not identify v2.4.0');
+if (!readme.includes('Current app version: **2.5.0**')) fail('README does not identify v2.5.0');
 
 console.log('Static release certification: PASS');
 console.log(`Version: ${pkg.version}`);

@@ -36,6 +36,7 @@ test('encrypted backup rejects unreasonable PBKDF2 work factors before decryptio
 
 test('backup entity limits reject pathological record counts before restore loops', () => {
   assert.throws(() => assertBackupEntityLimits({ routines: Array(5001) }), /too many routines/);
+  assert.throws(() => assertBackupEntityLimits({ queues: Array(2001) }), /too many queues/);
   assert.throws(() => assertBackupEntityLimits({ sessions: Array(100001) }), /too many sessions/);
   assert.equal(assertBackupEntityLimits({ routines: Array(5), sessions: Array(5) }), true);
 });

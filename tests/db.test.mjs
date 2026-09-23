@@ -2,12 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TimerDB } from '../src/db.js';
 
-test('backup v4 round-trips reusable blocks and still accepts v1 backups', async () => {
+test('backup v5 round-trips reusable blocks and still accepts v1 backups', async () => {
   const db = new TimerDB();
   await db.open();
   await db.saveBlock({ id: 'block-1', title: 'Block', revision: 1, parameters: [], nodes: [{ id: 'w', type: 'timed', label: 'Work', phase: 'work', durationMs: 1000 }] });
   const exported = await db.exportData();
-  assert.equal(exported.version, 4);
+  assert.equal(exported.version, 5);
   assert.equal(exported.blocks.length, 1);
 
   const other = new TimerDB();
@@ -17,6 +17,76 @@ test('backup v4 round-trips reusable blocks and still accepts v1 backups', async
 
   await other.importData({ format: 'thiepn-timer-backup', version: 1, routines: [], sessions: [], settings: {} }, { replace: true });
   assert.equal((await other.all('blocks')).length, 0);
+});
+
+
+
+test('queue presets and active queue recovery state persist independently', async () => {
+  const db = new TimerDB();
+  await db.open();
+  const queue = await db.saveQueue({
+    id: 'queue-1',
+    title: 'Study Flow',
+    loop: true,
+    items: [
+      { id: 'item-1', savedTimerId: 'timer-a', action: 'advance' },
+      { id: 'item-2', savedTimerId: 'timer-b', action: 'overtime' }
+    ]
+  });
+  assert.equal(queue.items.length, 2);
+  assert.equal(queue.loop, true);
+
+  await db.saveActiveQueue({
+    id: 'queue-run-1',
+    queueId: queue.id,
+    title: queue.title,
+    items: queue.items,
+    loop: queue.loop,
+    status: 'paused',
+    currentIndex: 1,
+    cycle: 2,
+    completedSteps: 3,
+    skippedSteps: 1,
+    currentRuntimeId: 'runtime-b',
+    startedAt: 100
+  });
+  const active = await db.getActiveQueues();
+  assert.equal(active.length, 1);
+  assert.equal(active[0].currentIndex, 1);
+  assert.equal(active[0].cycle, 2);
+  assert.equal(active[0].status, 'paused');
+
+  const backup = await db.exportData();
+  assert.equal(backup.version, 5);
+  assert.equal(backup.queues.length, 1);
+  assert.equal(backup.queues[0].title, 'Study Flow');
+
+  const restored = new TimerDB();
+  await restored.open();
+  await restored.importData(backup, { replace: true });
+  assert.equal((await restored.all('queues')).length, 1);
+  assert.equal((await restored.getActiveQueues()).length, 0);
+});
+
+
+
+test('replacing from a pre-v5 backup does not erase queue presets that the backup could not contain', async () => {
+  const db = new TimerDB();
+  await db.open();
+  await db.saveQueue({ id: 'keep-queue', title: 'Keep me', items: [{ id: 'i1', savedTimerId: 'r1', action: 'advance' }] });
+  await db.importData({
+    format: 'thiepn-timer-backup',
+    version: 4,
+    selection: { routines: true, blocks: true, cueProfiles: true, customSounds: true, sessions: true, settings: true },
+    routines: [],
+    blocks: [],
+    cueProfiles: [],
+    customSounds: [],
+    sessions: [],
+    settings: {}
+  }, { replace: true });
+  assert.equal((await db.all('queues')).length, 1);
+  assert.equal((await db.all('queues'))[0].id, 'keep-queue');
 });
 
 test('saving an existing reusable block increments its revision', async () => {
@@ -45,14 +115,14 @@ test('backup preserves advanced generator and formula routine configuration', as
   assert.deepEqual(routine.config, config);
 });
 
-test('backup v4 round-trips cue profiles and custom audio bytes', async () => {
+test('backup v5 round-trips cue profiles and custom audio bytes', async () => {
   const db = new TimerDB();
   await db.open();
   await db.saveCueProfile({ id: 'cue-x', title: 'Gym Voice', sound: true, voice: true, soundPack: 'gym', warningSeconds: 10 });
   const bytes = new Uint8Array([1,2,3,4,5]).buffer;
   await db.saveCustomSound({ id: 'sound-x', title: 'Bell', mimeType: 'audio/wav', size: 5, durationMs: 400, data: bytes });
   const backup = await db.exportData();
-  assert.equal(backup.version, 4);
+  assert.equal(backup.version, 5);
   assert.equal(backup.cueProfiles.length, 1);
   assert.equal(backup.customSounds.length, 1);
   assert.equal(typeof backup.customSounds[0].dataBase64, 'string');
@@ -116,7 +186,7 @@ test('selective backups only carry requested categories', async () => {
   await db.open();
   await db.saveRoutine({ id: 'only-r', type: 'interval', title: 'Routine', config: { work: 40, rest: 20, rounds: 3, prepare: 0 } });
   await db.put('sessions', { id: 'only-s', startedAt: 1, title: 'Session' });
-  const backup = await db.exportData({ selection: { routines: true, blocks: false, cueProfiles: false, customSounds: false, sessions: false, settings: false } });
+  const backup = await db.exportData({ selection: { routines: true, queues: false, blocks: false, cueProfiles: false, customSounds: false, sessions: false, settings: false } });
   assert.equal(backup.routines.length, 1);
   assert.equal(backup.sessions.length, 0);
   assert.equal(backup.settings, null);

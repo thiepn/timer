@@ -7,7 +7,7 @@ import {
 import { TimerDB, defaultSettings, requestPersistentStorage, storageEstimate } from './db.js';
 import { CueManager, WakeLockManager, requestNotificationPermission, showCompletionNotification, showActiveSessionNotification, closeTimerNotification, BUILTIN_CUE_PROFILES, SOUND_PACKS, cueProfileById, profileSettings } from './audio.js';
 import { analyzeSession, comparisonFingerprint, comparableSessions, objectiveRecord, factualTrend, summarizeRange, startOfLocalDay, startOfLocalWeek, monthCalendar, sessionsToCsv } from './analytics.js';
-import { createBackupArchive, verifyBackupArchive, encryptBackupArchive, decryptBackupArchive, isLegacyBackup, isEncryptedBackup, isBackupArchive, isRoutinePackage, backupCounts } from './resilience.js';
+import { createBackupArchive, verifyBackupArchive, encryptBackupArchive, decryptBackupArchive, isLegacyBackup, isEncryptedBackup, isBackupArchive, isRoutinePackage, backupCounts, assertBackupEntityLimits } from './resilience.js';
 import { SessionOwnershipManager, MediaSessionManager, parseLaunchCommand, detectDeviceCapabilities } from './device.js';
 import { LOCALE_OPTIONS, resolveLocale, applyDocumentLocale, localizeDOM, translateSource, translateBuiltInLabel, phaseLabel as localizedPhaseLabel, formatDuration, formatDate, formatNumber, t as i18nT } from './i18n.js';
 import { FocusTrap, Announcer, focusMainHeading, isInteractiveTarget, timerEventAnnouncement } from './accessibility.js';
@@ -15,6 +15,7 @@ import { PerformanceMetrics, MaintenanceCoordinator, liveSchedulerPolicy, reduce
 import { TimerCoordinator, COMPLETION_ACTIONS, normalizeCompletionAction } from './coordinator.js';
 import { parseDurationInput, durationInputText, normalizeDurationList, pushRecentDuration, DEFAULT_QUICK_PRESETS, DEFAULT_QUICK_ADJUSTMENTS } from './quick.js';
 import { DEFAULT_SAVED_TIMER_COLLECTIONS, SAVED_TIMER_ACCENTS, normalizeSavedTimerRecord, normalizeSavedTimerTags, normalizeSavedTimerCollections, needsSavedTimerMigration, savedTimerSearchText, savedTimerMatchesView, sortSavedTimers, duplicateSavedTimerRecord } from './saved.js';
+import { QUEUE_STEP_ACTIONS, normalizeQueuePreset, normalizeQueueStepAction, createQueueRun, normalizeQueueRun, queueCurrentItem, queueProgress, advanceQueueRun, reorderQueueItems, queuePresetFromTimerIds } from './queue.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -25,7 +26,7 @@ const ms = (seconds) => Math.max(0, Math.round(Number(seconds || 0) * 1000));
 const sec = (milliseconds) => Math.round(Number(milliseconds || 0) / 1000);
 const mins = (minutes) => ms(Number(minutes || 0) * 60);
 const pct = (n) => `${Math.round(clamp(n || 0, 0, 1) * 100)}%`;
-const APP_VERSION = '2.4.0';
+const APP_VERSION = '2.5.0';
 
 const BUILDER_META = {
   countdown: { name: 'Countdown', desc: 'Reusable fixed-duration countdown' },
@@ -140,6 +141,11 @@ const state = {
   db: new TimerDB(),
   settings: { ...defaultSettings },
   routines: [],
+  queues: [],
+  activeQueue: null,
+  queueDraft: null,
+  queueDragIndex: null,
+  queueTransitionRuntimeIds: new Set(),
   blocks: [],
   cueProfiles: [],
   customSounds: [],
@@ -559,6 +565,7 @@ async function relinquishRuntimeOwnership() {
   mediaSession.disable();
   coordinator.clear();
   syncFocusedRuntime(null);
+  state.activeQueue = null;
   if (bundle.sessions.length) setRemoteActive(bundle);
   ownership.stopHeartbeat();
   await ownership.release();
@@ -574,8 +581,14 @@ async function takeOverActiveSession() {
   for (let i = 0; i < 20; i++) {
     if (await ownership.acquire()) {
       state.pendingTakeover = false;
-      const records = await state.db.getActiveSessions().catch(() => []);
-      if (records.length && await restoreOwnedActive(records)) return;
+      const [records, queueRuns] = await Promise.all([
+        state.db.getActiveSessions().catch(() => []),
+        state.db.getActiveQueues().catch(() => [])
+      ]);
+      if (records.length && await restoreOwnedActive(records)) {
+        await restoreActiveQueueRuns(queueRuns);
+        return;
+      }
       await ownership.release();
       setRemoteActive(null);
       render();
@@ -736,7 +749,7 @@ function renderTimerHome() {
   const parsed = quickInputResult();
   const preview = parsed.ok ? `${durationLabel(parsed.ms)} · ready to start` : parsed.error;
   main.innerHTML = `
-    <div class="page-head home-head"><div><h1>Timer</h1><p>One timer or many. Start in seconds.</p></div>${coordinator.size() ? `<span class="pill active-count-pill">${coordinator.size()} active</span>` : ''}</div>
+    <div class="page-head home-head"><div><h1>Timer</h1><p>One timer or many. Start in seconds.</p></div><div class="row" style="flex-wrap:wrap;justify-content:flex-end">${state.activeQueue ? `<button class="pill active-count-pill" data-action="open-workspace">Queue ${queueProgress(state.activeQueue).current}/${queueProgress(state.activeQueue).total}</button>` : ''}${coordinator.size() ? `<span class="pill active-count-pill">${coordinator.size()} active</span>` : ''}</div></div>
 
     ${coordinator.size() ? `<section class="section active-timers-section home-active-section"><div class="row-between"><div><h2 class="section-title" style="margin:0">Active Timers</h2><div class="small muted" style="margin-top:4px">All timers keep running independently.</div></div><div class="row"><span class="pill">${coordinator.size()}</span><button class="btn compact-btn" data-action="open-workspace">Workspace</button></div></div><div class="active-timer-grid">${coordinator.list().map(activeTimerCard).join('')}</div></section>` : ''}
 
@@ -787,6 +800,403 @@ function activeTimerCard(runtime) {
   </article>`;
 }
 
+
+
+function queueTimerById(id) {
+  return state.routines.find((timer) => timer.id === id) || null;
+}
+
+function queueTimerTitle(item) {
+  return queueTimerById(item?.savedTimerId)?.title || item?.title || 'Missing Saved Timer';
+}
+
+function queueStepActionLabel(action) {
+  return ({
+    [QUEUE_STEP_ACTIONS.ADVANCE]: 'Advance',
+    [QUEUE_STEP_ACTIONS.OVERTIME]: 'Overtime',
+    [QUEUE_STEP_ACTIONS.REPEAT]: 'Repeat step',
+    [QUEUE_STEP_ACTIONS.STOP]: 'Stop queue'
+  })[normalizeQueueStepAction(action)] || 'Advance';
+}
+
+function queueStepRuntimeAction(action) {
+  action = normalizeQueueStepAction(action);
+  if (action === QUEUE_STEP_ACTIONS.OVERTIME) return COMPLETION_ACTIONS.OVERTIME;
+  if (action === QUEUE_STEP_ACTIONS.REPEAT) return COMPLETION_ACTIONS.REPEAT;
+  return COMPLETION_ACTIONS.STOP;
+}
+
+async function persistActiveQueue() {
+  if (!state.activeQueue?.id) return false;
+  state.activeQueue.updatedAt = Date.now();
+  await state.db.saveActiveQueue(state.activeQueue);
+  return true;
+}
+
+async function clearActiveQueueState() {
+  const id = state.activeQueue?.id;
+  state.activeQueue = null;
+  if (id) await state.db.clearActiveQueue(id).catch(() => {});
+}
+
+async function startQueueCurrentItem({ focus = false, preserveFocus = false } = {}) {
+  if (!state.activeQueue || state.activeQueue.status !== 'running') return null;
+  let attempts = 0;
+  while (state.activeQueue && attempts < Math.max(1, state.activeQueue.items.length)) {
+    const item = queueCurrentItem(state.activeQueue);
+    if (!item) {
+      await clearActiveQueueState();
+      return null;
+    }
+    const timer = queueTimerById(item.savedTimerId);
+    if (!timer || timer.archived) {
+      const advanced = advanceQueueRun(state.activeQueue, { skipped: true });
+      state.activeQueue = advanced.run;
+      if (advanced.finished) {
+        await clearActiveQueueState();
+        toast('Queue ended because remaining Saved Timers are unavailable.', 4200);
+        return null;
+      }
+      await persistActiveQueue();
+      attempts += 1;
+      continue;
+    }
+    const runtime = await startSavedRoutineAutomated(item.savedTimerId, {
+      background: !focus,
+      backgroundRoute: 'workspace',
+      preserveFocus,
+      completionActionOverride: queueStepRuntimeAction(item.action),
+      metaPatch: {
+        queueRunId: state.activeQueue.id,
+        queuePresetId: state.activeQueue.queueId || '',
+        queueItemId: item.id,
+        queueStepIndex: state.activeQueue.currentIndex,
+        queueStepAction: item.action,
+        workspaceGroup: `Queue · ${state.activeQueue.title}`
+      }
+    });
+    if (!runtime) {
+      const advanced = advanceQueueRun(state.activeQueue, { skipped: true });
+      state.activeQueue = advanced.run;
+      if (advanced.finished) {
+        await clearActiveQueueState();
+        toast('Queue could not start any remaining Saved Timer.', 4200);
+        return null;
+      }
+      await persistActiveQueue();
+      attempts += 1;
+      continue;
+    }
+    state.activeQueue.currentRuntimeId = runtime.id;
+    await persistActiveQueue();
+    return runtime;
+  }
+  return null;
+}
+
+async function startQueue(queueOrId, { focus = false } = {}) {
+  if (state.activeQueue && ['running','paused'].includes(state.activeQueue.status)) {
+    openWorkspace();
+    return toast('A queue is already active. Stop it before starting another queue.', 4200);
+  }
+  const source = typeof queueOrId === 'string' ? state.queues.find((queue) => queue.id === queueOrId) : queueOrId;
+  const queue = normalizeQueuePreset(source || {});
+  if (!queue.items.length) return toast('Add at least one Saved Timer to the queue.');
+  if (!queue.items.some((item) => queueTimerById(item.savedTimerId) && !queueTimerById(item.savedTimerId).archived)) return toast('This queue has no available Saved Timers.');
+  state.activeQueue = createQueueRun(queue, { id: uid('queue_run') });
+  if (source?.id) {
+    const stored = state.queues.find((item) => item.id === source.id);
+    if (stored) {
+      stored.useCount = (stored.useCount || 0) + 1;
+      stored.lastUsedAt = Date.now();
+      await state.db.saveQueue(stored);
+      await loadCollections();
+    }
+  }
+  await persistActiveQueue();
+  state.route = 'workspace';
+  const runtime = await startQueueCurrentItem({ focus, preserveFocus: false });
+  render();
+  if (!runtime) return toast('Queue could not be started.', 4200);
+  return runtime;
+}
+
+async function pauseActiveQueue() {
+  const run = state.activeQueue;
+  if (!run || run.status !== 'running') return false;
+  run.status = 'paused';
+  const runtimeId = run.currentRuntimeId;
+  if (runtimeId && coordinator.has(runtimeId)) {
+    coordinator.pause(runtimeId);
+    await persistRuntime(runtimeId);
+  }
+  await persistActiveQueue();
+  broadcastActiveSnapshot();
+  updateActiveTimerCards();
+  return true;
+}
+
+async function resumeActiveQueue() {
+  const run = state.activeQueue;
+  if (!run || run.status !== 'paused') return false;
+  run.status = 'running';
+  const runtimeId = run.currentRuntimeId;
+  if (runtimeId && coordinator.has(runtimeId)) {
+    coordinator.resume(runtimeId);
+    await persistRuntime(runtimeId);
+  } else {
+    await startQueueCurrentItem({ focus: false, preserveFocus: Boolean(state.activeTimerId) });
+  }
+  await persistActiveQueue();
+  broadcastActiveSnapshot();
+  updateActiveTimerCards();
+  return true;
+}
+
+async function skipActiveQueueStep() {
+  const run = state.activeQueue;
+  if (!run || !['running','paused'].includes(run.status)) return false;
+  const oldRuntimeId = run.currentRuntimeId;
+  const advanced = advanceQueueRun(run, { skipped: true });
+  state.activeQueue = advanced.run;
+  if (oldRuntimeId) state.queueTransitionRuntimeIds.add(oldRuntimeId);
+  if (advanced.finished) await clearActiveQueueState();
+  else {
+    state.activeQueue.status = 'running';
+    await persistActiveQueue();
+    await startQueueCurrentItem({ focus: false, preserveFocus: Boolean(state.activeTimerId && state.activeTimerId !== oldRuntimeId) });
+  }
+  if (oldRuntimeId && coordinator.has(oldRuntimeId)) coordinator.command(oldRuntimeId, 'stop', 'queue-skipped');
+  if (oldRuntimeId) queueMicrotask(() => state.queueTransitionRuntimeIds.delete(oldRuntimeId));
+  if (state.route === 'workspace' && !state.engine) renderMultiTimerWorkspace();
+  return true;
+}
+
+async function stopActiveQueue() {
+  const run = state.activeQueue;
+  if (!run) return false;
+  const runtimeId = run.currentRuntimeId;
+  if (runtimeId) state.queueTransitionRuntimeIds.add(runtimeId);
+  await clearActiveQueueState();
+  if (runtimeId && coordinator.has(runtimeId)) coordinator.command(runtimeId, 'stop', 'queue-stopped');
+  if (runtimeId) queueMicrotask(() => state.queueTransitionRuntimeIds.delete(runtimeId));
+  if (state.route === 'workspace' && !state.engine) renderMultiTimerWorkspace();
+  return true;
+}
+
+async function handleQueueRuntimeTerminal(runtime, event) {
+  const run = state.activeQueue;
+  if (!run || runtime?.meta?.queueRunId !== run.id || run.currentRuntimeId !== runtime.id) return false;
+  if (state.queueTransitionRuntimeIds.has(runtime.id)) return true;
+  const item = queueCurrentItem(run);
+  if (!item || event.cancelled) {
+    await clearActiveQueueState();
+    return true;
+  }
+  if (event.snapshot?.completionReason === 'user-ended') {
+    await clearActiveQueueState();
+    return true;
+  }
+  const action = normalizeQueueStepAction(item.action);
+  if (action === QUEUE_STEP_ACTIONS.STOP) {
+    const advanced = advanceQueueRun(run, { skipped: false });
+    advanced.run.status = 'stopped';
+    state.activeQueue = advanced.run;
+    await clearActiveQueueState();
+    return true;
+  }
+  const advanced = advanceQueueRun(run, { skipped: false });
+  state.activeQueue = advanced.run;
+  if (advanced.finished) {
+    await clearActiveQueueState();
+    return true;
+  }
+  await persistActiveQueue();
+  await startQueueCurrentItem({
+    focus: state.activeTimerId === runtime.id,
+    preserveFocus: Boolean(state.activeTimerId && state.activeTimerId !== runtime.id)
+  });
+  return true;
+}
+
+async function restoreActiveQueueRuns(runs = []) {
+  const live = (runs || []).map((run) => normalizeQueueRun(run)).find((run) => ['running','paused'].includes(run.status));
+  if (!live) return false;
+  state.activeQueue = live;
+  if (live.currentRuntimeId && coordinator.has(live.currentRuntimeId)) {
+    if (live.status === 'paused') coordinator.pause(live.currentRuntimeId);
+    await persistActiveQueue();
+    return true;
+  }
+  const wantedPaused = live.status === 'paused';
+  state.activeQueue.status = 'running';
+  const runtime = await startQueueCurrentItem({ focus: false, preserveFocus: Boolean(state.activeTimerId) });
+  if (runtime && wantedPaused) {
+    state.activeQueue.status = 'paused';
+    coordinator.pause(runtime.id);
+    await persistRuntime(runtime.id);
+    await persistActiveQueue();
+  }
+  return Boolean(runtime);
+}
+
+function renderActiveQueuePanel() {
+  const run = state.activeQueue;
+  if (!run || !['running','paused'].includes(run.status)) return '';
+  const progress = queueProgress(run);
+  const current = queueCurrentItem(run);
+  const rows = run.items.map((item, index) => {
+    const stateClass = index < run.currentIndex ? 'done' : index === run.currentIndex ? 'current' : 'queued';
+    const status = index < run.currentIndex ? 'Done' : index === run.currentIndex ? (run.status === 'paused' ? 'Paused' : 'Now') : 'Queued';
+    return `<div class="queue-run-item ${stateClass}"><span class="queue-run-index">${index + 1}</span><span class="queue-run-copy"><strong>${esc(queueTimerTitle(item))}</strong><small>${esc(queueStepActionLabel(item.action))}</small></span><span class="queue-run-status">${status}</span></div>`;
+  }).join('');
+  return `<section class="active-queue-panel card card-pad">
+    <div class="row-between"><div><div class="quick-label">Active Queue</div><h2>${esc(run.title)}</h2></div><span class="pill">Cycle ${progress.cycle}</span></div>
+    <div class="queue-progress-copy"><strong>${progress.current} / ${progress.total}</strong><span>${current ? esc(queueTimerTitle(current)) : 'Complete'} · ${progress.completedSteps} completed · ${progress.skippedSteps} skipped</span></div>
+    <div class="queue-progress-track"><span style="transform:scaleX(${Math.max(0, Math.min(1, progress.percent))})"></span></div>
+    <div class="queue-run-list">${rows}</div>
+    <div class="queue-control-row">
+      <button class="btn primary" data-action="${run.status === 'paused' ? 'queue-resume' : 'queue-pause'}">${run.status === 'paused' ? 'Resume queue' : 'Pause queue'}</button>
+      <button class="btn" data-action="queue-skip">Skip</button>
+      <button class="btn danger" data-action="queue-stop">Stop queue</button>
+    </div>
+  </section>`;
+}
+
+
+function queueRow(queue) {
+  const normalized = normalizeQueuePreset(queue);
+  const duration = normalized.items.reduce((total, item) => {
+    const timer = queueTimerById(item.savedTimerId);
+    const d = timer ? savedTimerDuration(timer) : null;
+    return total == null || d == null ? null : total + d;
+  }, 0);
+  return `<div class="queue-preset-row">
+    <button class="queue-preset-main" data-action="edit-queue" data-id="${esc(normalized.id)}"><strong>${esc(normalized.title)}</strong><span>${normalized.items.length} timer${normalized.items.length === 1 ? '' : 's'}${normalized.loop ? ' · loops' : ''}${duration != null ? ` · ${esc(durationLabel(duration))}` : ''}</span></button>
+    <button class="btn compact-btn" data-action="start-queue" data-id="${esc(normalized.id)}">Start</button>
+    <button class="icon-btn danger-text" data-action="delete-queue" data-id="${esc(normalized.id)}" aria-label="Delete ${esc(normalized.title)}">×</button>
+  </div>`;
+}
+
+function showQueueLibrarySheet() {
+  showSheet('Timer Queues', `<div class="stack">
+    <button class="btn primary block" data-action="new-queue">＋ New Queue</button>
+    <div class="queue-preset-list">${state.queues.length ? state.queues.map(queueRow).join('') : '<div class="empty">No saved queues yet.</div>'}</div>
+  </div>`);
+}
+
+function defaultQueueTitleFromView() {
+  if (state.libraryView?.startsWith('collection:')) return `${state.libraryView.slice('collection:'.length)} Queue`;
+  if (state.libraryView === 'favorites') return 'Favorites Queue';
+  if (state.libraryView === 'pinned') return 'Pinned Queue';
+  return 'Timer Queue';
+}
+
+function openQueueBuilderFromTimerIds(timerIds = [], title = 'Timer Queue') {
+  const preset = queuePresetFromTimerIds(timerIds, { id: uid('queue'), title });
+  state.queueDraft = normalizeQueuePreset(preset);
+  renderQueueBuilderSheet();
+}
+
+function showQueueBuilder(queueId = null) {
+  const queue = queueId ? state.queues.find((item) => item.id === queueId) : null;
+  state.queueDraft = normalizeQueuePreset(queue ? structuredClone(queue) : { id: uid('queue'), title: 'Timer Queue', items: [], loop: false });
+  renderQueueBuilderSheet();
+}
+
+function renderQueueBuilderSheet() {
+  const queue = normalizeQueuePreset(state.queueDraft || { id: uid('queue'), title: 'Timer Queue', items: [] });
+  state.queueDraft = queue;
+  const itemRows = queue.items.map((item, index) => {
+    const timer = queueTimerById(item.savedTimerId);
+    return `<div class="queue-builder-item" draggable="true" data-queue-draft-index="${index}">
+      <div class="queue-drag-handle" aria-hidden="true">⋮⋮</div>
+      <div class="queue-builder-copy"><strong>${esc(timer?.title || 'Missing Saved Timer')}</strong><small>${esc(timer ? (BUILDER_META[timer.type]?.name || timer.type) : item.savedTimerId)}</small></div>
+      <select class="select queue-action-select" data-queue-item-action data-index="${index}" aria-label="Completion behavior for ${esc(timer?.title || 'queue item')}">
+        <option value="advance" ${item.action === 'advance' ? 'selected' : ''}>Advance</option>
+        <option value="overtime" ${item.action === 'overtime' ? 'selected' : ''}>Overtime</option>
+        <option value="repeat" ${item.action === 'repeat' ? 'selected' : ''}>Repeat</option>
+        <option value="stop" ${item.action === 'stop' ? 'selected' : ''}>Stop queue</option>
+      </select>
+      <div class="queue-item-buttons">
+        <button class="icon-btn" data-action="queue-item-move" data-index="${index}" data-delta="-1" ${index === 0 ? 'disabled' : ''} aria-label="Move earlier">↑</button>
+        <button class="icon-btn" data-action="queue-item-move" data-index="${index}" data-delta="1" ${index === queue.items.length - 1 ? 'disabled' : ''} aria-label="Move later">↓</button>
+        <button class="icon-btn danger-text" data-action="queue-item-remove" data-index="${index}" aria-label="Remove item">×</button>
+      </div>
+    </div>`;
+  }).join('');
+  showSheet(queue.id && state.queues.some((item) => item.id === queue.id) ? 'Edit Queue' : 'New Queue', `<div class="stack queue-builder">
+    <label class="field"><span>Name</span><input class="input" data-queue-draft-field="title" maxlength="120" value="${esc(queue.title)}"></label>
+    <label class="field"><span>Description</span><textarea class="input" rows="2" maxlength="500" data-queue-draft-field="description" placeholder="Optional">${esc(queue.description || '')}</textarea></label>
+    <label class="check-row"><input type="checkbox" data-queue-draft-loop ${queue.loop ? 'checked' : ''}> <span><strong>Loop whole queue</strong><small>After the final item, start again at item 1 and increment the queue cycle.</small></span></label>
+    <div class="row-between"><div><div class="section-title" style="margin:0">Queue items</div><div class="small muted">Drag to reorder, or use the arrow buttons.</div></div><button class="btn" data-action="queue-add-timer">＋ Add Timer</button></div>
+    <div class="queue-builder-list">${itemRows || '<div class="empty">Add Saved Timers to build the queue.</div>'}</div>
+    <div class="row queue-builder-actions" style="flex-wrap:wrap"><button class="btn primary" data-action="save-queue-draft">Save Queue</button><button class="btn" data-action="save-start-queue-draft" ${queue.items.length ? '' : 'disabled'}>Save & Start</button></div>
+  </div>`);
+}
+
+function showQueueTimerPicker() {
+  const timers = state.routines.filter((item) => !item.archived);
+  showSheet('Add Saved Timer', `<div class="sheet-list">${timers.length ? timers.map((timer) => `<button class="sheet-item" data-action="queue-add-picked-timer" data-id="${esc(timer.id)}"><div><strong>${esc(timer.title)}</strong><div class="small muted">${esc(BUILDER_META[timer.type]?.name || timer.type)} · ${esc(typeSummary(timer.type, timer.config || {}))}</div></div><span>＋</span></button>`).join('') : '<div class="empty">No Saved Timers available.</div>'}<button class="btn block" data-action="queue-return-builder">Back to Queue</button></div>`);
+}
+
+function addQueueDraftTimer(timerId) {
+  const timer = queueTimerById(timerId);
+  if (!timer || !state.queueDraft) return;
+  const next = normalizeQueuePreset({
+    ...state.queueDraft,
+    items: [...state.queueDraft.items, { id: uid('queue_item'), savedTimerId: timer.id, title: timer.title, action: QUEUE_STEP_ACTIONS.ADVANCE }]
+  });
+  state.queueDraft = next;
+  renderQueueBuilderSheet();
+}
+
+function moveQueueDraftItem(index, delta) {
+  if (!state.queueDraft) return;
+  const to = Math.max(0, Math.min(state.queueDraft.items.length - 1, Number(index) + Number(delta)));
+  state.queueDraft.items = reorderQueueItems(state.queueDraft.items, Number(index), to);
+  renderQueueBuilderSheet();
+}
+
+function removeQueueDraftItem(index) {
+  if (!state.queueDraft) return;
+  state.queueDraft.items.splice(Number(index), 1);
+  state.queueDraft = normalizeQueuePreset(state.queueDraft);
+  renderQueueBuilderSheet();
+}
+
+async function saveQueueDraft({ start = false } = {}) {
+  if (!state.queueDraft) return;
+  const titleInput = $('#sheet-root [data-queue-draft-field="title"]');
+  const descriptionInput = $('#sheet-root [data-queue-draft-field="description"]');
+  const loopInput = $('#sheet-root [data-queue-draft-loop]');
+  state.queueDraft.title = String(titleInput?.value || state.queueDraft.title || 'Timer Queue').trim().slice(0, 120) || 'Timer Queue';
+  state.queueDraft.description = String(descriptionInput?.value || '').trim().slice(0, 500);
+  state.queueDraft.loop = Boolean(loopInput?.checked);
+  state.queueDraft = normalizeQueuePreset(state.queueDraft);
+  if (!state.queueDraft.items.length) return toast('Add at least one Saved Timer before saving.');
+  const invalid = state.queueDraft.items.find((item) => !queueTimerById(item.savedTimerId));
+  if (invalid) return toast('Remove missing Saved Timers before saving this queue.', 4200);
+  const saved = await state.db.saveQueue(state.queueDraft);
+  await loadCollections();
+  state.queueDraft = null;
+  closeSheet();
+  toast('Queue saved.');
+  if (start) await startQueue(saved.id);
+  else if (state.route === 'library') renderLibrary();
+}
+
+async function deleteQueue(id) {
+  const queue = state.queues.find((item) => item.id === id);
+  if (!queue) return;
+  if (!confirm(`Delete queue “${queue.title}”?`)) return;
+  await state.db.delete('queues', id);
+  await loadCollections();
+  closeSheet();
+  if (state.route === 'library') renderLibrary();
+  else showQueueLibrarySheet();
+  toast('Queue deleted.');
+}
 
 function workspaceTitle(runtime) {
   return runtime?.meta?.workspaceTitle || runtime?.meta?.title || coordinator.view(runtime?.id)?.title || 'Timer';
@@ -856,7 +1266,8 @@ function renderMultiTimerWorkspace() {
     const cards = shown.map((runtime) => workspaceRuntimeCard(runtime, runtimes.indexOf(runtime), runtimes.length)).join('');
     return `<section class="workspace-group"><div class="row-between"><h2>${esc(group)}</h2><span class="pill">${items.length}</span></div><div class="workspace-timer-grid">${cards}</div></section>`;
   }).join('');
-  main.innerHTML = `<div class="page-head workspace-head"><div><h1>Multi-Timer Workspace</h1><p>Control, group, order and chain every active timer.</p></div><div class="row"><button class="btn" data-action="workspace-launch-saved">＋ Saved</button><button class="btn primary" data-action="create">＋ New</button></div></div>
+  main.innerHTML = `<div class="page-head workspace-head"><div><h1>Multi-Timer Workspace</h1><p>Control independent timers and automation queues from one place.</p></div><div class="row"><button class="btn" data-action="show-queue-library">Queues</button><button class="btn" data-action="workspace-launch-saved">＋ Saved</button><button class="btn primary" data-action="create">＋ New</button></div></div>
+    ${renderActiveQueuePanel()}
     <section class="workspace-toolbar card card-pad">
       <div class="segmented workspace-layout-switch" role="group" aria-label="Workspace layout">${layoutButton('grid','Grid')}${layoutButton('compact','Compact')}${layoutButton('focus','Focus')}</div>
       <div class="workspace-bulk-actions"><button class="btn compact-btn" data-action="workspace-pause-all" ${runtimes.length ? '' : 'disabled'}>Pause all</button><button class="btn compact-btn" data-action="workspace-resume-all" ${runtimes.length ? '' : 'disabled'}>Resume all</button><button class="btn compact-btn danger" data-action="workspace-stop-all" ${runtimes.length ? '' : 'disabled'}>Stop all</button></div>
@@ -1703,7 +2114,7 @@ async function startRoutine(id) {
 }
 
 
-async function startSavedRoutineAutomated(id, { background = true, backgroundRoute = 'workspace', preserveFocus = false, workspaceGroup = '', workspaceColor = 'default' } = {}) {
+async function startSavedRoutineAutomated(id, { background = true, backgroundRoute = 'workspace', preserveFocus = false, workspaceGroup = '', workspaceColor = 'default', completionActionOverride = null, metaPatch = {} } = {}) {
   const routine = state.routines.find((item) => item.id === id);
   if (!routine || routine.archived) return null;
   let parameterValues = {};
@@ -1735,13 +2146,14 @@ async function startSavedRoutineAutomated(id, { background = true, backgroundRou
     parameterValues,
     completionNextRoutineId: routine.completionNextRoutineId || '',
     workspaceGroup,
-    workspaceColor
+    workspaceColor,
+    ...structuredClone(metaPatch || {})
   };
   return startSession(plan, meta, {
     background,
     backgroundRoute,
     preserveFocus,
-    completionAction: routine.completionAction || COMPLETION_ACTIONS.STOP
+    completionAction: completionActionOverride || routine.completionAction || COMPLETION_ACTIONS.STOP
   });
 }
 
@@ -1924,8 +2336,9 @@ async function handleCoordinatorEvent(event) {
   }
   if (event.type === 'runtime-terminal') {
     const wasFocused = state.activeTimerId === runtimeId;
+    const queueHandled = await handleQueueRuntimeTerminal(runtime, event);
     let chained = null;
-    if (event.startNext && !event.cancelled) {
+    if (!queueHandled && event.startNext && !event.cancelled) {
       const nextRoutineId = runtime?.meta?.completionNextRoutineId;
       if (nextRoutineId) {
         chained = await startSavedRoutineAutomated(nextRoutineId, {
@@ -1938,7 +2351,7 @@ async function handleCoordinatorEvent(event) {
       }
     }
     await finalizeRuntime(runtimeId, event.snapshot, Boolean(event.cancelled));
-    if (event.startNext && !chained) toast('The configured next Saved Timer could not be started.', 4200);
+    if (!queueHandled && event.startNext && !chained) toast('The configured next Saved Timer could not be started.', 4200);
   }
 }
 
@@ -2280,10 +2693,11 @@ function renderLibrary() {
   const blockMatches = (block) => !query || `${block.title || ''} reusable block ${(block.parameters || []).map((parameter) => parameter.label).join(' ')}`.toLowerCase().includes(query);
   const blocks = [...state.blocks].filter(blockMatches).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   const collections = savedTimerCollections();
+  const queues = state.queues.filter((queue) => !query || `${queue.title || ''} ${queue.description || ''}`.toLowerCase().includes(query));
   const selectedCount = state.savedSelected.size;
   const viewChip = (value, label) => `<button class="library-filter-chip ${state.libraryView === value ? 'active' : ''}" data-action="saved-view" data-view="${esc(value)}">${esc(label)}</button>`;
 
-  main.innerHTML = `<div class="page-head"><div><h1>Saved Timers</h1><p>Presets, sequences and specialized timers in one library.</p></div><button class="btn primary" data-action="create">+ Create</button></div>
+  main.innerHTML = `<div class="page-head"><div><h1>Saved Timers</h1><p>Presets, queues, sequences and specialized timers in one library.</p></div><div class="row" style="flex-wrap:wrap"><button class="btn" data-action="queue-from-view">Queue view</button><button class="btn primary" data-action="create">+ Create</button></div></div>
     <div class="saved-library-toolbar card card-pad">
       <div class="field"><label for="library-search">Search saved timers or blocks</label><input id="library-search" class="input" type="search" data-library-search value="${esc(state.libraryQuery)}" placeholder="Name, description, collection, tag, or timer type"></div>
       <div class="library-filter-strip" aria-label="Saved timer views">
@@ -2297,11 +2711,12 @@ function renderLibrary() {
           <option value="alphabetical" ${state.librarySort === 'alphabetical' ? 'selected' : ''}>Alphabetical</option>
           <option value="duration" ${state.librarySort === 'duration' ? 'selected' : ''}>Duration</option>
         </select></label>
-        <div class="row library-toolbar-actions"><button class="btn" data-action="manage-saved-collections">Collections</button><button class="btn ${state.savedSelectMode ? 'primary' : ''}" data-action="toggle-saved-select-mode">${state.savedSelectMode ? 'Done' : 'Select'}</button></div>
+        <div class="row library-toolbar-actions"><button class="btn" data-action="show-queue-library">Queues</button><button class="btn" data-action="manage-saved-collections">Collections</button><button class="btn ${state.savedSelectMode ? 'primary' : ''}" data-action="toggle-saved-select-mode">${state.savedSelectMode ? 'Done' : 'Select'}</button></div>
       </div>
     </div>
-    ${state.savedSelectMode ? `<div class="saved-bulk-bar card"><strong>${selectedCount} selected</strong><div class="saved-bulk-actions"><button class="btn compact-btn" data-action="select-all-visible">All</button><button class="btn compact-btn" data-action="bulk-saved-move" ${selectedCount ? '' : 'disabled'}>Move</button><button class="btn compact-btn" data-action="${state.libraryView === 'archived' ? 'bulk-saved-restore' : 'bulk-saved-archive'}" ${selectedCount ? '' : 'disabled'}>${state.libraryView === 'archived' ? 'Restore' : 'Archive'}</button><button class="btn compact-btn danger" data-action="bulk-saved-delete" ${selectedCount ? '' : 'disabled'}>Delete</button></div></div>` : ''}
+    ${state.savedSelectMode ? `<div class="saved-bulk-bar card"><strong>${selectedCount} selected</strong><div class="saved-bulk-actions"><button class="btn compact-btn" data-action="select-all-visible">All</button><button class="btn compact-btn" data-action="queue-from-selection" ${selectedCount ? '' : 'disabled'}>Queue</button><button class="btn compact-btn" data-action="bulk-saved-move" ${selectedCount ? '' : 'disabled'}>Move</button><button class="btn compact-btn" data-action="${state.libraryView === 'archived' ? 'bulk-saved-restore' : 'bulk-saved-archive'}" ${selectedCount ? '' : 'disabled'}>${state.libraryView === 'archived' ? 'Restore' : 'Archive'}</button><button class="btn compact-btn danger" data-action="bulk-saved-delete" ${selectedCount ? '' : 'disabled'}>Delete</button></div></div>` : ''}
     <section class="section"><div class="row-between"><div><h2 class="section-title" style="margin:0">${esc(libraryViewLabel())}</h2><div class="small muted" style="margin-top:5px">${esc(state.librarySort === 'most-used' ? 'Sorted by usage' : state.librarySort === 'alphabetical' ? 'Sorted A-Z' : state.librarySort === 'duration' ? 'Shortest finite duration first' : 'Most recently used or changed first')}</div></div><span class="pill">${routines.length}</span></div><div class="saved-timer-list" style="margin-top:12px">${routines.length ? routines.map(routineRow).join('') : `<div class="card empty"><p>${query ? 'No saved timers match your search.' : state.libraryView === 'archived' ? 'Archive is empty.' : 'No saved timers in this view.'}</p>${query || state.libraryView === 'archived' ? '' : '<button class="btn primary" data-action="create">Create timer</button>'}</div>`}</div></section>
+    <section class="section"><div class="row-between"><div><h2 class="section-title" style="margin:0">Saved Queues</h2><div class="small muted" style="margin-top:5px">Reusable ordered timer automations.</div></div><div class="row"><span class="pill">${queues.length}</span><button class="btn compact-btn" data-action="new-queue">＋ Queue</button></div></div><div class="queue-preset-list" style="margin-top:12px">${queues.length ? queues.map(queueRow).join('') : '<div class="card empty">No saved queues yet.</div>'}</div></section>
     ${(blocks.length || (!query && state.blocks.length === 0)) ? `<section class="section"><div class="row-between"><div><h2 class="section-title" style="margin:0">Reusable Blocks</h2><div class="small muted" style="margin-top:5px">Linked building blocks for Sequence Timers.</div></div><span class="pill">${blocks.length}</span></div><div class="list" style="margin-top:12px">${blocks.length ? blocks.map(blockRow).join('') : `<div class="card empty">Create a Sequence Timer, then extract steps as reusable blocks.</div>`}</div></section>` : ''}`;
   if (state.librarySearchActive) {
     requestAnimationFrame(() => {
@@ -2893,6 +3308,7 @@ function backupSelectionFromSheet(root = document) {
     blocks: root.querySelector('[data-backup-part="blocks"]')?.checked !== false,
     cueProfiles: root.querySelector('[data-backup-part="cueProfiles"]')?.checked !== false,
     customSounds: root.querySelector('[data-backup-part="customSounds"]')?.checked !== false,
+    queues: root.querySelector('[data-backup-part="queues"]')?.checked !== false,
     sessions: root.querySelector('[data-backup-part="sessions"]')?.checked !== false,
     settings: root.querySelector('[data-backup-part="settings"]')?.checked !== false
   };
@@ -2902,7 +3318,7 @@ function showBackupExportSheet() {
   showSheet('Create Backup', `<div class="stack">
     <div class="small muted">Choose what to include. Full backups are recommended for disaster recovery.</div>
     <div class="backup-parts">
-      ${[['routines','Routines'],['blocks','Reusable blocks'],['cueProfiles','Cue profiles'],['customSounds','Custom sounds'],['sessions','Session history'],['settings','Settings']].map(([key,label]) => `<label class="check-row"><input type="checkbox" data-backup-part="${key}" checked> <span>${label}</span></label>`).join('')}
+      ${[['routines','Saved timers'],['queues','Saved queues'],['blocks','Reusable blocks'],['cueProfiles','Cue profiles'],['customSounds','Custom sounds'],['sessions','Session history'],['settings','Settings']].map(([key,label]) => `<label class="check-row"><input type="checkbox" data-backup-part="${key}" checked> <span>${label}</span></label>`).join('')}
     </div>
     <div class="field"><label for="backup-password">Password encryption <span class="muted">(optional)</span></label><input id="backup-password" class="input" type="password" autocomplete="new-password" placeholder="Leave blank for normal backup"><div class="tiny">Encrypted backups cannot be recovered if the password is lost.</div></div>
     <button class="btn primary big" data-action="confirm-export-backup">Export backup</button>
@@ -2961,7 +3377,7 @@ async function exportRoutinePackage(routineId) {
   const soundIds = collectSoundRefsFromObject(routine);
   blocks.forEach((block) => collectSoundRefsFromObject(block, soundIds));
   cueProfiles.forEach((profile) => collectSoundRefsFromObject(profile, soundIds));
-  const full = await state.db.exportData({ selection: { routines: false, blocks: false, cueProfiles: false, customSounds: true, sessions: false, settings: false } });
+  const full = await state.db.exportData({ selection: { routines: false, queues: false, blocks: false, cueProfiles: false, customSounds: true, sessions: false, settings: false } });
   const customSounds = (full.customSounds || []).filter((sound) => soundIds.has(sound.id));
   const pkg = { format: 'thiepn-timer-routine-package', version: 1, exportedAt: new Date().toISOString(), routine: structuredClone(routine), blocks, cueProfiles, customSounds };
   const archive = await createBackupArchive(pkg, { appVersion: APP_VERSION, kind: 'routine-package' });
@@ -2971,15 +3387,15 @@ async function exportRoutinePackage(routineId) {
 }
 
 function backupPreviewCounts(payload) {
-  if (isRoutinePackage(payload)) return { routines: payload.routine ? 1 : 0, blocks: payload.blocks?.length || 0, cueProfiles: payload.cueProfiles?.length || 0, customSounds: payload.customSounds?.length || 0, sessions: 0 };
+  if (isRoutinePackage(payload)) return { routines: payload.routine ? 1 : 0, queues: 0, blocks: payload.blocks?.length || 0, cueProfiles: payload.cueProfiles?.length || 0, customSounds: payload.customSounds?.length || 0, sessions: 0 };
   return backupCounts(payload);
 }
 
 function validateIncomingPayload(payload) {
   if (isRoutinePackage(payload)) {
-    payload = { format: 'thiepn-timer-backup', version: 4, exportedAt: payload.exportedAt, selection: { routines: true, blocks: true, cueProfiles: true, customSounds: true, sessions: false, settings: false }, routines: payload.routine ? [payload.routine] : [], blocks: payload.blocks || [], cueProfiles: payload.cueProfiles || [], customSounds: payload.customSounds || [], sessions: [], settings: null };
+    payload = { format: 'thiepn-timer-backup', version: 5, exportedAt: payload.exportedAt, selection: { routines: true, queues: false, blocks: true, cueProfiles: true, customSounds: true, sessions: false, settings: false }, routines: payload.routine ? [payload.routine] : [], queues: [], blocks: payload.blocks || [], cueProfiles: payload.cueProfiles || [], customSounds: payload.customSounds || [], sessions: [], settings: null };
   }
-  if (!payload || payload.format !== 'thiepn-timer-backup' || ![1,2,3,4].includes(Number(payload.version)) || !Array.isArray(payload.routines) || !Array.isArray(payload.sessions)) throw new Error('Unsupported or incomplete Timer backup.');
+  if (!payload || payload.format !== 'thiepn-timer-backup' || ![1,2,3,4,5].includes(Number(payload.version)) || !Array.isArray(payload.routines) || !Array.isArray(payload.sessions)) throw new Error('Unsupported or incomplete Timer backup.');
   assertBackupEntityLimits(payload);
   const quarantine = [];
   const validSounds = [];
@@ -3006,7 +3422,19 @@ function validateIncomingPayload(payload) {
     else validSessions.push(session);
   }
   const profiles = payload.version >= 3 && Array.isArray(payload.cueProfiles) ? payload.cueProfiles.filter((profile) => profile?.id && profile?.title) : [];
-  const cleaned = { ...payload, version: 4, routines: validRoutines, blocks: validBlocks, cueProfiles: profiles, customSounds: validSounds, sessions: validSessions, settings: payload.settings || null };
+  const queuesAvailable = Number(payload.version) >= 5;
+  const validQueues = [];
+  const sourceQueues = queuesAvailable && Array.isArray(payload.queues) ? payload.queues : [];
+  for (const queue of sourceQueues) {
+    const normalized = normalizeQueuePreset(queue);
+    if (!queue?.id || !normalized.items.length || normalized.items.length > 250) quarantine.push({ source: 'backup', entityType: 'queue', entityId: queue?.id || '', reason: 'Invalid queue preset', record: queue });
+    else validQueues.push(normalized);
+  }
+  const legacySelection = payload.version >= 4 && payload.selection
+    ? payload.selection
+    : { routines: true, blocks: true, cueProfiles: true, customSounds: true, sessions: true, settings: true };
+  const cleanedSelection = { ...legacySelection, queues: queuesAvailable ? legacySelection.queues !== false : false };
+  const cleaned = { ...payload, version: 5, selection: cleanedSelection, routines: validRoutines, queues: validQueues, blocks: validBlocks, cueProfiles: profiles, customSounds: validSounds, sessions: validSessions, settings: payload.settings || null };
   return { payload: cleaned, quarantine };
 }
 
@@ -3038,7 +3466,7 @@ function showRestorePreview() {
     ${pending.manifest ? `<div class="data-integrity-ok">✓ SHA-256 integrity verified</div>` : `<div class="small muted">Legacy backup format · content validated before restore.</div>`}
     ${pending.quarantine.length ? `<div class="data-warning">${pending.quarantine.length} invalid item${pending.quarantine.length === 1 ? '' : 's'} will be quarantined instead of imported.</div>` : ''}
     <div class="backup-parts">
-      ${[['routines','Routines',counts.routines],['blocks','Reusable blocks',counts.blocks],['cueProfiles','Cue profiles',counts.cueProfiles],['customSounds','Custom sounds',counts.customSounds],['sessions','History',counts.sessions],['settings','Settings',pending.payload.settings ? 1 : 0]].map(([key,label,count]) => `<label class="check-row ${count ? '' : 'disabled'}"><input type="checkbox" data-restore-part="${key}" ${count ? 'checked' : 'disabled'}> <span>${label}</span></label>`).join('')}
+      ${[['routines','Saved timers',counts.routines],['queues','Saved queues',counts.queues],['blocks','Reusable blocks',counts.blocks],['cueProfiles','Cue profiles',counts.cueProfiles],['customSounds','Custom sounds',counts.customSounds],['sessions','History',counts.sessions],['settings','Settings',pending.payload.settings ? 1 : 0]].map(([key,label,count]) => `<label class="check-row ${count ? '' : 'disabled'}"><input type="checkbox" data-restore-part="${key}" ${count ? 'checked' : 'disabled'}> <span>${label}</span></label>`).join('')}
     </div>
     ${packageMode ? '' : `<div class="field"><label>Restore strategy</label><select id="restore-strategy" class="select"><option value="merge">Merge with current data</option><option value="replace">Replace selected categories</option></select></div>`}
     <button class="btn primary big" data-action="apply-restore">${packageMode ? 'Import package' : 'Apply restore'}</button>
@@ -3056,7 +3484,7 @@ async function applyPendingRestore() {
   const pending = state.pendingRestore;
   if (!pending) return;
   const root = $('#sheet-root');
-  const selection = Object.fromEntries(['routines','blocks','cueProfiles','customSounds','sessions','settings'].map((key) => [key, Boolean(root.querySelector(`[data-restore-part="${key}"]`)?.checked)]));
+  const selection = Object.fromEntries(['routines','queues','blocks','cueProfiles','customSounds','sessions','settings'].map((key) => [key, Boolean(root.querySelector(`[data-restore-part="${key}"]`)?.checked)]));
   const replace = !pending.packageMode && $('#restore-strategy', root)?.value === 'replace';
   if (!Object.values(selection).some(Boolean)) return toast('Select at least one category to restore.');
   let snapshot = null;
@@ -3125,14 +3553,16 @@ async function installApp() {
 
 async function loadCollections({ fullHistory = (state.route === 'history' && state.historyLoadedAll) } = {}) {
   const historyLimit = fullHistory ? 10000 : 100;
-  const [routines, blocks, cueProfiles, customSounds, sessions] = await Promise.all([
+  const [routines, queues, blocks, cueProfiles, customSounds, sessions] = await Promise.all([
     state.db.all('routines').catch(() => []),
+    state.db.all('queues').catch(() => []),
     state.db.all('blocks').catch(() => []),
     state.db.all('cueProfiles').catch(() => []),
     state.db.listCustomSoundMetadata().catch(() => []),
     state.db.recentSessions(historyLimit).catch(() => [])
   ]);
   state.blocks = blocks;
+  state.queues = queues.map((queue) => normalizeQueuePreset(queue)).sort((a,b) => (b.lastUsedAt || b.updatedAt || 0) - (a.lastUsedAt || a.updatedAt || 0));
   const normalized = routines.map((timer) => normalizeSavedTimerRecord(timer));
   state.routines = normalized;
   const migrations = routines.map((timer, index) => needsSavedTimerMigration(timer)
@@ -3193,11 +3623,12 @@ async function boot() {
   state.deviceCapabilities = detectDeviceCapabilities();
   applyTheme();
   const activePromise = state.db.getActiveSessions().catch(() => []);
+  const activeQueuesPromise = state.db.getActiveQueues().catch(() => []);
   await loadCollections({ fullHistory: false });
   perf.mark('boot:collections');
   registerPwa();
 
-  const active = await activePromise;
+  const [active, activeQueues] = await Promise.all([activePromise, activeQueuesPromise]);
   if (active.length) {
     if (state.displayMode) {
       setRemoteActive({ sessions: active });
@@ -3206,15 +3637,21 @@ async function boot() {
       if (!await restoreOwnedActive(active)) {
         await ownership.release();
         await state.db.clearAllActiveSessions().catch(() => {});
+        await state.db.clearAllActiveQueues().catch(() => {});
         toast('The previous active timers could not be restored.', 4200);
         await handleLaunchCommand(state.launchCommand);
+      } else {
+        await restoreActiveQueueRuns(activeQueues);
       }
     } else {
       setRemoteActive({ sessions: active });
       renderRemoteActive();
     }
   } else if (state.displayMode) renderRemoteActive();
-  else await handleLaunchCommand(state.launchCommand);
+  else if (activeQueues.length && await restoreActiveQueueRuns(activeQueues)) {
+    state.route = 'workspace';
+    render();
+  } else await handleLaunchCommand(state.launchCommand);
 
   perf.mark('boot:interactive');
   perf.measure('bootInteractiveMs', 'boot:start', 'boot:interactive');
@@ -3323,6 +3760,12 @@ document.addEventListener('input', (e) => {
     state.librarySearchActive = true;
     return renderLibrary();
   }
+  if (e.target.matches?.('[data-queue-draft-field]') && state.queueDraft) {
+    const field = e.target.dataset.queueDraftField;
+    if (field === 'title') state.queueDraft.title = String(e.target.value || '').slice(0, 120);
+    if (field === 'description') state.queueDraft.description = String(e.target.value || '').slice(0, 500);
+    return;
+  }
   if (e.target.matches?.('[data-history-search]')) {
     state.historyQuery = e.target.value;
     state.historyVisible = 100;
@@ -3358,6 +3801,12 @@ document.addEventListener('submit', async (e) => {
 
 document.addEventListener('change', async (e) => {
   updateBuilderInput(e.target); updateBuilderCueInput(e.target); updateCircuitInput(e.target); updateCustomInput(e.target); updateCustomCueInput(e.target); updateCustomParameterInput(e.target); updateBlockParameterInput(e.target);
+  if (e.target.matches?.('[data-queue-item-action]') && state.queueDraft) {
+    const index = Number(e.target.dataset.index);
+    if (state.queueDraft.items[index]) state.queueDraft.items[index].action = normalizeQueueStepAction(e.target.value);
+    return;
+  }
+  if (e.target.matches?.('[data-queue-draft-loop]') && state.queueDraft) { state.queueDraft.loop = Boolean(e.target.checked); return; }
   if (e.target.matches?.('[data-saved-sort]')) { state.librarySort = e.target.value || 'recent'; return renderLibrary(); }
   if (e.target.matches?.('[data-history-mode]')) { state.historyMode = e.target.value || 'all'; state.historyVisible = 100; return renderHistory(); }
   if (e.target.dataset.setting) {
@@ -3370,6 +3819,31 @@ document.addEventListener('change', async (e) => {
     if (key === 'cueProfileId' || key === 'voiceRate') renderSettings();
   }
 });
+
+document.addEventListener('dragstart', (e) => {
+  const row = e.target.closest?.('[data-queue-draft-index]');
+  if (!row || !state.queueDraft) return;
+  state.queueDragIndex = Number(row.dataset.queueDraftIndex);
+  e.dataTransfer?.setData('text/plain', String(state.queueDragIndex));
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+});
+
+document.addEventListener('dragover', (e) => {
+  if (state.queueDragIndex == null) return;
+  if (e.target.closest?.('[data-queue-draft-index]')) e.preventDefault();
+});
+
+document.addEventListener('drop', (e) => {
+  const row = e.target.closest?.('[data-queue-draft-index]');
+  if (!row || state.queueDragIndex == null || !state.queueDraft) return;
+  e.preventDefault();
+  const to = Number(row.dataset.queueDraftIndex);
+  state.queueDraft.items = reorderQueueItems(state.queueDraft.items, state.queueDragIndex, to);
+  state.queueDragIndex = null;
+  renderQueueBuilderSheet();
+});
+
+document.addEventListener('dragend', () => { state.queueDragIndex = null; });
 
 document.addEventListener('click', async (e) => {
   const routeBtn = e.target.closest('[data-route]');
@@ -3385,10 +3859,16 @@ document.addEventListener('click', async (e) => {
   if (action === 'focus-active') { closeSheet(); return focusRuntime(btn.dataset.id); }
   if (action === 'active-toggle') {
     const id = btn.dataset.id;
-    coordinator.togglePause(id);
-    await persistRuntime(id);
-    updateActiveTimerCards();
-    broadcastActiveSnapshot();
+    if (state.activeQueue?.currentRuntimeId === id) {
+      if (state.activeQueue.status === 'paused') await resumeActiveQueue();
+      else await pauseActiveQueue();
+    } else {
+      coordinator.togglePause(id);
+      await persistRuntime(id);
+      updateActiveTimerCards();
+      broadcastActiveSnapshot();
+    }
+    if (state.route === 'workspace' && !state.engine) renderMultiTimerWorkspace();
     return;
   }
   if (action === 'active-adjust') {
@@ -3423,15 +3903,38 @@ document.addEventListener('click', async (e) => {
     if (coordinator.move(btn.dataset.id, Number(btn.dataset.delta || 0))) await persistWorkspaceOrder();
     return renderMultiTimerWorkspace();
   }
-  if (action === 'workspace-pause-all') { coordinator.pauseAll(); await persistAllRuntimes(); broadcastActiveSnapshot(); updateActiveTimerCards(); return; }
-  if (action === 'workspace-resume-all') { coordinator.resumeAll(); await persistAllRuntimes(); broadcastActiveSnapshot(); updateActiveTimerCards(); return; }
+  if (action === 'workspace-pause-all') {
+    if (state.activeQueue?.status === 'running') await pauseActiveQueue();
+    coordinator.pauseAll(); await persistAllRuntimes(); broadcastActiveSnapshot(); updateActiveTimerCards(); return;
+  }
+  if (action === 'workspace-resume-all') {
+    if (state.activeQueue?.status === 'paused') await resumeActiveQueue();
+    coordinator.resumeAll(); await persistAllRuntimes(); broadcastActiveSnapshot(); updateActiveTimerCards(); return;
+  }
   if (action === 'workspace-stop') { coordinator.command(btn.dataset.id, 'stop', 'user-ended'); return; }
   if (action === 'workspace-stop-all') {
     const ids = coordinator.list().map((runtime) => runtime.id);
     if (!ids.length || !confirm(`Stop all ${ids.length} active timer${ids.length === 1 ? '' : 's'}? Partial sessions will be saved.`)) return;
-    for (const id of ids) coordinator.command(id, 'stop', 'user-ended');
+    if (state.activeQueue) await stopActiveQueue();
+    for (const id of ids) if (coordinator.has(id)) coordinator.command(id, 'stop', 'user-ended');
     return;
   }
+  if (action === 'show-queue-library') return showQueueLibrarySheet();
+  if (action === 'new-queue') return showQueueBuilder();
+  if (action === 'edit-queue') return showQueueBuilder(btn.dataset.id);
+  if (action === 'start-queue') { closeSheet(); return startQueue(btn.dataset.id); }
+  if (action === 'delete-queue') return deleteQueue(btn.dataset.id);
+  if (action === 'queue-add-timer') return showQueueTimerPicker();
+  if (action === 'queue-add-picked-timer') return addQueueDraftTimer(btn.dataset.id);
+  if (action === 'queue-return-builder') return renderQueueBuilderSheet();
+  if (action === 'queue-item-move') return moveQueueDraftItem(Number(btn.dataset.index), Number(btn.dataset.delta));
+  if (action === 'queue-item-remove') return removeQueueDraftItem(Number(btn.dataset.index));
+  if (action === 'save-queue-draft') return saveQueueDraft();
+  if (action === 'save-start-queue-draft') return saveQueueDraft({ start: true });
+  if (action === 'queue-pause') { await pauseActiveQueue(); if (state.route === 'workspace' && !state.engine) renderMultiTimerWorkspace(); return; }
+  if (action === 'queue-resume') { await resumeActiveQueue(); if (state.route === 'workspace' && !state.engine) renderMultiTimerWorkspace(); return; }
+  if (action === 'queue-skip') return skipActiveQueueStep();
+  if (action === 'queue-stop') { if (!confirm('Stop this queue? The current partial timer will be saved.')) return; return stopActiveQueue(); }
   if (action === 'close-display-window') { try { window.close(); } catch {} return; }
   if (action === 'open-display-window') {
     closeSheet();
@@ -3506,6 +4009,18 @@ document.addEventListener('click', async (e) => {
   }
   if (action === 'move-saved') return showMoveSavedTimers([btn.dataset.id]);
   if (action === 'bulk-saved-move') return showMoveSavedTimers([...state.savedSelected]);
+  if (action === 'queue-from-selection') {
+    const visible = visibleSavedTimers();
+    const ids = visible.filter((timer) => state.savedSelected.has(timer.id)).map((timer) => timer.id);
+    for (const id of state.savedSelected) if (!ids.includes(id) && queueTimerById(id)) ids.push(id);
+    if (!ids.length) return toast('Select at least one Saved Timer.');
+    return openQueueBuilderFromTimerIds(ids, 'Selected Timers Queue');
+  }
+  if (action === 'queue-from-view') {
+    const ids = visibleSavedTimers().map((timer) => timer.id);
+    if (!ids.length) return toast('This view has no Saved Timers to queue.');
+    return openQueueBuilderFromTimerIds(ids, defaultQueueTitleFromView());
+  }
   if (action === 'apply-saved-move') return applySavedMove();
   if (action === 'bulk-saved-archive' || action === 'bulk-saved-restore') {
     const archived = action === 'bulk-saved-archive';
@@ -3638,7 +4153,13 @@ document.addEventListener('click', async (e) => {
   if (action === 'clear-history') { if (confirm('Clear all session history? Saved routines will remain.')) { await state.db.clear('sessions'); await loadCollections(); renderHistory(); toast('History cleared.'); } return; }
   if (action === 'install') return installApp();
 
-  if (action === 'live-pause') { coordinator.togglePause(state.activeTimerId); updateLiveView(true); startLiveScheduler(); return; }
+  if (action === 'live-pause') {
+    if (state.activeQueue?.currentRuntimeId === state.activeTimerId) {
+      if (state.activeQueue.status === 'paused') await resumeActiveQueue();
+      else await pauseActiveQueue();
+    } else coordinator.togglePause(state.activeTimerId);
+    updateLiveView(true); startLiveScheduler(); return;
+  }
   if (action === 'live-adjust') { coordinator.command(state.activeTimerId, 'adjust', Number(btn.dataset.delta)); updateLiveView(true); return; }
   if (action === 'live-next') { coordinator.command(state.activeTimerId, 'next'); updateLiveView(true); return; }
   if (action === 'live-done') { coordinator.command(state.activeTimerId, 'manual'); updateLiveView(true); return; }

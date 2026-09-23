@@ -25,7 +25,7 @@ const analytics = measure('Summarize 10,000 sessions', () => summarizeRange(sess
 
 const shellFiles = [
   'index.html','styles.css','manifest.webmanifest','sw.js',
-  'src/core.js','src/db.js','src/audio.js','src/analytics.js','src/resilience.js','src/device.js','src/i18n.js','src/accessibility.js','src/performance.js','src/coordinator.js','src/quick.js','src/saved.js','src/app.js'
+  'src/core.js','src/db.js','src/audio.js','src/analytics.js','src/resilience.js','src/device.js','src/i18n.js','src/accessibility.js','src/performance.js','src/coordinator.js','src/quick.js','src/saved.js','src/queue.js','src/app.js'
 ];
 const shellGzipBytes = shellFiles.reduce((total, file) => total + zlib.gzipSync(fs.readFileSync(new URL(`../${file}`, import.meta.url))).length, 0);
 console.log(`Offline shell gzip sum: ${(shellGzipBytes / 1024).toFixed(1)} KiB`);

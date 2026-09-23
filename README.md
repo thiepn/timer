@@ -1,6 +1,6 @@
 # Timer
 
-Current app version: **2.4.0**.
+Current app version: **2.5.0**.
 
 A local-first universal timer built as a zero-build PWA for GitHub Pages, ranging from simple countdowns and stopwatches to programmable interval and sequence timers.
 
@@ -19,6 +19,7 @@ A local-first universal timer built as a zero-build PWA for GitHub Pages, rangin
 - Sequence timers with nested sections/patterns, timed/manual steps, launch parameters, safe arithmetic formulas, progression generators, seeded random pools, reusable linked blocks, duration scaling/target fitting, deterministic compilation and plan preview
 - Universal Saved Timers for countdowns, stopwatches, intervals, sequences and specialized templates, with pin/favorite/archive, icons, accents, descriptions, collections, tags, sorting, duplicate and bulk organization
 - Multi-Timer Workspace with persistent ordering, groups/colors, grid/compact/focus layouts, bulk pause/resume/stop, and per-runtime editing
+- Timer Queues with visual drag/reorder building, queued future timers, per-step Advance/Overtime/Repeat/Stop behavior, whole-queue looping, pause/resume/skip/stop controls, live progress, Saved Queue presets and recovery-safe execution
 - Completion actions: Stop, Overtime, Repeat and Start Next, including recovery-safe Saved Timer chains
 - Session history with semantic event timelines, calendar/stats views, actual-vs-planned review, objective comparable records, mode-specific analytics, notes, filtering and CSV/JSON export
 - Focus, Classic, Strength and Wall live layouts
@@ -70,6 +71,8 @@ The app uses relative paths and is ready to be served from the repository root w
 - `src/performance.js` — performance budgets, live scheduling policy, instrumentation and deferred-maintenance coordinator
 - `src/coordinator.js` — multi-runtime timer coordination, completion actions and overtime/repeat orchestration
 - `src/quick.js` — deterministic Quick Timer duration parsing, normalization and recency helpers
+- `src/saved.js` — Saved Timer normalization, search, sorting and metadata helpers
+- `src/queue.js` — Saved Queue normalization, ordering, progress and queue-run state transitions
 - `src/app.js` — application coordinator and UI
 - `sw.js` — offline application shell
 
@@ -200,6 +203,18 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 - Added deterministic performance budgets, large-fixture regression tests, a benchmark command and a GitHub Actions quality workflow.
 - Current reference benchmark on the development environment: ~11 ms for a 1,000-step generated compile, ~10 ms for a 10,000-session summary, and ~98 KiB gzip for the summed offline shell assets.
 
+
+## v2.5.0 Timer Sequences, Queues & Automation
+
+- Added Saved Queue presets backed by a dedicated durable queue store.
+- Visual Queue Builder supports arbitrary Saved Timer sequences, drag-and-drop ordering, accessible arrow reordering, per-step completion behavior, descriptions and whole-queue looping.
+- Queue steps support Advance, Overtime, Repeat Step and Stop Queue behavior.
+- Active Queue panel shows current/queued/completed items, cycle count, progress, completed/skipped counts and Pause/Resume/Skip/Stop controls.
+- Saved Timer selections or the current Library view/collection can be converted directly into a queue.
+- Queue runs persist separately from queue presets and recover the exact current item, cycle, paused state and current runtime after reload/process loss.
+- Queue automation reuses the v2.4 runtime coordinator without changing individual timer timing truth.
+- Backup payload v5 carries Saved Queues; v1-v4 backups remain accepted and cannot erase queue data they never contained.
+- IndexedDB schema is v7 with `queues` and `activeQueues` stores; service-worker cache is v17.
 
 ## v2.4.0 Multi-Timer Workspace & completion actions
 
