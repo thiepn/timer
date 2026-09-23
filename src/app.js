@@ -2532,9 +2532,19 @@ function updateActiveTimerCards() {
     if (time) time.textContent = `${view.status === 'overtime' ? '+' : ''}${formatClock(value || 0, { countUp: current.remainingMs == null })}`;
     const status = $('.active-timer-status', card);
     if (status) status.textContent = view.status === 'paused' ? 'Paused' : view.status === 'overtime' ? 'Overtime' : translateBuiltInLabel(current.label || view.title, currentLocale());
+    const phase = view.status === 'paused' ? 'paused' : view.status === 'overtime' ? 'overtime' : (current.phase || 'work');
+    card.dataset.runtimeState = phase;
+    const progress = Number.isFinite(current.progress) ? clamp(current.progress, 0, 1) : null;
+    card.dataset.hasProgress = String(progress != null);
+    card.style.setProperty('--active-progress-angle', `${Math.round((progress || 0) * 360)}deg`);
     const toggle = $('[data-action="active-toggle"]', card);
-    if (toggle) toggle.textContent = view.status === 'paused' ? 'Resume' : 'Pause';
-    for (const adjust of $$('[data-action="active-adjust"]', card)) adjust.disabled = view.status === 'paused' || view.status === 'overtime';
+    if (toggle) {
+      const copy = $('span', toggle);
+      if (copy) copy.textContent = view.status === 'paused' ? 'Resume' : 'Pause';
+      const use = $('use', toggle);
+      if (use) use.setAttribute('href', `./icons.svg#${view.status === 'paused' ? 'i-play' : 'i-pause'}`);
+    }
+    for (const adjust of $('[data-action="active-adjust"]', card)) adjust.disabled = view.status === 'paused' || view.status === 'overtime';
   }
   for (const card of $('[data-workspace-runtime]')) {
     const runtimeId = card.dataset.workspaceRuntime;
