@@ -4010,7 +4010,9 @@ document.addEventListener('click', async (e) => {
   if (action === 'move-saved') return showMoveSavedTimers([btn.dataset.id]);
   if (action === 'bulk-saved-move') return showMoveSavedTimers([...state.savedSelected]);
   if (action === 'queue-from-selection') {
-    const ids = [...state.savedSelected];
+    const visible = visibleSavedTimers();
+    const ids = visible.filter((timer) => state.savedSelected.has(timer.id)).map((timer) => timer.id);
+    for (const id of state.savedSelected) if (!ids.includes(id) && queueTimerById(id)) ids.push(id);
     if (!ids.length) return toast('Select at least one Saved Timer.');
     return openQueueBuilderFromTimerIds(ids, 'Selected Timers Queue');
   }
