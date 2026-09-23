@@ -258,6 +258,37 @@ function quickInputResult(value = state.quickInput) {
   return parseDurationInput(value);
 }
 
+function quickDialModel(milliseconds) {
+  const msValue = Math.max(1000, Number(milliseconds) || 1000);
+  const totalSeconds = Math.max(1, Math.round(msValue / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const withinHour = totalSeconds % 3600;
+  const sweepRatio = hours > 0 && withinHour === 0 ? 1 : withinHour / 3600;
+  return {
+    time: formatClock(msValue),
+    caption: durationLabel(msValue),
+    sweep: Math.max(2, Math.min(360, Math.round(sweepRatio * 360))),
+    scale: hours > 0 ? `${hours}h · minute dial` : '60-minute dial'
+  };
+}
+
+function updateQuickHeroVisual(result) {
+  const instrument = $('[data-quick-instrument]');
+  if (!instrument) return;
+  const time = $('[data-quick-dial-time]', instrument);
+  const caption = $('[data-quick-dial-caption]', instrument);
+  const scale = $('[data-quick-dial-scale]', instrument);
+  const startCopy = $('[data-quick-start-copy]', instrument);
+  instrument.classList.toggle('invalid', !result.ok);
+  if (!result.ok) return;
+  const model = quickDialModel(result.ms);
+  instrument.style.setProperty('--quick-sweep', `${model.sweep}deg`);
+  if (time) time.textContent = model.time;
+  if (caption) caption.textContent = model.caption;
+  if (scale) scale.textContent = model.scale;
+  if (startCopy) startCopy.textContent = `Start ${durationInputText(result.ms)}`;
+}
+
 function updateQuickInputFeedback() {
   const input = $('[data-quick-input]');
   const preview = $('[data-quick-preview]');
@@ -271,10 +302,12 @@ function updateQuickInputFeedback() {
     input.setAttribute('aria-invalid', 'false');
     if (preview) { preview.textContent = `${durationLabel(result.ms)} · ready to start`; preview.classList.remove('error-text'); }
     if (start) start.disabled = false;
+    updateQuickHeroVisual(result);
   } else {
     input.setAttribute('aria-invalid', 'true');
     if (preview) { preview.textContent = result.error; preview.classList.add('error-text'); }
     if (start) start.disabled = true;
+    updateQuickHeroVisual(result);
   }
 }
 
@@ -795,35 +828,88 @@ function renderTimerHome() {
   const adjustments = quickAdjustments();
   const lastSession = state.sessions.find((session) => session?.plan);
   const parsed = quickInputResult();
+  const dial = quickDialModel(parsed.ok ? parsed.ms : state.quickMs || 180000);
   const preview = parsed.ok ? `${durationLabel(parsed.ms)} · ready to start` : parsed.error;
+  const queueProgressValue = state.activeQueue ? queueProgress(state.activeQueue) : null;
+
   main.innerHTML = `
-    <div class="page-head home-head"><div><h1>Timer</h1><p>One timer or many. Start in seconds.</p></div><div class="row" style="flex-wrap:wrap;justify-content:flex-end">${state.activeQueue ? `<button class="pill active-count-pill" data-action="open-workspace">Queue ${queueProgress(state.activeQueue).current}/${queueProgress(state.activeQueue).total}</button>` : ''}${coordinator.size() ? `<span class="pill active-count-pill">${coordinator.size()} active</span>` : ''}</div></div>
+    <div class="home-v4">
+      <header class="home-v4-intro">
+        <div>
+          <div class="home-v4-kicker">Precision timing</div>
+          <h1>Set the time. Start.</h1>
+          <p>Fast for simple countdowns, deep when you need more.</p>
+        </div>
+        <div class="home-v4-status">
+          ${queueProgressValue ? `<button class="home-status-chip" data-action="open-workspace"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="./icons.svg#i-queue"></use></svg><span>Queue ${queueProgressValue.current}/${queueProgressValue.total}</span></button>` : ''}
+          ${coordinator.size() ? `<button class="home-status-chip active" data-action="open-workspace"><span class="home-status-pulse" aria-hidden="true"></span><span>${coordinator.size()} active</span></button>` : ''}
+        </div>
+      </header>
 
-    ${coordinator.size() ? `<section class="section active-timers-section home-active-section"><div class="row-between"><div><h2 class="section-title" style="margin:0">Active Timers</h2><div class="small muted" style="margin-top:4px">All timers keep running independently.</div></div><div class="row"><span class="pill">${coordinator.size()}</span><button class="btn compact-btn" data-action="open-workspace">Workspace</button></div></div><div class="active-timer-grid">${coordinator.list().map(activeTimerCard).join('')}</div></section>` : ''}
+      ${coordinator.size() ? `<section class="home-active-band" aria-label="Active timers">
+        <div class="home-band-heading"><div><span class="home-band-eyebrow">Live now</span><strong>Active timers</strong></div><button class="text-btn" data-action="open-workspace">Open workspace</button></div>
+        <div class="active-timer-grid home-active-grid">${coordinator.list().map(activeTimerCard).join('')}</div>
+      </section>` : ''}
 
-    <section class="card quick-card quick-card-v2">
-      <div class="row-between quick-card-head"><div><div class="quick-label">Quick Timer</div><div class="small muted">Try 90s, 1:30, 3m, or 1h 20m.</div></div><div class="row quick-head-actions"><button class="btn ghost compact-btn" data-action="save-quick-timer">Save</button><button class="btn ghost compact-btn" data-action="customize-quick">Customize</button></div></div>
-      <form class="quick-entry" data-quick-form novalidate>
-        <label class="sr-only" for="quick-duration-input">Quick Timer duration</label>
-        <input id="quick-duration-input" class="quick-duration-input" data-quick-input inputmode="text" autocomplete="off" spellcheck="false" value="${esc(state.quickInput)}" placeholder="3m" aria-describedby="quick-duration-preview" aria-invalid="${parsed.ok ? 'false' : 'true'}">
-        <button class="btn primary quick-start-btn" type="submit" data-action="start-quick-input" ${parsed.ok ? '' : 'disabled'}>Start</button>
-      </form>
-      <div id="quick-duration-preview" class="quick-input-preview ${parsed.ok ? '' : 'error-text'}" data-quick-preview>${esc(preview)}</div>
-      <div class="quick-adjust-row" aria-label="Quick duration adjustments">
-        ${adjustments.map((value) => `<button class="quick-adjust-chip" type="button" data-action="quick-add" data-ms="${value}">+${esc(durationInputText(value))}</button>`).join('')}
-      </div>
-      <div class="quick-duration-group"><div class="quick-group-label">Pinned</div><div class="quick-duration-chips">${pinned.map((value) => `<button class="preset-btn quick-start-chip" data-action="quick-start-duration" data-ms="${value}" aria-label="Start ${esc(durationLabel(value))} timer">${esc(durationInputText(value))}</button>`).join('')}</div></div>
-      ${recentDurations.length ? `<div class="quick-duration-group"><div class="row-between"><div class="quick-group-label">Recent</div><button class="text-btn" data-action="clear-quick-recent">Clear</button></div><div class="quick-duration-chips recent-duration-chips">${recentDurations.slice(0, 8).map((value) => `<button class="preset-btn subtle quick-start-chip" data-action="quick-start-duration" data-ms="${value}" aria-label="Start recent ${esc(durationLabel(value))} timer">${esc(durationInputText(value))}</button>`).join('')}</div></div>` : ''}
-    </section>
+      <section class="quick-instrument ${parsed.ok ? '' : 'invalid'}" data-quick-instrument style="--quick-sweep:${dial.sweep}deg">
+        <div class="quick-instrument-ambient" aria-hidden="true"></div>
+        <div class="quick-instrument-head">
+          <div><span class="quick-label">Quick Timer</span><p>Type any duration or choose a preset.</p></div>
+          <div class="quick-instrument-tools"><button class="text-btn" type="button" data-action="save-quick-timer">Save</button><button class="text-btn" type="button" data-action="customize-quick">Customize</button></div>
+        </div>
 
-    <section class="section home-shortcuts-section">
-      <div class="home-shortcuts">
-        ${lastSession ? `<button class="home-shortcut primary-shortcut" data-action="repeat-session" data-id="${esc(lastSession.id)}"><span class="shortcut-icon" aria-hidden="true">↻</span><span><strong>Repeat Last</strong><small>${esc(lastSession.title)} · ${esc(durationLabel(lastSession.activeDurationMs || lastSession.plannedDurationMs || 0))}</small></span></button>` : ''}
-        <button class="home-shortcut" data-action="open-builder" data-type="stopwatch"><span class="shortcut-icon" aria-hidden="true">◷</span><span><strong>Stopwatch</strong><small>Open-ended timing with laps</small></span></button>
-        <button class="home-shortcut" data-action="open-builder" data-type="interval"><span class="shortcut-icon" aria-hidden="true">↔</span><span><strong>Interval</strong><small>Alternating timed phases</small></span></button>
-        <button class="home-shortcut" data-action="create"><span class="shortcut-icon" aria-hidden="true">＋</span><span><strong>More Timers</strong><small>Sequences, specialized timers and advanced builders</small></span></button>
-      </div>
-    </section>`;
+        <div class="quick-instrument-layout">
+          <form class="quick-instrument-form" data-quick-form novalidate>
+            <div class="quick-dial-shell" aria-hidden="true">
+              <div class="quick-dial-ticks"></div>
+              <div class="quick-dial-arc"></div>
+              <div class="quick-dial-face">
+                <span class="quick-dial-kicker">Set for</span>
+                <output class="quick-dial-time" data-quick-dial-time>${esc(dial.time)}</output>
+                <span class="quick-dial-caption" data-quick-dial-caption>${esc(dial.caption)}</span>
+                <span class="quick-dial-scale" data-quick-dial-scale>${esc(dial.scale)}</span>
+              </div>
+            </div>
+
+            <div class="quick-command-console">
+              <label class="quick-duration-editor" for="quick-duration-input">
+                <span>Duration</span>
+                <input id="quick-duration-input" class="quick-duration-input" data-quick-input inputmode="text" autocomplete="off" spellcheck="false" value="${esc(state.quickInput)}" placeholder="3m" aria-describedby="quick-duration-preview" aria-invalid="${parsed.ok ? 'false' : 'true'}">
+              </label>
+              <div id="quick-duration-preview" class="quick-input-preview ${parsed.ok ? '' : 'error-text'}" data-quick-preview>${esc(preview)}</div>
+              <div class="quick-adjust-row" aria-label="Quick duration adjustments">
+                ${adjustments.map((value) => `<button class="quick-adjust-chip" type="button" data-action="quick-add" data-ms="${value}">+${esc(durationInputText(value))}</button>`).join('')}
+              </div>
+              <button class="quick-start-primary" type="submit" data-action="start-quick-input" ${parsed.ok ? '' : 'disabled'}>
+                <span class="quick-start-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="./icons.svg#i-play"></use></svg></span>
+                <span data-quick-start-copy>Start ${esc(parsed.ok ? durationInputText(parsed.ms) : 'timer')}</span>
+                <svg class="quick-start-arrow" aria-hidden="true" viewBox="0 0 24 24"><use href="./icons.svg#i-arrow-right"></use></svg>
+              </button>
+            </div>
+          </form>
+
+          <aside class="quick-preset-console">
+            <div class="quick-preset-group">
+              <div class="quick-preset-heading"><span>Pinned</span><small>One tap</small></div>
+              <div class="quick-duration-chips quick-duration-chips-v4">
+                ${pinned.map((value) => `<button class="quick-preset-tile" type="button" data-action="quick-start-duration" data-ms="${value}" aria-label="Start ${esc(durationLabel(value))} timer"><strong>${esc(durationInputText(value))}</strong><span>${esc(durationLabel(value))}</span></button>`).join('')}
+              </div>
+            </div>
+            ${recentDurations.length ? `<div class="quick-preset-group recent"><div class="quick-preset-heading"><span>Recent</span><button class="text-btn" type="button" data-action="clear-quick-recent">Clear</button></div><div class="quick-recent-list">${recentDurations.slice(0,6).map((value) => `<button type="button" data-action="quick-start-duration" data-ms="${value}"><span>${esc(durationInputText(value))}</span><small>${esc(durationLabel(value))}</small></button>`).join('')}</div></div>` : ''}
+          </aside>
+        </div>
+      </section>
+
+      <section class="home-actions-v4" aria-label="Timer shortcuts">
+        <div class="home-band-heading"><div><span class="home-band-eyebrow">Shortcuts</span><strong>More ways to time</strong></div></div>
+        <div class="home-action-strip">
+          ${lastSession ? `<button class="home-action-item accent" data-action="repeat-session" data-id="${esc(lastSession.id)}"><span class="home-action-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="./icons.svg#i-repeat"></use></svg></span><span><strong>Repeat Last</strong><small>${esc(lastSession.title)} · ${esc(durationLabel(lastSession.activeDurationMs || lastSession.plannedDurationMs || 0))}</small></span></button>` : ''}
+          <button class="home-action-item" data-action="open-builder" data-type="stopwatch"><span class="home-action-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="./icons.svg#i-stopwatch"></use></svg></span><span><strong>Stopwatch</strong><small>Open-ended timing with laps</small></span></button>
+          <button class="home-action-item" data-action="open-builder" data-type="interval"><span class="home-action-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="./icons.svg#i-interval"></use></svg></span><span><strong>Interval</strong><small>Alternating timed phases</small></span></button>
+          <button class="home-action-item" data-action="create"><span class="home-action-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="./icons.svg#i-grid"></use></svg></span><span><strong>All timers</strong><small>Sequences and specialized timers</small></span></button>
+        </div>
+      </section>
+    </div>`;
   requestAnimationFrame(() => updateQuickInputFeedback());
 }
 
@@ -836,14 +922,17 @@ function activeTimerCard(runtime) {
   const status = view.status === 'paused' ? 'Paused' : view.status === 'overtime' ? 'Overtime' : translateBuiltInLabel(current.label || view.title, currentLocale());
   const adjustable = current.remainingMs != null && view.status !== 'overtime';
   const adjustments = quickAdjustments();
-  return `<article class="card active-timer-card" data-active-runtime="${esc(runtime.id)}">
+  const phase = view.status === 'paused' ? 'paused' : view.status === 'overtime' ? 'overtime' : (current.phase || 'work');
+  const progress = Number.isFinite(current.progress) ? clamp(current.progress, 0, 1) : null;
+  return `<article class="active-timer-card active-timer-card-v4" data-active-runtime="${esc(runtime.id)}" data-runtime-state="${esc(phase)}" data-has-progress="${progress != null}" style="--active-progress-angle:${Math.round((progress || 0) * 360)}deg">
     <button class="active-timer-main" data-action="focus-active" data-id="${esc(runtime.id)}">
+      <span class="active-runtime-orb" aria-hidden="true"><span><svg viewBox="0 0 24 24"><use href="./icons.svg#i-timer"></use></svg></span></span>
       <span class="active-timer-copy"><strong>${esc(view.title || runtime.meta?.title || 'Timer')}</strong><small class="active-timer-status">${esc(status)}</small></span>
       <span class="active-timer-time">${esc(time)}</span>
     </button>
     <div class="active-timer-actions">
-      <button class="btn compact-btn" data-action="active-toggle" data-id="${esc(runtime.id)}" aria-label="Pause or resume ${esc(view.title || 'timer')}">${view.status === 'paused' ? 'Resume' : 'Pause'}</button>
-      ${adjustable ? adjustments.map((delta) => `<button class="btn ghost compact-btn active-adjust-btn" data-action="active-adjust" data-id="${esc(runtime.id)}" data-delta="${delta}" ${view.status === 'paused' ? 'disabled' : ''}>+${esc(durationInputText(delta))}</button>`).join('') : ''}
+      <button class="active-runtime-toggle" data-action="active-toggle" data-id="${esc(runtime.id)}" aria-label="Pause or resume ${esc(view.title || 'timer')}"><svg aria-hidden="true" viewBox="0 0 24 24"><use href="./icons.svg#${view.status === 'paused' ? 'i-play' : 'i-pause'}"></use></svg><span>${view.status === 'paused' ? 'Resume' : 'Pause'}</span></button>
+      ${adjustable ? adjustments.map((delta) => `<button class="active-runtime-adjust" data-action="active-adjust" data-id="${esc(runtime.id)}" data-delta="${delta}" ${view.status === 'paused' ? 'disabled' : ''}>+${esc(durationInputText(delta))}</button>`).join('') : ''}
     </div>
   </article>`;
 }
