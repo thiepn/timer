@@ -143,10 +143,12 @@ export function sortSavedTimers(records = [], mode = 'recent', durationOf = () =
     }
     if (mode === 'alphabetical') return alpha(a, b);
     if (mode === 'duration') {
-      const da = Number(durationOf(a));
-      const db = Number(durationOf(b));
-      const aFinite = Number.isFinite(da) && da >= 0;
-      const bFinite = Number.isFinite(db) && db >= 0;
+      const rawA = durationOf(a);
+      const rawB = durationOf(b);
+      const da = Number(rawA);
+      const db = Number(rawB);
+      const aFinite = rawA != null && rawA !== '' && Number.isFinite(da) && da >= 0;
+      const bFinite = rawB != null && rawB !== '' && Number.isFinite(db) && db >= 0;
       if (aFinite && bFinite && da !== db) return da - db;
       if (aFinite !== bFinite) return aFinite ? -1 : 1;
       return alpha(a, b);
