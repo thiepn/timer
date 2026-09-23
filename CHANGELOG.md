@@ -1,5 +1,23 @@
 # Changelog
 
+## Visual V4 — Home 3.0 Signature Timer Surface
+
+### Added
+- Signature Quick Timer instrument with a meaningful clock-style duration dial and stable tabular duration display.
+- Large tactile Start control with integrated SVG play/forward affordance.
+- Pinned timer tiles and quieter recent-duration list integrated into the hero surface.
+- Live Now runtime band driven by real engine progress and semantic phase/state colors.
+- Low-chrome Home shortcut strip using the shared SVG icon system.
+
+### Improved
+- Quick Timer input/validation, pinned/recent behavior and countdown semantics remain unchanged while the visual hierarchy is substantially upgraded.
+- Active timers remain immediately accessible without visually competing with the Quick Timer hero.
+- Mobile uses stacked hero controls and horizontally scrollable runtime summaries.
+- OLED removes ambient hero glow; high-contrast and forced-colors paths preserve the hierarchy without relying on color effects.
+- Old Home 2.0 styling was removed where no longer used.
+- Fixed the Workspace runtime-card update loop to iterate the full NodeList safely.
+- Service-worker cache generation bumped to v20.
+
 ## Visual V3 — App Shell, Navigation & Spatial Architecture
 
 ### Added
