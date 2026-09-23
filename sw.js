@@ -1,4 +1,4 @@
-const CACHE = 'thiepn-timer-v14';
+const CACHE = 'thiepn-timer-v15';
 const APP_SHELL = [
   './',
   './index.html',
@@ -16,6 +16,7 @@ const APP_SHELL = [
   './src/performance.js',
   './src/coordinator.js',
   './src/quick.js',
+  './src/saved.js',
   './src/app.js'
 ];
 const APP_SHELL_URLS = new Set(APP_SHELL.map((path) => new URL(path, self.location.href).href));
