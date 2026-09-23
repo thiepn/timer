@@ -3377,7 +3377,7 @@ async function exportRoutinePackage(routineId) {
   const soundIds = collectSoundRefsFromObject(routine);
   blocks.forEach((block) => collectSoundRefsFromObject(block, soundIds));
   cueProfiles.forEach((profile) => collectSoundRefsFromObject(profile, soundIds));
-  const full = await state.db.exportData({ selection: { routines: false, blocks: false, cueProfiles: false, customSounds: true, sessions: false, settings: false } });
+  const full = await state.db.exportData({ selection: { routines: false, queues: false, blocks: false, cueProfiles: false, customSounds: true, sessions: false, settings: false } });
   const customSounds = (full.customSounds || []).filter((sound) => soundIds.has(sound.id));
   const pkg = { format: 'thiepn-timer-routine-package', version: 1, exportedAt: new Date().toISOString(), routine: structuredClone(routine), blocks, cueProfiles, customSounds };
   const archive = await createBackupArchive(pkg, { appVersion: APP_VERSION, kind: 'routine-package' });
