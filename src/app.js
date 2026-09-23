@@ -12,7 +12,7 @@ import { SessionOwnershipManager, MediaSessionManager, parseLaunchCommand, detec
 import { LOCALE_OPTIONS, resolveLocale, applyDocumentLocale, localizeDOM, translateSource, translateBuiltInLabel, phaseLabel as localizedPhaseLabel, formatDuration, formatDate, formatNumber, t as i18nT } from './i18n.js';
 import { FocusTrap, Announcer, focusMainHeading, isInteractiveTarget, timerEventAnnouncement } from './accessibility.js';
 import { PerformanceMetrics, MaintenanceCoordinator, liveSchedulerPolicy, reduceMotionEnabled } from './performance.js';
-import { TimerCoordinator, COMPLETION_ACTIONS } from './coordinator.js';
+import { TimerCoordinator, COMPLETION_ACTIONS, normalizeCompletionAction } from './coordinator.js';
 import { parseDurationInput, durationInputText, normalizeDurationList, pushRecentDuration, DEFAULT_QUICK_PRESETS, DEFAULT_QUICK_ADJUSTMENTS } from './quick.js';
 import { DEFAULT_SAVED_TIMER_COLLECTIONS, SAVED_TIMER_ACCENTS, normalizeSavedTimerRecord, normalizeSavedTimerTags, normalizeSavedTimerCollections, needsSavedTimerMigration, savedTimerSearchText, savedTimerMatchesView, sortSavedTimers, duplicateSavedTimerRecord } from './saved.js';
 
@@ -1632,11 +1632,11 @@ async function saveBuilder() {
   toast('Saved timer updated.');
 }
 
-function showParameterizedStart({ type, config, routineId, title, savedValues, source, cueOverrides = {} }) {
+function showParameterizedStart({ type, config, routineId, title, savedValues, source, cueOverrides = {}, completionAction = COMPLETION_ACTIONS.STOP, completionNextRoutineId = '' }) {
   const parameters = config.parameters || [];
   const defaults = defaultParameterValues(parameters);
   const values = { ...defaults, ...(savedValues || {}) };
-  state.pendingStart = { type, config: structuredClone(config), routineId, title, source, cueOverrides: structuredClone(cueOverrides || {}), blocks: structuredClone(blocksForCurrentBuilder()) };
+  state.pendingStart = { type, config: structuredClone(config), routineId, title, source, cueOverrides: structuredClone(cueOverrides || {}), completionAction: normalizeCompletionAction(completionAction), completionNextRoutineId, blocks: structuredClone(blocksForCurrentBuilder()) };
   showSheet(`Start ${title || config.title || 'Routine'}`, `<div class="stack"><div class="small muted">Adjust this run without changing the saved routine.</div>${parameters.map((parameter) => `<label class="field"><span>${esc(parameter.label)}</span>${renderParameterValueInput(parameter, values[parameter.id], `data-launch-param="${esc(parameter.id)}"`)}</label>`).join('')}<button class="btn primary big" data-action="confirm-param-start">Start</button></div>`);
 }
 
@@ -1669,26 +1669,27 @@ async function confirmParameterizedStart() {
   state.pendingStart = null;
   closeSheet();
   await loadCollections();
-  await startSession(plan, { ...metaForType(pending.type, pending.config, pending.cueOverrides), title: pending.title || pending.config.title, routineId: pending.routineId, parameterValues: resolved });
+  await startSession(plan, { ...metaForType(pending.type, pending.config, pending.cueOverrides), title: pending.title || pending.config.title, routineId: pending.routineId, parameterValues: resolved, completionNextRoutineId: pending.completionNextRoutineId || '' }, { completionAction: pending.completionAction });
 }
 
 async function startBuilder() {
   const { type, config } = state.builder;
   if (type === 'custom' && (config.parameters || []).length) {
     const routine = state.routines.find((item) => item.id === state.builderEditingId);
-    return showParameterizedStart({ type, config, routineId: state.builderEditingId || undefined, title: config.title, savedValues: routine?.lastParameterValues, source: 'builder', cueOverrides: state.builderCueOverrides });
+    return showParameterizedStart({ type, config, routineId: state.builderEditingId || undefined, title: config.title, savedValues: routine?.lastParameterValues, source: 'builder', cueOverrides: state.builderCueOverrides, completionAction: routine?.completionAction, completionNextRoutineId: routine?.completionNextRoutineId });
   }
   let plan;
   try { plan = planFromType(type, config, { blocks: blocksForCurrentBuilder(), seed: type === 'custom' && config.randomMode !== 'fixed' ? uid('seed') : undefined }); }
   catch (e) { return toast(e.issues?.[0]?.message || e.message || 'This timer could not be created.'); }
-  await startSession(plan, { ...metaForType(type, config, state.builderCueOverrides), routineId: state.builderEditingId || undefined });
+  const saved = state.routines.find((item) => item.id === state.builderEditingId);
+  await startSession(plan, { ...metaForType(type, config, state.builderCueOverrides), routineId: state.builderEditingId || undefined, completionNextRoutineId: saved?.completionNextRoutineId || '' }, { completionAction: saved?.completionAction });
 }
 
 async function startRoutine(id) {
   const routine = state.routines.find((r) => r.id === id);
   if (!routine) return toast('Saved timer not found.');
   if (routine.type === 'custom' && (routine.config?.parameters || []).length) {
-    return showParameterizedStart({ type: routine.type, config: routine.config, routineId: routine.id, title: routine.title, savedValues: routine.lastParameterValues, source: 'library', cueOverrides: routine.cueOverrides });
+    return showParameterizedStart({ type: routine.type, config: routine.config, routineId: routine.id, title: routine.title, savedValues: routine.lastParameterValues, source: 'library', cueOverrides: routine.cueOverrides, completionAction: routine.completionAction, completionNextRoutineId: routine.completionNextRoutineId });
   }
   let plan;
   try { plan = planFromType(routine.type, routine.config, { blocks: state.blocks, seed: routine.type === 'custom' && routine.config?.randomMode !== 'fixed' ? uid('seed') : undefined }); }
@@ -1697,7 +1698,7 @@ async function startRoutine(id) {
   routine.lastUsedAt = Date.now();
   await state.db.saveRoutine(routine);
   await loadCollections();
-  await startSession(plan, { ...metaForType(routine.type, routine.config, routine.cueOverrides), title: routine.title, routineId: routine.id });
+  await startSession(plan, { ...metaForType(routine.type, routine.config, routine.cueOverrides), title: routine.title, routineId: routine.id, completionNextRoutineId: routine.completionNextRoutineId || '' }, { completionAction: routine.completionAction });
 }
 
 async function startSession(plan, meta, options = {}) {
@@ -1724,7 +1725,7 @@ async function startSession(plan, meta, options = {}) {
   broadcastActiveSnapshot();
   renderUpdateBanner();
   if (options.background) {
-    state.route = 'timer';
+    state.route = options.backgroundRoute || (state.route === 'workspace' ? 'workspace' : 'timer');
     syncFocusedRuntime(null);
     mediaSession.disable();
     render();
