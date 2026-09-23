@@ -1,8 +1,9 @@
-const CACHE = 'thiepn-timer-v17';
+const CACHE = 'thiepn-timer-v18';
 const APP_SHELL = [
   './',
   './index.html',
   './styles.css',
+  './visual-system.css',
   './manifest.webmanifest',
   './icon.svg',
   './src/core.js',

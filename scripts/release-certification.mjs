@@ -17,7 +17,7 @@ if (/user-scalable\s*=\s*no/i.test(html) || /maximum-scale\s*=\s*1/i.test(html))
 
 const sw = read('sw.js');
 const cacheMatch = sw.match(/const CACHE = 'thiepn-timer-v(\d+)'/);
-if (!cacheMatch || Number(cacheMatch[1]) !== 17) fail('service-worker cache generation must be v17');
+if (!cacheMatch || Number(cacheMatch[1]) !== 18) fail('service-worker cache generation must be v18');
 
 const app = read('src/app.js');
 const appImports = [...app.matchAll(/from\s+['"](\.\/[^'"]+\.js)['"]/g)].map((m) => `./src/${m[1].replace(/^\.\//, '')}`);
@@ -40,7 +40,7 @@ for (const file of sourceFiles) {
 }
 
 const shell = [
-  'index.html','styles.css','manifest.webmanifest','icon.svg','sw.js',
+  'index.html','styles.css','visual-system.css','manifest.webmanifest','icon.svg','sw.js',
   ...sourceFiles.map((name) => `src/${name}`)
 ];
 let gzipBytes = 0;

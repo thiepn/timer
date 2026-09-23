@@ -74,6 +74,7 @@ The app uses relative paths and is ready to be served from the repository root w
 - `src/saved.js` — Saved Timer normalization, search, sorting and metadata helpers
 - `src/queue.js` — Saved Queue normalization, ordering, progress and queue-run state transitions
 - `src/app.js` — application coordinator and UI
+- `visual-system.css` — V3 semantic materials, typography, shapes, motion, accents and theme foundations
 - `sw.js` — offline application shell
 
 The timer engine is timestamp-based; rendering frequency is not the source of timing truth.
@@ -81,7 +82,7 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 
 ## Visual design program
 
-The V2–V10 visual overhaul is governed by the Phase V1 design artifacts in [`design/`](./design/README.md). The locked art direction is **Precision instrument + ambient depth + expressive state**. Production screen restyling begins in V2; V1 establishes the audit, visual contract and QA baseline only.
+The V2–V10 visual overhaul is governed by the Phase V1 design artifacts in [`design/`](./design/README.md). The locked art direction is **Precision instrument + ambient depth + expressive state**. V1 established the audit and contract. V2 now implements the production semantic design system; screen-level composition redesign begins in V3.
 
 ## v1.0.1 hardening
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## Visual V2 — Design System V3
+
+### Added
+- Semantic M0–M5 material hierarchy with dedicated canvas, content, raised, floating, modal and live-stage materials.
+- T0–T5 typography roles with stable tabular timer numerals.
+- R1–R5 shape scale and four-tier motion timing system.
+- Independent user accent palettes and temporal-state colors.
+- Purpose-built Dark, Light and OLED visual foundations.
+- Global Accent selection in Settings.
+- High-contrast, forced-colors and reduced-motion visual fallbacks.
+- Reusable material/state/type primitives for V3–V10.
+
+### Improved
+- Existing screens now inherit the semantic design system through a legacy-token bridge without changing product structure.
+- Theme state now propagates at document scope so sheets, toasts and overlays use the selected theme correctly.
+- Cards, interactive surfaces, floating controls, sheets, inputs and live stage now use differentiated depth/material roles.
+- Service-worker cache bumped to v18; visual-system CSS is included in offline and release-size certification.
+- V2 soft offline-shell benchmark is 134 KiB gzip; the independent hard release ceiling remains 135 KiB.
+
 ## 2.5.0
 
 ### Added
