@@ -925,3 +925,87 @@ html[data-large-controls="true"] .sheet .btn, html[data-large-controls="true"] .
   .workspace-time { text-align: left; }
   .workspace-card-actions .btn { min-width: 58px; padding-inline: 10px; }
 }
+
+
+/* v2.5 Timer Queues & Automation */
+.active-queue-panel { display: grid; gap: 14px; margin-bottom: 16px; }
+.active-queue-panel h2 { margin: 4px 0 0; font-size: clamp(1.1rem,4vw,1.5rem); }
+.queue-progress-copy { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: var(--text-2); }
+.queue-progress-copy strong { color: var(--text); font-size: 1.05rem; }
+.queue-progress-track { height: 8px; overflow: hidden; border-radius: 999px; background: var(--surface-2); }
+.queue-progress-track > span { display: block; width: 100%; height: 100%; transform-origin: left center; background: var(--accent); }
+.queue-run-list { display: grid; gap: 6px; }
+.queue-run-item {
+  display: grid;
+  grid-template-columns: 30px minmax(0,1fr) auto;
+  gap: 9px;
+  align-items: center;
+  min-height: 48px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface-2);
+}
+.queue-run-item.done { opacity: .62; }
+.queue-run-item.current { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); background: var(--accent-soft); }
+.queue-run-index {
+  width: 26px; height: 26px; display: grid; place-items: center;
+  border-radius: 50%; background: var(--surface-3); color: var(--text-2); font-size: .74rem; font-weight: 850;
+}
+.queue-run-item.current .queue-run-index { background: var(--accent); color: #07111d; }
+.queue-run-copy { min-width: 0; display: grid; gap: 2px; }
+.queue-run-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-run-copy small, .queue-run-status { color: var(--text-2); font-size: .76rem; }
+.queue-control-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; }
+
+.queue-preset-list { display: grid; gap: 8px; }
+.queue-preset-row {
+  display: grid;
+  grid-template-columns: minmax(0,1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 62px;
+  padding: 9px 10px 9px 13px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: var(--surface);
+}
+.queue-preset-main { min-width: 0; border: 0; background: transparent; color: inherit; text-align: left; display: grid; gap: 4px; padding: 2px; }
+.queue-preset-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-preset-main span { color: var(--text-2); font-size: .8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.queue-builder { min-width: 0; }
+.queue-builder-list { display: grid; gap: 8px; }
+.queue-builder-item {
+  display: grid;
+  grid-template-columns: 28px minmax(0,1fr) minmax(120px,150px) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 66px;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.queue-builder-item[draggable="true"] { cursor: grab; }
+.queue-builder-item[draggable="true"]:active { cursor: grabbing; }
+.queue-drag-handle { color: var(--text-3); text-align: center; font-weight: 900; letter-spacing: -.25em; }
+.queue-builder-copy { min-width: 0; display: grid; gap: 3px; }
+.queue-builder-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-builder-copy small { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-action-select { min-height: 40px; }
+.queue-item-buttons { display: flex; gap: 4px; }
+.queue-item-buttons .icon-btn { width: 38px; height: 38px; font-size: 1rem; }
+.queue-builder-actions .btn { flex: 1 1 140px; }
+
+@media (max-width: 700px) {
+  .queue-builder-item { grid-template-columns: 24px minmax(0,1fr); }
+  .queue-action-select { grid-column: 2; }
+  .queue-item-buttons { grid-column: 1 / -1; justify-content: flex-end; border-top: 1px solid var(--border); padding-top: 7px; }
+  .queue-progress-copy { align-items: flex-start; flex-direction: column; gap: 3px; }
+}
+@media (max-width: 480px) {
+  .queue-control-row { grid-template-columns: 1fr; }
+  .queue-preset-row { grid-template-columns: minmax(0,1fr) auto; }
+  .queue-preset-row > .icon-btn { grid-column: 2; }
+}
