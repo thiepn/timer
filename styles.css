@@ -801,11 +801,8 @@ html[data-large-controls="true"] .sheet .btn, html[data-large-controls="true"] .
   .saved-bulk-bar { align-items: flex-start; flex-direction: column; }
   .saved-bulk-actions { width: 100%; justify-content: stretch; }
   .saved-bulk-actions .btn { flex: 1; min-width: 74px; }
-  .saved-timer-row,
-  .saved-timer-row:has(.saved-select-check) {
-    grid-template-columns: 38px minmax(0, 1fr);
-    gap: 9px;
-  }
+  .saved-timer-row { gap: 9px; }
+  .saved-timer-row:has(.saved-select-check) { grid-template-columns: 34px 42px minmax(0,1fr); }
   .saved-timer-row:not(:has(.saved-select-check)) { grid-template-columns: 42px minmax(0,1fr); }
   .saved-timer-row-actions { grid-column: 1 / -1; justify-content: flex-end; border-top: 1px solid var(--border); padding-top: 7px; }
   .saved-timer-row .play-btn { width: 42px; height: 42px; }
