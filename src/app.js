@@ -1967,7 +1967,7 @@ async function startRoutine(id) {
 }
 
 
-async function startSavedRoutineAutomated(id, { background = true, backgroundRoute = 'workspace', preserveFocus = false, workspaceGroup = '', workspaceColor = 'default' } = {}) {
+async function startSavedRoutineAutomated(id, { background = true, backgroundRoute = 'workspace', preserveFocus = false, workspaceGroup = '', workspaceColor = 'default', completionActionOverride = null, metaPatch = {} } = {}) {
   const routine = state.routines.find((item) => item.id === id);
   if (!routine || routine.archived) return null;
   let parameterValues = {};
@@ -1999,13 +1999,14 @@ async function startSavedRoutineAutomated(id, { background = true, backgroundRou
     parameterValues,
     completionNextRoutineId: routine.completionNextRoutineId || '',
     workspaceGroup,
-    workspaceColor
+    workspaceColor,
+    ...structuredClone(metaPatch || {})
   };
   return startSession(plan, meta, {
     background,
     backgroundRoute,
     preserveFocus,
-    completionAction: routine.completionAction || COMPLETION_ACTIONS.STOP
+    completionAction: completionActionOverride || routine.completionAction || COMPLETION_ACTIONS.STOP
   });
 }
 
