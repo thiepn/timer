@@ -3727,6 +3727,12 @@ document.addEventListener('input', (e) => {
     state.librarySearchActive = true;
     return renderLibrary();
   }
+  if (e.target.matches?.('[data-queue-draft-field]') && state.queueDraft) {
+    const field = e.target.dataset.queueDraftField;
+    if (field === 'title') state.queueDraft.title = String(e.target.value || '').slice(0, 120);
+    if (field === 'description') state.queueDraft.description = String(e.target.value || '').slice(0, 500);
+    return;
+  }
   if (e.target.matches?.('[data-history-search]')) {
     state.historyQuery = e.target.value;
     state.historyVisible = 100;
@@ -3762,6 +3768,12 @@ document.addEventListener('submit', async (e) => {
 
 document.addEventListener('change', async (e) => {
   updateBuilderInput(e.target); updateBuilderCueInput(e.target); updateCircuitInput(e.target); updateCustomInput(e.target); updateCustomCueInput(e.target); updateCustomParameterInput(e.target); updateBlockParameterInput(e.target);
+  if (e.target.matches?.('[data-queue-item-action]') && state.queueDraft) {
+    const index = Number(e.target.dataset.index);
+    if (state.queueDraft.items[index]) state.queueDraft.items[index].action = normalizeQueueStepAction(e.target.value);
+    return;
+  }
+  if (e.target.matches?.('[data-queue-draft-loop]') && state.queueDraft) { state.queueDraft.loop = Boolean(e.target.checked); return; }
   if (e.target.matches?.('[data-saved-sort]')) { state.librarySort = e.target.value || 'recent'; return renderLibrary(); }
   if (e.target.matches?.('[data-history-mode]')) { state.historyMode = e.target.value || 'all'; state.historyVisible = 100; return renderHistory(); }
   if (e.target.dataset.setting) {
@@ -3827,15 +3839,38 @@ document.addEventListener('click', async (e) => {
     if (coordinator.move(btn.dataset.id, Number(btn.dataset.delta || 0))) await persistWorkspaceOrder();
     return renderMultiTimerWorkspace();
   }
-  if (action === 'workspace-pause-all') { coordinator.pauseAll(); await persistAllRuntimes(); broadcastActiveSnapshot(); updateActiveTimerCards(); return; }
-  if (action === 'workspace-resume-all') { coordinator.resumeAll(); await persistAllRuntimes(); broadcastActiveSnapshot(); updateActiveTimerCards(); return; }
+  if (action === 'workspace-pause-all') {
+    if (state.activeQueue?.status === 'running') await pauseActiveQueue();
+    coordinator.pauseAll(); await persistAllRuntimes(); broadcastActiveSnapshot(); updateActiveTimerCards(); return;
+  }
+  if (action === 'workspace-resume-all') {
+    if (state.activeQueue?.status === 'paused') await resumeActiveQueue();
+    coordinator.resumeAll(); await persistAllRuntimes(); broadcastActiveSnapshot(); updateActiveTimerCards(); return;
+  }
   if (action === 'workspace-stop') { coordinator.command(btn.dataset.id, 'stop', 'user-ended'); return; }
   if (action === 'workspace-stop-all') {
     const ids = coordinator.list().map((runtime) => runtime.id);
     if (!ids.length || !confirm(`Stop all ${ids.length} active timer${ids.length === 1 ? '' : 's'}? Partial sessions will be saved.`)) return;
-    for (const id of ids) coordinator.command(id, 'stop', 'user-ended');
+    if (state.activeQueue) await stopActiveQueue();
+    for (const id of ids) if (coordinator.has(id)) coordinator.command(id, 'stop', 'user-ended');
     return;
   }
+  if (action === 'show-queue-library') return showQueueLibrarySheet();
+  if (action === 'new-queue') return showQueueBuilder();
+  if (action === 'edit-queue') return showQueueBuilder(btn.dataset.id);
+  if (action === 'start-queue') { closeSheet(); return startQueue(btn.dataset.id); }
+  if (action === 'delete-queue') return deleteQueue(btn.dataset.id);
+  if (action === 'queue-add-timer') return showQueueTimerPicker();
+  if (action === 'queue-add-picked-timer') return addQueueDraftTimer(btn.dataset.id);
+  if (action === 'queue-return-builder') return renderQueueBuilderSheet();
+  if (action === 'queue-item-move') return moveQueueDraftItem(Number(btn.dataset.index), Number(btn.dataset.delta));
+  if (action === 'queue-item-remove') return removeQueueDraftItem(Number(btn.dataset.index));
+  if (action === 'save-queue-draft') return saveQueueDraft();
+  if (action === 'save-start-queue-draft') return saveQueueDraft({ start: true });
+  if (action === 'queue-pause') { await pauseActiveQueue(); if (state.route === 'workspace' && !state.engine) renderMultiTimerWorkspace(); return; }
+  if (action === 'queue-resume') { await resumeActiveQueue(); if (state.route === 'workspace' && !state.engine) renderMultiTimerWorkspace(); return; }
+  if (action === 'queue-skip') return skipActiveQueueStep();
+  if (action === 'queue-stop') { if (!confirm('Stop this queue? The current partial timer will be saved.')) return; return stopActiveQueue(); }
   if (action === 'close-display-window') { try { window.close(); } catch {} return; }
   if (action === 'open-display-window') {
     closeSheet();
@@ -3910,6 +3945,16 @@ document.addEventListener('click', async (e) => {
   }
   if (action === 'move-saved') return showMoveSavedTimers([btn.dataset.id]);
   if (action === 'bulk-saved-move') return showMoveSavedTimers([...state.savedSelected]);
+  if (action === 'queue-from-selection') {
+    const ids = [...state.savedSelected];
+    if (!ids.length) return toast('Select at least one Saved Timer.');
+    return openQueueBuilderFromTimerIds(ids, 'Selected Timers Queue');
+  }
+  if (action === 'queue-from-view') {
+    const ids = visibleSavedTimers().map((timer) => timer.id);
+    if (!ids.length) return toast('This view has no Saved Timers to queue.');
+    return openQueueBuilderFromTimerIds(ids, defaultQueueTitleFromView());
+  }
   if (action === 'apply-saved-move') return applySavedMove();
   if (action === 'bulk-saved-archive' || action === 'bulk-saved-restore') {
     const archived = action === 'bulk-saved-archive';
