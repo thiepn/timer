@@ -1453,6 +1453,7 @@ function openBuilder(type, routine = null) {
   state.builderEditingId = routine?.id || null;
   state.builderEditingBlockId = null;
   state.builderCueOverrides = structuredClone(routine?.cueOverrides || {});
+  setNavActive();
   renderBuilder();
   focusMainHeading(main);
 }
@@ -1464,6 +1465,7 @@ function openBlockEditor(block) {
   state.builderEditingId = null;
   state.builderEditingBlockId = block.id;
   state.builderCueOverrides = {};
+  setNavActive();
   renderBuilder();
   focusMainHeading(main);
 }
