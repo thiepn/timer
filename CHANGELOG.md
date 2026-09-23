@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.3.0
+
+### Added
+- Universal Saved Timers spanning countdown presets, stopwatches, intervals, advanced sequences and specialized timer templates.
+- First-class reusable countdown saving directly from Quick Timer and the normal Countdown builder.
+- Saved Timer metadata: pin, favorite, archive, icon, accent, description, collection and tags.
+- Default Cooking, Study, Workout, Church and Music collections plus custom collection management.
+- Recent, most-used, alphabetical and duration sorting, with full metadata-aware search.
+- Duplicate, multi-select and bulk move/archive/restore/delete operations.
+
+### Migration and compatibility
+- Existing saved routines remain in the established IndexedDB `routines` store and are upgraded in place to Saved Timer schema v2 without dropping timer config, cue overrides, history references or usage data.
+- Backup payload remains v4 and historical backup v1-v4 restore remains supported.
+- IndexedDB remains v6; no destructive database-store migration is required.
+- Service-worker cache generation bumped to v15.
+
+
 ## 2.2.0
 
 ### Added
