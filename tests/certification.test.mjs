@@ -178,11 +178,12 @@ test('v2.5 release metadata includes queues and automation', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
   const sw = fs.readFileSync(path.join(repoRoot, 'sw.js'), 'utf8');
   assert.equal(pkg.version, '2.5.0');
-  assert.match(sw, /thiepn-timer-v17/);
+  assert.match(sw, /thiepn-timer-v18/);
   assert.match(sw, /\.\/src\/coordinator\.js/);
   assert.match(sw, /\.\/src\/quick\.js/);
   assert.match(sw, /\.\/src\/saved\.js/);
   assert.match(sw, /\.\/src\/queue\.js/);
+  assert.match(sw, /\.\/visual-system\.css/);
   const app = fs.readFileSync(path.join(repoRoot, 'src/app.js'), 'utf8');
   assert.match(app, /Multi-Timer Workspace/);
   assert.match(app, /workspace-stop-all/);
