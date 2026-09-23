@@ -299,7 +299,7 @@ async function saveQuickTimerPreset() {
     id: uid('routine'),
     type: 'countdown',
     title,
-    config: { title, duration: Math.max(1, Math.round(result.ms / 1000)) },
+    config: { title, duration: Math.max(1, result.ms / 1000) },
     durationMs: result.ms,
     createdAt: Date.now()
   });
