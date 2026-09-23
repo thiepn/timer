@@ -3787,6 +3787,31 @@ document.addEventListener('change', async (e) => {
   }
 });
 
+document.addEventListener('dragstart', (e) => {
+  const row = e.target.closest?.('[data-queue-draft-index]');
+  if (!row || !state.queueDraft) return;
+  state.queueDragIndex = Number(row.dataset.queueDraftIndex);
+  e.dataTransfer?.setData('text/plain', String(state.queueDragIndex));
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+});
+
+document.addEventListener('dragover', (e) => {
+  if (state.queueDragIndex == null) return;
+  if (e.target.closest?.('[data-queue-draft-index]')) e.preventDefault();
+});
+
+document.addEventListener('drop', (e) => {
+  const row = e.target.closest?.('[data-queue-draft-index]');
+  if (!row || state.queueDragIndex == null || !state.queueDraft) return;
+  e.preventDefault();
+  const to = Number(row.dataset.queueDraftIndex);
+  state.queueDraft.items = reorderQueueItems(state.queueDraft.items, state.queueDragIndex, to);
+  state.queueDragIndex = null;
+  renderQueueBuilderSheet();
+});
+
+document.addEventListener('dragend', () => { state.queueDragIndex = null; });
+
 document.addEventListener('click', async (e) => {
   const routeBtn = e.target.closest('[data-route]');
   if (routeBtn) return setRoute(routeBtn.dataset.route);
