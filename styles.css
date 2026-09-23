@@ -807,3 +807,121 @@ html[data-large-controls="true"] .sheet .btn, html[data-large-controls="true"] .
   .saved-timer-row-actions { grid-column: 1 / -1; justify-content: flex-end; border-top: 1px solid var(--border); padding-top: 7px; }
   .saved-timer-row .play-btn { width: 42px; height: 42px; }
 }
+
+
+/* v2.4 Multi-Timer Workspace */
+.workspace-head { align-items: center; }
+.workspace-head > .row { flex-wrap: wrap; justify-content: flex-end; }
+.workspace-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.workspace-layout-switch { margin: 0; min-width: min(320px,100%); }
+.workspace-layout-switch button {
+  min-height: 40px;
+  padding: 7px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-2);
+  font-weight: 800;
+}
+.workspace-layout-switch button.active { background: var(--accent-soft); color: var(--accent); }
+.workspace-bulk-actions { display: flex; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
+.workspace-groups { display: grid; gap: 22px; }
+.workspace-group { display: grid; gap: 10px; }
+.workspace-group h2 { margin: 0; font-size: .82rem; color: var(--text-2); letter-spacing: .06em; text-transform: uppercase; }
+.workspace-timer-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+.workspace-timer-card {
+  --saved-tone: var(--accent);
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--saved-tone);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.workspace-timer-main {
+  display: grid;
+  grid-template-columns: minmax(0,1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+.workspace-timer-copy { min-width: 0; display: grid; gap: 4px; }
+.workspace-timer-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 1rem; }
+.workspace-timer-copy small { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-time { font-size: clamp(1.7rem,5vw,2.5rem); font-weight: 850; letter-spacing: -.045em; font-variant-numeric: tabular-nums; text-align: end; }
+.workspace-automation {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 9px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: .78rem;
+  font-weight: 750;
+}
+.workspace-card-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.workspace-card-actions .btn { flex: 1 1 auto; min-width: 66px; }
+.workspace-groups.layout-compact .workspace-timer-grid { grid-template-columns: 1fr; }
+.workspace-groups.layout-compact .workspace-timer-card { grid-template-columns: minmax(0,1fr) auto; align-items: center; padding: 10px 12px; }
+.workspace-groups.layout-compact .workspace-timer-main { grid-column: 1; }
+.workspace-groups.layout-compact .workspace-automation { display: none; }
+.workspace-groups.layout-compact .workspace-card-actions { grid-column: 2; flex-wrap: nowrap; }
+.workspace-groups.layout-compact .workspace-time { font-size: 1.6rem; }
+.workspace-groups.layout-focus .workspace-timer-grid { grid-template-columns: minmax(0,680px); justify-content: center; }
+.workspace-groups.layout-focus .workspace-timer-card { padding: clamp(18px,4vw,30px); }
+.workspace-groups.layout-focus .workspace-time { font-size: clamp(2.8rem,10vw,5.2rem); }
+.workspace-focus-strip {
+  display: flex;
+  gap: 7px;
+  overflow-x: auto;
+  padding: 3px 1px 12px;
+}
+.workspace-focus-strip button {
+  flex: 0 0 auto;
+  min-height: 38px;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-weight: 750;
+}
+.workspace-focus-strip button.active { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.workspace-empty { margin-top: 20px; }
+@media (max-width: 720px) {
+  .workspace-toolbar { align-items: stretch; flex-direction: column; }
+  .workspace-bulk-actions { justify-content: stretch; }
+  .workspace-bulk-actions .btn { flex: 1; }
+  .workspace-timer-grid { grid-template-columns: 1fr; }
+  .workspace-groups.layout-compact .workspace-timer-card { grid-template-columns: 1fr; }
+  .workspace-groups.layout-compact .workspace-card-actions { grid-column: 1; }
+  .workspace-head { align-items: flex-start; flex-direction: column; }
+  .workspace-head > .row { width: 100%; justify-content: stretch; }
+  .workspace-head > .row .btn { flex: 1; }
+}
+@media (max-width: 440px) {
+  .workspace-timer-main { grid-template-columns: 1fr; gap: 6px; }
+  .workspace-time { text-align: left; }
+  .workspace-card-actions .btn { min-width: 58px; padding-inline: 10px; }
+}
