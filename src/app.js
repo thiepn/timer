@@ -1255,7 +1255,8 @@ function renderMultiTimerWorkspace() {
     const cards = shown.map((runtime) => workspaceRuntimeCard(runtime, runtimes.indexOf(runtime), runtimes.length)).join('');
     return `<section class="workspace-group"><div class="row-between"><h2>${esc(group)}</h2><span class="pill">${items.length}</span></div><div class="workspace-timer-grid">${cards}</div></section>`;
   }).join('');
-  main.innerHTML = `<div class="page-head workspace-head"><div><h1>Multi-Timer Workspace</h1><p>Control, group, order and chain every active timer.</p></div><div class="row"><button class="btn" data-action="workspace-launch-saved">＋ Saved</button><button class="btn primary" data-action="create">＋ New</button></div></div>
+  main.innerHTML = `<div class="page-head workspace-head"><div><h1>Multi-Timer Workspace</h1><p>Control independent timers and automation queues from one place.</p></div><div class="row"><button class="btn" data-action="show-queue-library">Queues</button><button class="btn" data-action="workspace-launch-saved">＋ Saved</button><button class="btn primary" data-action="create">＋ New</button></div></div>
+    ${renderActiveQueuePanel()}
     <section class="workspace-toolbar card card-pad">
       <div class="segmented workspace-layout-switch" role="group" aria-label="Workspace layout">${layoutButton('grid','Grid')}${layoutButton('compact','Compact')}${layoutButton('focus','Focus')}</div>
       <div class="workspace-bulk-actions"><button class="btn compact-btn" data-action="workspace-pause-all" ${runtimes.length ? '' : 'disabled'}>Pause all</button><button class="btn compact-btn" data-action="workspace-resume-all" ${runtimes.length ? '' : 'disabled'}>Resume all</button><button class="btn compact-btn danger" data-action="workspace-stop-all" ${runtimes.length ? '' : 'disabled'}>Stop all</button></div>
