@@ -574,7 +574,9 @@ export class TimerDB {
   async importData(data, { replace = false, selection = null, quarantine = [] } = {}) {
     if (!data || data.format !== 'thiepn-timer-backup' || ![1, 2, 3, 4, 5].includes(Number(data.version))) throw new Error('Unsupported backup format.');
     if (!Array.isArray(data.routines) || !Array.isArray(data.sessions)) throw new Error('Backup is incomplete.');
-    const available = data.version >= 4 && data.selection ? data.selection : { routines: true, blocks: true, cueProfiles: true, customSounds: true, queues: data.version >= 5, sessions: true, settings: true };
+    const available = data.version >= 4 && data.selection
+      ? { ...data.selection, queues: data.version >= 5 ? data.selection.queues !== false : false }
+      : { routines: true, blocks: true, cueProfiles: true, customSounds: true, queues: data.version >= 5, sessions: true, settings: true };
     const requested = normalizeSelection(selection || available);
     const selected = Object.fromEntries(Object.keys(requested).map((key) => [key, Boolean(requested[key] && available[key] !== false)]));
     const blocks = data.version >= 2 && Array.isArray(data.blocks) ? data.blocks : [];
