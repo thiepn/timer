@@ -13,7 +13,7 @@ import { LOCALE_OPTIONS, resolveLocale, applyDocumentLocale, localizeDOM, transl
 import { FocusTrap, Announcer, focusMainHeading, isInteractiveTarget, timerEventAnnouncement } from './accessibility.js';
 import { PerformanceMetrics, MaintenanceCoordinator, liveSchedulerPolicy, reduceMotionEnabled } from './performance.js';
 import { TimerCoordinator, COMPLETION_ACTIONS, normalizeCompletionAction } from './coordinator.js';
-import { parseDurationInput, durationInputText, normalizeDurationList, pushRecentDuration, DEFAULT_QUICK_PRESETS, DEFAULT_QUICK_ADJUSTMENTS } from './quick.js';
+import { parseDurationInput, durationInputText, quickDurationDial, normalizeDurationList, pushRecentDuration, DEFAULT_QUICK_PRESETS, DEFAULT_QUICK_ADJUSTMENTS } from './quick.js';
 import { DEFAULT_SAVED_TIMER_COLLECTIONS, SAVED_TIMER_ACCENTS, normalizeSavedTimerRecord, normalizeSavedTimerTags, normalizeSavedTimerCollections, needsSavedTimerMigration, savedTimerSearchText, savedTimerMatchesView, sortSavedTimers, duplicateSavedTimerRecord } from './saved.js';
 import { QUEUE_STEP_ACTIONS, normalizeQueuePreset, normalizeQueueStepAction, createQueueRun, normalizeQueueRun, queueCurrentItem, queueProgress, advanceQueueRun, reorderQueueItems, queuePresetFromTimerIds } from './queue.js';
 
@@ -260,15 +260,12 @@ function quickInputResult(value = state.quickInput) {
 
 function quickDialModel(milliseconds) {
   const msValue = Math.max(1000, Number(milliseconds) || 1000);
-  const totalSeconds = Math.max(1, Math.round(msValue / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const withinHour = totalSeconds % 3600;
-  const sweepRatio = hours > 0 && withinHour === 0 ? 1 : withinHour / 3600;
+  const dial = quickDurationDial(msValue);
   return {
     time: formatClock(msValue),
     caption: durationLabel(msValue),
-    sweep: Math.max(2, Math.min(360, Math.round(sweepRatio * 360))),
-    scale: hours > 0 ? `${hours}h · minute dial` : '60-minute dial'
+    sweep: dial.sweepDegrees,
+    scale: dial.hours > 0 ? `${dial.hours}h · minute dial` : '60-minute dial'
   };
 }
 
