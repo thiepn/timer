@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.5.0
+
+### Added
+- Saved Queue presets with dedicated durable storage.
+- Visual Queue Builder with drag/reorder, accessible move buttons, timer picker, descriptions and whole-queue looping.
+- Per-step queue behavior: Advance, Overtime, Repeat Step and Stop Queue.
+- Active Queue progress with queued-but-not-started timers, cycle number, completed/skipped counts and Pause/Resume/Skip/Stop controls.
+- Queue creation directly from selected Saved Timers or the current Library view/collection.
+- Queue presets integrated into Saved Timers Library and Multi-Timer Workspace.
+
+### Recovery and compatibility
+- Active queue runs persist separately from queue presets and restore current index, cycle, status and current runtime linkage after process loss.
+- Queue transitions start the next runtime before retiring the completed one, preserving runtime ownership and Wake Lock continuity.
+- Explicit manual timer stop terminates the queue rather than accidentally auto-advancing it.
+- Backup payload upgraded to v5 to include Saved Queues while v1-v4 remain supported.
+- Pre-v5 replace restores explicitly leave existing queue presets untouched.
+- IndexedDB schema upgraded to v7 with `queues` and `activeQueues` stores.
+- Service-worker cache generation bumped to v17.
+
 ## 2.4.0
 
 ### Added
