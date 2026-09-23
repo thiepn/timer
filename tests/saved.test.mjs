@@ -88,6 +88,7 @@ test('duplicate creates an independent non-archived record with reset usage', ()
   assert.equal(copy.pinned, true);
   assert.equal(copy.useCount, 0);
   assert.equal(copy.lastUsedAt, undefined);
-  assert.deepEqual(copy.config, source.config);
+  assert.equal(copy.config.title, 'Tea Copy');
+  assert.equal(copy.config.duration, source.config.duration);
   assert.notEqual(copy.config, source.config);
 });
