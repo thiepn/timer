@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.1.0
+
+### Added
+- Universal `TimerCoordinator` with independent concurrent timer runtimes.
+- Per-runtime active-session persistence and automatic migration from the v2.0 singleton checkpoint.
+- Completion primitives for stop, overtime, repeat and start-next workflows.
+- Minimal Active Timers dashboard cards plus `Run in background` from the live timer.
+- Per-runtime cue generations and serialized speech arbitration for simultaneous timers.
+
+### Improved
+- Wake Lock, maintenance suspension, runtime ownership and service-worker update deferral now operate on the complete active-timer set rather than one focused timer.
+- Cross-window heartbeat/takeover payloads carry all active timers while preserving one runtime authority.
+- Active notifications use per-runtime tags.
+
+### Compatibility
+- IndexedDB schema upgraded from v5 to v6. Existing `active/current` recovery state migrates automatically into `activeSessions`.
+- Backup payload remains v4; active runtimes are recovery state and are not added to portable backups.
+- Service-worker cache generation bumped to v13.
+
 ## 2.0.0
 
 ### Fixed

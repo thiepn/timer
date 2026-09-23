@@ -123,7 +123,6 @@ test('selective backups only carry requested categories', async () => {
   assert.equal(backup.selection.sessions, false);
 });
 
-
 test('active-session persistence rejects stale checkpoint sequence numbers', async () => {
   const db = new TimerDB();
   await db.open();
@@ -151,4 +150,29 @@ test('active-session clear is ordered after pending writes and can be session-gu
   const clearedWrong = await db.clearActive('session-a');
   assert.equal(clearedWrong, false);
   assert.equal((await db.getActive()).snapshot.id, 'session-b');
+});
+
+test('multiple active timer checkpoints are independent and sequence guarded', async () => {
+  const db = new TimerDB();
+  await db.open();
+  const base = { status: 'running', plan: { kind: 'open', title: 'Timer' }, startedAt: 10, meta: {} };
+  await db.saveActiveSession({ id: 'runtime-a', snapshot: { ...base, id: 'session-a', sequence: 4 }, meta: { title: 'A' } });
+  await db.saveActiveSession({ id: 'runtime-b', snapshot: { ...base, id: 'session-b', sequence: 2 }, meta: { title: 'B' } });
+  await db.saveActiveSession({ id: 'runtime-a', snapshot: { ...base, id: 'session-a', sequence: 3 }, meta: { title: 'stale' } });
+  const rows = await db.getActiveSessions();
+  assert.equal(rows.length, 2);
+  assert.equal((await db.getActiveSession('runtime-a')).meta.title, 'A');
+  await db.clearActiveSession('runtime-a', 'session-a');
+  assert.equal((await db.getActiveSessions()).length, 1);
+  assert.equal((await db.getActiveSessions())[0].id, 'runtime-b');
+});
+
+test('active timer clear is guarded against a stale cycle session id', async () => {
+  const db = new TimerDB();
+  await db.open();
+  const plan = { kind: 'open', title: 'Timer' };
+  await db.saveActiveSession({ id: 'runtime-repeat', snapshot: { id: 'cycle-1', status: 'running', plan, startedAt: 1, sequence: 2 } });
+  await db.saveActiveSession({ id: 'runtime-repeat', snapshot: { id: 'cycle-2', status: 'running', plan, startedAt: 2, sequence: 1 } });
+  assert.equal(await db.clearActiveSession('runtime-repeat', 'cycle-1'), false);
+  assert.equal((await db.getActiveSession('runtime-repeat')).snapshot.id, 'cycle-2');
 });

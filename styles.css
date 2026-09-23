@@ -560,3 +560,13 @@ html[data-large-controls="true"] .sheet .btn, html[data-large-controls="true"] .
 .app-shell[data-large-controls="true"] #app-main { padding-bottom: calc(var(--nav-h) + 52px + env(safe-area-inset-bottom)); }
 
 .history-loading { margin-top: 12px; }
+
+/* v2.1 active timer foundation */
+.active-timers-section .list { gap: 8px; }
+.active-timer-card { align-items: center; }
+.active-timer-card .list-row-main { min-width: 0; }
+.active-timer-time { min-width: 5.5rem; text-align: end; font-variant-numeric: tabular-nums; font-size: 1.05rem; }
+@media (max-width: 460px) {
+  .active-timer-card { grid-template-columns: minmax(0,1fr) auto auto; }
+  .active-timer-time { min-width: 4.6rem; }
+}
