@@ -155,6 +155,28 @@ html[data-theme="oled"],
   --ambient-accent: transparent;
 }
 
+
+/* Reassert the legacy bridge at theme scope so older theme selectors cannot
+   bypass the semantic material system. */
+html[data-theme],
+.app-shell[data-theme] {
+  --bg: var(--material-canvas);
+  --surface: var(--material-content);
+  --surface-2: var(--material-raised);
+  --surface-3: var(--material-interactive);
+  --text: var(--text-primary);
+  --text-2: var(--text-secondary);
+  --text-3: var(--text-tertiary);
+  --border: var(--border-subtle);
+  --shadow: var(--shadow-content);
+  --work: var(--state-work);
+  --rest: var(--state-rest);
+  --prepare: var(--state-prepare);
+  --recovery: var(--state-recovery);
+  --danger: var(--state-danger);
+  --success: var(--state-complete);
+}
+
 /* User accent palettes. Kept independent from temporal-state colors. */
 html[data-accent="blue"], .app-shell[data-accent="blue"] { --accent:#78a8ff; --accent-rgb:120 168 255; }
 html[data-accent="teal"], .app-shell[data-accent="teal"] { --accent:#5fd2c7; --accent-rgb:95 210 199; }
