@@ -24,7 +24,7 @@ const analytics = measure('Summarize 10,000 sessions', () => summarizeRange(sess
 
 
 const shellFiles = [
-  'index.html','styles.css','visual-system.css','manifest.webmanifest','sw.js',
+  'index.html','styles.css','visual-system.css','manifest.webmanifest','icon.svg','icons.svg','sw.js',
   'src/core.js','src/db.js','src/audio.js','src/analytics.js','src/resilience.js','src/device.js','src/i18n.js','src/accessibility.js','src/performance.js','src/coordinator.js','src/quick.js','src/saved.js','src/queue.js','src/app.js'
 ];
 const shellGzipBytes = shellFiles.reduce((total, file) => total + zlib.gzipSync(fs.readFileSync(new URL(`../${file}`, import.meta.url))).length, 0);
