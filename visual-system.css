@@ -1,0 +1,496 @@
+/*
+ * Timer Design System V3 — Phase V2
+ * Art direction: precision instrument + ambient depth + expressive state.
+ * Loaded after legacy styles so existing screens inherit the new semantic system
+ * without requiring screen-specific redesigns in this phase.
+ */
+
+:root {
+  /* Typography — T0..T5 */
+  --font-ui: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: var(--font-ui);
+  --type-display-size: clamp(4.75rem, 25vw, 11.5rem);
+  --type-display-line: .86;
+  --type-display-weight: 780;
+  --type-display-tracking: -.065em;
+  --type-hero-size: clamp(1.65rem, 4.5vw, 2.25rem);
+  --type-hero-line: 1.05;
+  --type-hero-weight: 780;
+  --type-title-size: 1rem;
+  --type-title-line: 1.2;
+  --type-title-weight: 720;
+  --type-ui-size: .9rem;
+  --type-ui-weight: 690;
+  --type-body-size: .95rem;
+  --type-body-line: 1.5;
+  --type-meta-size: .78rem;
+  --type-meta-line: 1.35;
+  --type-meta-weight: 650;
+
+  /* Shape — R1..R5 */
+  --radius-1: 8px;
+  --radius-2: 12px;
+  --radius-3: 16px;
+  --radius-4: 22px;
+  --radius-5: 30px;
+  --radius-full: 999px;
+
+  /* Motion */
+  --motion-micro: 120ms;
+  --motion-control: 180ms;
+  --motion-spatial: 280ms;
+  --motion-state: 420ms;
+  --ease-standard: cubic-bezier(.2, .8, .2, 1);
+  --ease-emphasized: cubic-bezier(.16, 1, .3, 1);
+  --ease-exit: cubic-bezier(.4, 0, 1, 1);
+
+  /* Semantic temporal states */
+  --state-work: #67d98b;
+  --state-rest: #78a9ff;
+  --state-prepare: #f0bd62;
+  --state-recovery: #61cec3;
+  --state-paused: #8b97a8;
+  --state-overtime: #f29a5a;
+  --state-warning: #efc15c;
+  --state-danger: #f0717a;
+  --state-complete: #6bd89a;
+
+  /* Accent defaults */
+  --accent: #78a8ff;
+  --accent-rgb: 120 168 255;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --accent-softer: color-mix(in srgb, var(--accent) 7%, transparent);
+  --accent-strong: color-mix(in srgb, var(--accent) 78%, white 22%);
+
+  /* M0–M5 material hierarchy — Dark default */
+  --material-canvas: #070a0f;
+  --material-content: #0e141c;
+  --material-raised: #141c27;
+  --material-interactive: #1a2431;
+  --material-floating: rgb(16 23 33 / .82);
+  --material-modal: #17202b;
+  --material-live: #06090d;
+  --text-primary: #f4f7fb;
+  --text-secondary: #aeb8c7;
+  --text-tertiary: #7f8b9d;
+  --border-subtle: rgb(190 207 230 / .12);
+  --border-strong: rgb(190 207 230 / .22);
+  --highlight-edge: rgb(255 255 255 / .055);
+  --shadow-content: 0 1px 0 rgb(255 255 255 / .025), 0 8px 24px rgb(0 0 0 / .16);
+  --shadow-raised: 0 1px 0 rgb(255 255 255 / .04), 0 12px 34px rgb(0 0 0 / .22);
+  --shadow-floating: 0 1px 0 rgb(255 255 255 / .06), 0 18px 48px rgb(0 0 0 / .34);
+  --shadow-modal: 0 2px 0 rgb(255 255 255 / .055), 0 28px 72px rgb(0 0 0 / .46);
+  --focus-ring: color-mix(in srgb, var(--accent) 84%, white 16%);
+  --ambient-accent: color-mix(in srgb, var(--accent) 6%, transparent);
+
+  /* Legacy token bridge. Existing screens adopt V3 automatically. */
+  --bg: var(--material-canvas);
+  --surface: var(--material-content);
+  --surface-2: var(--material-raised);
+  --surface-3: var(--material-interactive);
+  --text: var(--text-primary);
+  --text-2: var(--text-secondary);
+  --text-3: var(--text-tertiary);
+  --border: var(--border-subtle);
+  --work: var(--state-work);
+  --rest: var(--state-rest);
+  --prepare: var(--state-prepare);
+  --recovery: var(--state-recovery);
+  --danger: var(--state-danger);
+  --success: var(--state-complete);
+  --shadow: var(--shadow-content);
+  --radius-sm: var(--radius-2);
+  --radius-md: var(--radius-3);
+  --radius-lg: var(--radius-4);
+}
+
+html[data-theme="dark"],
+.app-shell[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+html[data-theme="light"],
+.app-shell[data-theme="light"] {
+  color-scheme: light;
+  --material-canvas: #f2f2ef;
+  --material-content: #f9f9f7;
+  --material-raised: #ffffff;
+  --material-interactive: #eef0f2;
+  --material-floating: rgb(255 255 255 / .82);
+  --material-modal: #fdfdfb;
+  --material-live: #f2f2ef;
+  --text-primary: #171a1f;
+  --text-secondary: #566170;
+  --text-tertiary: #7a8593;
+  --border-subtle: rgb(33 43 56 / .11);
+  --border-strong: rgb(33 43 56 / .20);
+  --highlight-edge: rgb(255 255 255 / .85);
+  --shadow-content: 0 1px 0 rgb(255 255 255 / .9), 0 8px 24px rgb(35 43 53 / .07);
+  --shadow-raised: 0 1px 0 rgb(255 255 255 / .95), 0 14px 36px rgb(35 43 53 / .10);
+  --shadow-floating: 0 1px 0 rgb(255 255 255 / .95), 0 20px 52px rgb(35 43 53 / .15);
+  --shadow-modal: 0 2px 0 rgb(255 255 255 / 1), 0 30px 78px rgb(35 43 53 / .20);
+  --ambient-accent: color-mix(in srgb, var(--accent) 4%, transparent);
+}
+
+html[data-theme="oled"],
+.app-shell[data-theme="oled"] {
+  color-scheme: dark;
+  --material-canvas: #000;
+  --material-content: #050505;
+  --material-raised: #090909;
+  --material-interactive: #111;
+  --material-floating: rgb(7 7 7 / .94);
+  --material-modal: #0a0a0a;
+  --material-live: #000;
+  --text-primary: #f7f7f7;
+  --text-secondary: #b0b0b0;
+  --text-tertiary: #7d7d7d;
+  --border-subtle: rgb(255 255 255 / .10);
+  --border-strong: rgb(255 255 255 / .19);
+  --highlight-edge: rgb(255 255 255 / .035);
+  --shadow-content: none;
+  --shadow-raised: none;
+  --shadow-floating: 0 14px 34px rgb(0 0 0 / .7);
+  --shadow-modal: 0 24px 60px rgb(0 0 0 / .82);
+  --ambient-accent: transparent;
+}
+
+/* User accent palettes. Kept independent from temporal-state colors. */
+html[data-accent="blue"], .app-shell[data-accent="blue"] { --accent:#78a8ff; --accent-rgb:120 168 255; }
+html[data-accent="teal"], .app-shell[data-accent="teal"] { --accent:#5fd2c7; --accent-rgb:95 210 199; }
+html[data-accent="purple"], .app-shell[data-accent="purple"] { --accent:#aa91ff; --accent-rgb:170 145 255; }
+html[data-accent="green"], .app-shell[data-accent="green"] { --accent:#69d395; --accent-rgb:105 211 149; }
+html[data-accent="orange"], .app-shell[data-accent="orange"] { --accent:#f1a35f; --accent-rgb:241 163 95; }
+html[data-accent="pink"], .app-shell[data-accent="pink"] { --accent:#eb8cc6; --accent-rgb:235 140 198; }
+html[data-accent="red"], .app-shell[data-accent="red"] { --accent:#ee7c78; --accent-rgb:238 124 120; }
+
+/* Named material primitives — usable by V3–V10. */
+.material-canvas { background:var(--material-canvas); color:var(--text-primary); }
+.material-content {
+  background:var(--material-content);
+  color:var(--text-primary);
+  border:1px solid var(--border-subtle);
+  box-shadow:var(--shadow-content);
+}
+.material-raised {
+  background:
+    linear-gradient(180deg, var(--highlight-edge), transparent 34%),
+    var(--material-raised);
+  color:var(--text-primary);
+  border:1px solid var(--border-strong);
+  box-shadow:var(--shadow-raised);
+}
+.material-floating {
+  background:var(--material-floating);
+  color:var(--text-primary);
+  border:1px solid var(--border-strong);
+  box-shadow:var(--shadow-floating);
+  backdrop-filter:blur(18px) saturate(1.15);
+}
+.material-modal {
+  background:var(--material-modal);
+  color:var(--text-primary);
+  border:1px solid var(--border-strong);
+  box-shadow:var(--shadow-modal);
+}
+.material-live {
+  background:var(--material-live);
+  color:var(--text-primary);
+}
+
+/* Typography primitives. */
+.type-display {
+  font:var(--type-display-weight) var(--type-display-size)/var(--type-display-line) var(--font-display);
+  letter-spacing:var(--type-display-tracking);
+  font-variant-numeric:tabular-nums lining-nums;
+  font-feature-settings:"tnum" 1, "lnum" 1;
+}
+.type-hero {
+  font:var(--type-hero-weight) var(--type-hero-size)/var(--type-hero-line) var(--font-ui);
+  letter-spacing:-.035em;
+}
+.type-title {
+  font:var(--type-title-weight) var(--type-title-size)/var(--type-title-line) var(--font-ui);
+  letter-spacing:-.012em;
+}
+.type-ui { font-size:var(--type-ui-size); font-weight:var(--type-ui-weight); }
+.type-body { font-size:var(--type-body-size); line-height:var(--type-body-line); }
+.type-meta { font-size:var(--type-meta-size); line-height:var(--type-meta-line); font-weight:var(--type-meta-weight); color:var(--text-secondary); }
+
+/* Global V3 adoption: primitives change, screen composition does not. */
+html, body, button, input, select, textarea { font-family:var(--font-ui); }
+body {
+  background:var(--material-canvas);
+  color:var(--text-primary);
+  font-size:var(--type-body-size);
+  line-height:var(--type-body-line);
+}
+.app-shell {
+  color:var(--text-primary);
+  background:
+    radial-gradient(80% 46% at 50% -14%, var(--ambient-accent), transparent 72%),
+    var(--material-canvas);
+}
+.page-head h1 {
+  font-size:var(--type-hero-size);
+  line-height:var(--type-hero-line);
+  font-weight:var(--type-hero-weight);
+  letter-spacing:-.035em;
+}
+.page-head p { color:var(--text-secondary); line-height:1.45; }
+.section-title, .quick-label, .quick-group-label {
+  color:var(--text-secondary);
+  font-size:var(--type-meta-size);
+  font-weight:740;
+  letter-spacing:.085em;
+}
+.muted { color:var(--text-secondary); }
+.tiny { color:var(--text-tertiary); }
+.quick-time, .live-time, .workspace-time, .active-timer-time {
+  font-family:var(--font-display);
+  font-variant-numeric:tabular-nums lining-nums;
+  font-feature-settings:"tnum" 1, "lnum" 1;
+}
+.live-time {
+  font-size:var(--type-display-size);
+  line-height:var(--type-display-line);
+  font-weight:var(--type-display-weight);
+  letter-spacing:var(--type-display-tracking);
+}
+.quick-time { font-weight:var(--type-display-weight); letter-spacing:-.055em; }
+
+/* M1 content surfaces */
+.card,
+.list-row,
+.saved-timer-row,
+.queue-preset-row,
+.saved-collection-row {
+  background:var(--material-content);
+  border-color:var(--border-subtle);
+  box-shadow:var(--shadow-content);
+}
+
+/* M2 raised / interactive surfaces */
+.mode-card,
+.home-shortcut,
+.active-timer-card,
+.workspace-timer-card,
+.queue-builder-item,
+.preset-btn {
+  background:
+    linear-gradient(180deg, var(--highlight-edge), transparent 34%),
+    var(--material-raised);
+  border-color:var(--border-strong);
+  box-shadow:var(--shadow-raised);
+}
+
+/* M3 floating controls */
+.app-header,
+.bottom-nav {
+  background:var(--material-floating);
+  border-color:var(--border-strong);
+  box-shadow:var(--shadow-floating);
+  backdrop-filter:blur(18px) saturate(1.12);
+}
+
+/* M4 modal */
+.sheet {
+  background:var(--material-modal);
+  border-color:var(--border-strong);
+  box-shadow:var(--shadow-modal);
+}
+.sheet-backdrop { background:rgb(0 0 0 / .58); }
+
+/* M5 live stage */
+.live-shell {
+  background:
+    radial-gradient(62% 48% at 50% 42%, color-mix(in srgb, var(--phase, var(--accent)) 7%, transparent), transparent 74%),
+    var(--material-live);
+}
+
+/* Shape semantics */
+.pill,
+.library-filter-chip,
+.quick-adjust-chip,
+.text-btn { border-radius:var(--radius-full); }
+.btn,
+.input,
+.select,
+textarea.input,
+.stepper button,
+.sheet-item { border-radius:var(--radius-2); }
+.card,
+.mode-card,
+.list-row,
+.saved-timer-row,
+.queue-preset-row,
+.queue-builder-item,
+.active-timer-card,
+.workspace-timer-card { border-radius:var(--radius-3); }
+.bottom-nav { border-radius:var(--radius-4); }
+.sheet { border-radius:var(--radius-5) var(--radius-5) 0 0; }
+
+/* Control hierarchy and tactile response */
+.btn,
+.icon-btn,
+.play-btn,
+.preset-btn,
+.mode-card,
+.home-shortcut,
+.library-filter-chip,
+.quick-adjust-chip,
+.nav-item {
+  transition:
+    transform var(--motion-micro) var(--ease-standard),
+    background-color var(--motion-control) var(--ease-standard),
+    border-color var(--motion-control) var(--ease-standard),
+    color var(--motion-control) var(--ease-standard),
+    box-shadow var(--motion-control) var(--ease-standard),
+    opacity var(--motion-control) var(--ease-standard);
+}
+.btn,
+.icon-btn,
+.play-btn,
+.preset-btn {
+  border-color:var(--border-strong);
+}
+.btn { background:var(--material-interactive); }
+.btn.ghost { background:transparent; border-color:var(--border-subtle); }
+.btn.primary {
+  background:var(--accent);
+  border-color:color-mix(in srgb, var(--accent) 75%, white 25%);
+  color:#07111b;
+  box-shadow:0 8px 22px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.btn.danger, .danger-text { color:var(--state-danger) !important; }
+.icon-btn, .play-btn { background:var(--material-raised); }
+.input, .select, textarea.input {
+  background:var(--material-raised);
+  border-color:var(--border-strong);
+  color:var(--text-primary);
+  box-shadow:inset 0 1px 0 var(--highlight-edge);
+}
+.input::placeholder, textarea.input::placeholder { color:var(--text-tertiary); opacity:.9; }
+
+@media (hover:hover) {
+  .btn:hover,
+  .icon-btn:hover,
+  .play-btn:hover,
+  .preset-btn:hover,
+  .mode-card:hover,
+  .home-shortcut:hover {
+    border-color:color-mix(in srgb, var(--accent) 32%, var(--border-strong));
+    background-color:color-mix(in srgb, var(--material-interactive) 90%, var(--accent) 10%);
+  }
+}
+.btn:active:not(:disabled),
+.icon-btn:active:not(:disabled),
+.play-btn:active:not(:disabled),
+.preset-btn:active:not(:disabled),
+.mode-card:active:not(:disabled),
+.home-shortcut:active:not(:disabled) {
+  transform:translateY(1px) scale(.995);
+}
+button:disabled, .btn:disabled { opacity:.42; }
+
+/* Focus is part of the visual system, not a browser afterthought. */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline:2px solid var(--focus-ring);
+  outline-offset:3px;
+  box-shadow:0 0 0 4px color-mix(in srgb, var(--focus-ring) 16%, transparent);
+}
+
+/* Semantic state helpers for V3–V10. */
+.state-work { --state-color:var(--state-work); }
+.state-rest { --state-color:var(--state-rest); }
+.state-prepare { --state-color:var(--state-prepare); }
+.state-recovery { --state-color:var(--state-recovery); }
+.state-paused { --state-color:var(--state-paused); }
+.state-overtime { --state-color:var(--state-overtime); }
+.state-warning { --state-color:var(--state-warning); }
+.state-danger { --state-color:var(--state-danger); }
+.state-complete { --state-color:var(--state-complete); }
+.state-accent {
+  color:var(--state-color);
+  border-color:color-mix(in srgb, var(--state-color) 36%, var(--border-subtle));
+  background:color-mix(in srgb, var(--state-color) 10%, var(--material-content));
+}
+
+/* High contrast keeps material hierarchy without relying on translucency. */
+html[data-high-contrast="true"] {
+  --border-subtle:color-mix(in srgb, var(--text-primary) 42%, transparent);
+  --border-strong:color-mix(in srgb, var(--text-primary) 68%, transparent);
+  --text-secondary:color-mix(in srgb, var(--text-primary) 78%, var(--material-canvas));
+  --text-tertiary:color-mix(in srgb, var(--text-primary) 64%, var(--material-canvas));
+}
+html[data-high-contrast="true"] .material-floating,
+html[data-high-contrast="true"] .app-header,
+html[data-high-contrast="true"] .bottom-nav {
+  backdrop-filter:none;
+  background:var(--material-raised);
+}
+
+/* Reduced motion is a designed mode. */
+html[data-reduce-motion="on"] *,
+html[data-reduce-motion="on"] *::before,
+html[data-reduce-motion="on"] *::after {
+  scroll-behavior:auto !important;
+  animation-duration:.001ms !important;
+  animation-iteration-count:1 !important;
+  transition-duration:.001ms !important;
+}
+@media (prefers-reduced-motion:reduce) {
+  html:not([data-reduce-motion="off"]) *,
+  html:not([data-reduce-motion="off"]) *::before,
+  html:not([data-reduce-motion="off"]) *::after {
+    scroll-behavior:auto !important;
+    animation-duration:.001ms !important;
+    animation-iteration-count:1 !important;
+    transition-duration:.001ms !important;
+  }
+}
+
+/* OLED keeps the hierarchy but removes ambient/light-heavy decoration. */
+html[data-theme="oled"] .app-shell,
+.app-shell[data-theme="oled"] {
+  background:#000;
+}
+html[data-theme="oled"] .material-raised,
+html[data-theme="oled"] .mode-card,
+html[data-theme="oled"] .home-shortcut,
+html[data-theme="oled"] .active-timer-card,
+html[data-theme="oled"] .workspace-timer-card {
+  background:var(--material-raised);
+}
+
+/* Forced colors always wins over the custom material system. */
+@media (forced-colors:active) {
+  .material-content,
+  .material-raised,
+  .material-floating,
+  .material-modal,
+  .card,
+  .btn,
+  .input,
+  .select,
+  .sheet,
+  .bottom-nav {
+    forced-color-adjust:auto;
+    background:Canvas;
+    color:CanvasText;
+    border-color:CanvasText;
+    box-shadow:none;
+    backdrop-filter:none;
+  }
+  .btn.primary,
+  .nav-item.active {
+    forced-color-adjust:none;
+    background:Highlight;
+    color:HighlightText;
+    border-color:Highlight;
+  }
+}
