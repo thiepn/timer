@@ -215,6 +215,7 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 - Queue automation reuses the v2.4 runtime coordinator without changing individual timer timing truth.
 - Backup payload v5 carries Saved Queues; v1-v4 backups remain accepted and cannot erase queue data they never contained.
 - IndexedDB schema is v7 with `queues` and `activeQueues` stores; service-worker cache is v17.
+- The offline-shell performance budget is 132 KiB gzip for v2.5, with the separate hard release cap retained at 135 KiB.
 
 ## v2.4.0 Multi-Timer Workspace & completion actions
 
