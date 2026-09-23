@@ -29,7 +29,8 @@ All v2.4 certification scenarios remain required, plus:
 - Compatibility tests verify pre-v5 replace restores cannot erase queue presets.
 - Static certification verifies the queue module is in the offline shell and queue UI/control wiring exists.
 - Visual V2 tests certify the M0–M5 material hierarchy, T0–T5 typography roles, shape/motion scales, semantic state colors, theme propagation, accent state, reduced motion, forced colors and offline visual-system loading.
-- Static release certification validates v2.5/v18 metadata.
+- Visual V3 tests certify the SVG shell icon system, responsive navigation rail/dock, contextual chrome, Workspace navigation mapping, modal hierarchy, live-mode shell isolation and reduced-motion View Transition fallback.
+- Static release certification validates v2.5/v19 metadata.
 - Existing twenty-runtime isolation, per-runtime persistence, cue arbitration, overtime recovery, historical backup compatibility and adversarial engine tests continue to pass.
 
 ## Environment-limited checks
