@@ -20,7 +20,7 @@ test('V2 declares the complete M0-M5 semantic material hierarchy', () => {
     '--material-live'
   ]) assert.ok(visual.includes(token), 'missing ' + token);
   for (const primitive of ['material-canvas','material-content','material-raised','material-floating','material-modal','material-live']) {
-    assert.match(visual, new RegExp('\\\\.' + primitive + '\\\\b'));
+    assert.match(visual, new RegExp('\\.' + primitive + '\\b'));
   }
 });
 
@@ -30,7 +30,7 @@ test('V2 declares T0-T5 typography roles and stable numeric display settings', (
     '--type-ui-size','--type-body-size','--type-meta-size'
   ]) assert.ok(visual.includes(token), 'missing ' + token);
   for (const role of ['type-display','type-hero','type-title','type-ui','type-body','type-meta']) {
-    assert.match(visual, new RegExp('\\\\.' + role + '\\\\b'));
+    assert.match(visual, new RegExp('\\.' + role + '\\b'));
   }
   assert.match(visual, /font-variant-numeric:tabular-nums/);
   assert.match(visual, /"tnum" 1/);
