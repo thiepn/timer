@@ -684,15 +684,20 @@ async function handleLaunchCommand(command = { type: 'HOME' }) {
 
 function applyTheme() {
   state.locale = resolveLocale(state.settings.language || 'system');
-  appShell.dataset.theme = state.settings.theme || 'dark';
+  const theme = ['dark','light','oled'].includes(state.settings.theme) ? state.settings.theme : 'dark';
+  const accent = SAVED_TIMER_ACCENTS.includes(state.settings.accent) && state.settings.accent !== 'default' ? state.settings.accent : 'blue';
+  appShell.dataset.theme = theme;
+  appShell.dataset.accent = accent;
   appShell.dataset.highContrast = String(Boolean(state.settings.highContrast));
   appShell.dataset.largeControls = String(Boolean(state.settings.largeControls));
+  document.documentElement.dataset.theme = theme;
+  document.documentElement.dataset.accent = accent;
   document.documentElement.dataset.highContrast = String(Boolean(state.settings.highContrast));
   document.documentElement.dataset.largeControls = String(Boolean(state.settings.largeControls));
   document.documentElement.dataset.textScale = state.settings.textScale || 'normal';
   document.documentElement.dataset.reduceMotion = state.settings.reduceMotion || 'system';
-  document.documentElement.style.colorScheme = state.settings.theme === 'light' ? 'light' : 'dark';
-  const color = state.settings.theme === 'light' ? '#f3f6f9' : '#0b0d10';
+  document.documentElement.style.colorScheme = theme === 'light' ? 'light' : 'dark';
+  const color = theme === 'light' ? '#f2f2ef' : theme === 'oled' ? '#000000' : '#070a0f';
   $('meta[name="theme-color"]')?.setAttribute('content', color);
   applyDocumentLocale(state.locale);
   scheduleLocalization(document.body);
@@ -3111,6 +3116,7 @@ function renderSettings() {
   const perfMeasures = state.bootPerformance?.measures || {};
   const bootMs = Number(perfMeasures.bootInteractiveMs);
   const localeOptions = LOCALE_OPTIONS.map((option) => `<option value="${esc(option.id)}" ${s.language === option.id ? 'selected' : ''}>${esc(option.label)}</option>`).join('');
+  const accentOptions = SAVED_TIMER_ACCENTS.filter((accent) => accent !== 'default').map((accent) => `<option value="${accent}" ${s.accent === accent ? 'selected' : ''}>${accent[0].toUpperCase()+accent.slice(1)}</option>`).join('');
   const voiceOptions = `<option value="" ${!s.voiceURI ? 'selected' : ''}>System default</option>${voices.map((voice) => `<option value="${esc(voice.voiceURI)}" ${s.voiceURI === voice.voiceURI ? 'selected' : ''}>${esc(voice.name)} · ${esc(voice.lang)}${voice.localService ? ' · Local' : ''}</option>`).join('')}`;
   const customProfileRows = state.cueProfiles.length ? state.cueProfiles.map((profile) => `<div class="list-row"><div class="list-row-main"><div class="list-row-title">${esc(profile.title)}</div><div class="list-row-meta">${esc(SOUND_PACKS[profile.soundPack]?.title || profile.soundPack || 'Clean')} · ${profile.voice ? 'Voice' : 'No voice'} · ${profile.warningSeconds || 0}s warning</div></div><button class="icon-btn" data-action="delete-cue-profile" data-id="${esc(profile.id)}" aria-label="Delete ${esc(profile.title)}">×</button></div>`).join('') : `<div class="small muted">No custom cue profiles yet.</div>`;
   const soundRows = state.customSounds.length ? state.customSounds.map((sound) => `<div class="list-row"><button class="list-row-main" data-action="preview-custom-sound" data-id="${esc(sound.id)}"><div class="list-row-title">${esc(sound.title)}</div><div class="list-row-meta">${durationLabel(sound.durationMs || 0)} · ${Math.max(1, Math.round((sound.size || 0) / 1024))} KB</div></button><button class="icon-btn" data-action="delete-custom-sound" data-id="${esc(sound.id)}" aria-label="Delete ${esc(sound.title)}">×</button></div>`).join('') : `<div class="small muted">No uploaded cue sounds.</div>`;
@@ -3118,6 +3124,7 @@ function renderSettings() {
     <section class="card form-card">
       <h2 class="section-title">Appearance</h2>
       <div class="field"><label for="theme-select">Theme</label><select id="theme-select" class="select" data-setting="theme"><option value="dark" ${s.theme === 'dark' ? 'selected' : ''}>Dark</option><option value="light" ${s.theme === 'light' ? 'selected' : ''}>Light</option><option value="oled" ${s.theme === 'oled' ? 'selected' : ''}>OLED</option></select></div>
+      <div class="field"><label for="accent-select">Accent</label><select id="accent-select" class="select" data-setting="accent">${accentOptions}</select></div>
       <div class="field"><label for="layout-select">Default live layout</label><select id="layout-select" class="select" data-setting="layout"><option value="focus" ${s.layout === 'focus' ? 'selected' : ''}>Focus</option><option value="classic" ${s.layout === 'classic' ? 'selected' : ''}>Classic</option><option value="strength" ${s.layout === 'strength' ? 'selected' : ''}>Strength</option><option value="wall" ${s.layout === 'wall' ? 'selected' : ''}>Wall</option></select></div>
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">Accessibility & Language</h2>
@@ -3815,7 +3822,7 @@ document.addEventListener('change', async (e) => {
     state.settings[key] = numeric.has(key) ? Number(e.target.value) : e.target.value;
     if (key === 'cueProfileId') applySelectedCueProfile(e.target.value);
     await saveSettings();
-    if (['language','timeFormat','numberSystem','textScale','reduceMotion','theme','layout'].includes(key)) { applyTheme(); return renderSettings(); }
+    if (['language','timeFormat','numberSystem','textScale','reduceMotion','theme','accent','layout'].includes(key)) { applyTheme(); return renderSettings(); }
     if (key === 'cueProfileId' || key === 'voiceRate') renderSettings();
   }
 });
