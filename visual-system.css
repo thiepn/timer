@@ -1,12 +1,5 @@
-/*
- * Timer Design System V3 — Phase V2
- * Art direction: precision instrument + ambient depth + expressive state.
- * Loaded after legacy styles so existing screens inherit the new semantic system
- * without requiring screen-specific redesigns in this phase.
- */
-
 :root {
-  /* Typography — T0..T5 */
+  
   --font-ui: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-display: var(--font-ui);
   --type-display-size: clamp(4.75rem, 25vw, 11.5rem);
@@ -27,7 +20,7 @@
   --type-meta-line: 1.35;
   --type-meta-weight: 650;
 
-  /* Shape — R1..R5 */
+  
   --radius-1: 8px;
   --radius-2: 12px;
   --radius-3: 16px;
@@ -35,7 +28,7 @@
   --radius-5: 30px;
   --radius-full: 999px;
 
-  /* Motion */
+  
   --motion-micro: 120ms;
   --motion-control: 180ms;
   --motion-spatial: 280ms;
@@ -44,7 +37,7 @@
   --ease-emphasized: cubic-bezier(.16, 1, .3, 1);
   --ease-exit: cubic-bezier(.4, 0, 1, 1);
 
-  /* Semantic temporal states */
+  
   --state-work: #67d98b;
   --state-rest: #78a9ff;
   --state-prepare: #f0bd62;
@@ -55,14 +48,14 @@
   --state-danger: #f0717a;
   --state-complete: #6bd89a;
 
-  /* Accent defaults */
+  
   --accent: #78a8ff;
   --accent-rgb: 120 168 255;
   --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
   --accent-softer: color-mix(in srgb, var(--accent) 7%, transparent);
   --accent-strong: color-mix(in srgb, var(--accent) 78%, white 22%);
 
-  /* M0–M5 material hierarchy — Dark default */
+  
   --material-canvas: #070a0f;
   --material-content: #0e141c;
   --material-raised: #141c27;
@@ -83,7 +76,7 @@
   --focus-ring: color-mix(in srgb, var(--accent) 84%, white 16%);
   --ambient-accent: color-mix(in srgb, var(--accent) 6%, transparent);
 
-  /* Legacy token bridge. Existing screens adopt V3 automatically. */
+  
   --bg: var(--material-canvas);
   --surface: var(--material-content);
   --surface-2: var(--material-raised);
@@ -155,9 +148,6 @@ html[data-theme="oled"],
   --ambient-accent: transparent;
 }
 
-
-/* Reassert the legacy bridge at theme scope so older theme selectors cannot
-   bypass the semantic material system. */
 html[data-theme],
 .app-shell[data-theme] {
   --bg: var(--material-canvas);
@@ -177,7 +167,6 @@ html[data-theme],
   --success: var(--state-complete);
 }
 
-/* User accent palettes. Kept independent from temporal-state colors. */
 html[data-accent="blue"], .app-shell[data-accent="blue"] { --accent:#78a8ff; --accent-rgb:120 168 255; }
 html[data-accent="teal"], .app-shell[data-accent="teal"] { --accent:#5fd2c7; --accent-rgb:95 210 199; }
 html[data-accent="purple"], .app-shell[data-accent="purple"] { --accent:#aa91ff; --accent-rgb:170 145 255; }
@@ -186,7 +175,6 @@ html[data-accent="orange"], .app-shell[data-accent="orange"] { --accent:#f1a35f;
 html[data-accent="pink"], .app-shell[data-accent="pink"] { --accent:#eb8cc6; --accent-rgb:235 140 198; }
 html[data-accent="red"], .app-shell[data-accent="red"] { --accent:#ee7c78; --accent-rgb:238 124 120; }
 
-/* Named material primitives — usable by V3–V10. */
 .material-canvas { background:var(--material-canvas); color:var(--text-primary); }
 .material-content {
   background:var(--material-content);
@@ -220,7 +208,6 @@ html[data-accent="red"], .app-shell[data-accent="red"] { --accent:#ee7c78; --acc
   color:var(--text-primary);
 }
 
-/* Typography primitives. */
 .type-display {
   font:var(--type-display-weight) var(--type-display-size)/var(--type-display-line) var(--font-display);
   letter-spacing:var(--type-display-tracking);
@@ -239,7 +226,6 @@ html[data-accent="red"], .app-shell[data-accent="red"] { --accent:#ee7c78; --acc
 .type-body { font-size:var(--type-body-size); line-height:var(--type-body-line); }
 .type-meta { font-size:var(--type-meta-size); line-height:var(--type-meta-line); font-weight:var(--type-meta-weight); color:var(--text-secondary); }
 
-/* Global V3 adoption: primitives change, screen composition does not. */
 html, body, button, input, select, textarea { font-family:var(--font-ui); }
 body {
   background:var(--material-canvas);
@@ -281,7 +267,6 @@ body {
 }
 .quick-time { font-weight:var(--type-display-weight); letter-spacing:-.055em; }
 
-/* M1 content surfaces */
 .card,
 .list-row,
 .saved-timer-row,
@@ -292,7 +277,6 @@ body {
   box-shadow:var(--shadow-content);
 }
 
-/* M2 raised / interactive surfaces */
 .mode-card,
 .home-shortcut,
 .active-timer-card,
@@ -306,7 +290,6 @@ body {
   box-shadow:var(--shadow-raised);
 }
 
-/* M3 floating controls */
 .app-header,
 .bottom-nav {
   background:var(--material-floating);
@@ -315,7 +298,6 @@ body {
   backdrop-filter:blur(18px) saturate(1.12);
 }
 
-/* M4 modal */
 .sheet {
   background:var(--material-modal);
   border-color:var(--border-strong);
@@ -323,14 +305,12 @@ body {
 }
 .sheet-backdrop { background:rgb(0 0 0 / .58); }
 
-/* M5 live stage */
 .live-shell {
   background:
     radial-gradient(62% 48% at 50% 42%, color-mix(in srgb, var(--phase, var(--accent)) 7%, transparent), transparent 74%),
     var(--material-live);
 }
 
-/* Shape semantics */
 .pill,
 .library-filter-chip,
 .quick-adjust-chip,
@@ -356,7 +336,6 @@ textarea.input,
   .sheet { border-radius:var(--radius-5); }
 }
 
-/* Control hierarchy and tactile response */
 .btn,
 .icon-btn,
 .play-btn,
@@ -419,7 +398,6 @@ textarea.input,
 }
 button:disabled, .btn:disabled { opacity:.42; }
 
-/* Focus is part of the visual system, not a browser afterthought. */
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
@@ -430,7 +408,6 @@ textarea:focus-visible,
   box-shadow:0 0 0 4px color-mix(in srgb, var(--focus-ring) 16%, transparent);
 }
 
-/* Semantic state helpers for V3–V10. */
 .state-work { --state-color:var(--state-work); }
 .state-rest { --state-color:var(--state-rest); }
 .state-prepare { --state-color:var(--state-prepare); }
@@ -446,7 +423,6 @@ textarea:focus-visible,
   background:color-mix(in srgb, var(--state-color) 10%, var(--material-content));
 }
 
-/* High contrast keeps material hierarchy without relying on translucency. */
 html[data-high-contrast="true"] {
   --border-subtle:color-mix(in srgb, var(--text-primary) 42%, transparent);
   --border-strong:color-mix(in srgb, var(--text-primary) 68%, transparent);
@@ -460,7 +436,6 @@ html[data-high-contrast="true"] .bottom-nav {
   background:var(--material-raised);
 }
 
-/* Reduced motion is a designed mode. */
 html[data-reduce-motion="on"] *,
 html[data-reduce-motion="on"] *::before,
 html[data-reduce-motion="on"] *::after {
@@ -480,7 +455,6 @@ html[data-reduce-motion="on"] *::after {
   }
 }
 
-/* OLED keeps the hierarchy but removes ambient/light-heavy decoration. */
 html[data-theme="oled"] .app-shell,
 .app-shell[data-theme="oled"] {
   background:#000;
@@ -493,7 +467,6 @@ html[data-theme="oled"] .workspace-timer-card {
   background:var(--material-raised);
 }
 
-/* Forced colors always wins over the custom material system. */
 @media (forced-colors:active) {
   .material-content,
   .material-raised,
