@@ -1,11 +1,12 @@
 import { canonicalStringify, hashCanonical } from './resilience.js';
 import { DEFAULT_QUICK_PRESETS, DEFAULT_QUICK_ADJUSTMENTS } from './quick.js';
 import { DEFAULT_SAVED_TIMER_COLLECTIONS, normalizeSavedTimerRecord } from './saved.js';
+import { normalizeQueuePreset, normalizeQueueRun } from './queue.js';
 
 const DB_NAME = 'thiepn-timer';
-const DB_VERSION = 6;
-const SYNC_STORES = new Set(['routines', 'blocks', 'cueProfiles', 'customSounds', 'sessions']);
-const ALL_STORES = ['routines', 'blocks', 'cueProfiles', 'customSounds', 'customSoundMeta', 'sessions', 'settings', 'active', 'activeSessions', 'recovery', 'quarantine', 'changes', 'tombstones', 'meta'];
+const DB_VERSION = 7;
+const SYNC_STORES = new Set(['routines', 'blocks', 'cueProfiles', 'customSounds', 'queues', 'sessions']);
+const ALL_STORES = ['routines', 'blocks', 'cueProfiles', 'customSounds', 'customSoundMeta', 'queues', 'activeQueues', 'sessions', 'settings', 'active', 'activeSessions', 'recovery', 'quarantine', 'changes', 'tombstones', 'meta'];
 
 const uid = (prefix = 'id') => `${prefix}_${globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`}`;
 
@@ -51,6 +52,7 @@ function normalizeSelection(selection = {}) {
     blocks: selection.blocks !== false,
     cueProfiles: selection.cueProfiles !== false,
     customSounds: selection.customSounds !== false,
+    queues: selection.queues !== false,
     sessions: selection.sessions !== false,
     settings: selection.settings !== false
   };
@@ -154,6 +156,15 @@ export class TimerDB {
             cursor.continue();
           };
         }
+      }
+      if (!db.objectStoreNames.contains('queues')) {
+        const queues = db.createObjectStore('queues', { keyPath: 'id' });
+        queues.createIndex('updatedAt', 'updatedAt');
+        queues.createIndex('title', 'title');
+      }
+      if (!db.objectStoreNames.contains('activeQueues')) {
+        const activeQueues = db.createObjectStore('activeQueues', { keyPath: 'id' });
+        activeQueues.createIndex('updatedAt', 'updatedAt');
       }
       if (!db.objectStoreNames.contains('settings')) db.createObjectStore('settings', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('active')) db.createObjectStore('active', { keyPath: 'id' });
@@ -466,6 +477,38 @@ export class TimerDB {
     return this.put('routines', normalized);
   }
 
+  async saveQueue(queue) {
+    const now = Date.now();
+    const previous = queue?.id ? await this.get('queues', queue.id).catch(() => null) : null;
+    return this.put('queues', normalizeQueuePreset({
+      favorite: false,
+      createdAt: previous?.createdAt || queue?.createdAt || now,
+      useCount: previous?.useCount || 0,
+      ...queue,
+      updatedAt: now
+    }));
+  }
+
+  async saveActiveQueue(run) {
+    if (!run?.id) throw new Error('Active queue is missing its ID.');
+    return this._putRaw('activeQueues', { ...normalizeQueueRun(run), updatedAt: Date.now() });
+  }
+
+  async getActiveQueues() {
+    return (await this.all('activeQueues'))
+      .map((run) => normalizeQueueRun(run))
+      .filter((run) => ['running','paused'].includes(run.status))
+      .sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+  }
+
+  async clearActiveQueue(id) {
+    if (!id) return false;
+    await this._deleteRaw('activeQueues', id);
+    return true;
+  }
+
+  async clearAllActiveQueues() { return this._clearRaw('activeQueues'); }
+
   async saveBlock(block) {
     const now = Date.now();
     const previous = block?.id ? await this.get('blocks', block.id).catch(() => null) : null;
@@ -499,11 +542,12 @@ export class TimerDB {
 
   async exportData({ selection } = {}) {
     const selected = normalizeSelection(selection);
-    const [routines, blocks, cueProfiles, customSounds, sessions, settings] = await Promise.all([
+    const [routines, blocks, cueProfiles, customSounds, queues, sessions, settings] = await Promise.all([
       selected.routines ? this.all('routines') : Promise.resolve([]),
       selected.blocks ? this.all('blocks') : Promise.resolve([]),
       selected.cueProfiles ? this.all('cueProfiles') : Promise.resolve([]),
       selected.customSounds ? this.all('customSounds') : Promise.resolve([]),
+      selected.queues ? this.all('queues') : Promise.resolve([]),
       selected.sessions ? this.all('sessions') : Promise.resolve([]),
       selected.settings ? this.loadSettings() : Promise.resolve(null)
     ]);
@@ -514,33 +558,36 @@ export class TimerDB {
     }));
     return {
       format: 'thiepn-timer-backup',
-      version: 4,
+      version: 5,
       exportedAt: new Date().toISOString(),
       selection: selected,
       routines,
       blocks,
       cueProfiles,
       customSounds: portableSounds,
+      queues,
       sessions,
       settings
     };
   }
 
   async importData(data, { replace = false, selection = null, quarantine = [] } = {}) {
-    if (!data || data.format !== 'thiepn-timer-backup' || ![1, 2, 3, 4].includes(Number(data.version))) throw new Error('Unsupported backup format.');
+    if (!data || data.format !== 'thiepn-timer-backup' || ![1, 2, 3, 4, 5].includes(Number(data.version))) throw new Error('Unsupported backup format.');
     if (!Array.isArray(data.routines) || !Array.isArray(data.sessions)) throw new Error('Backup is incomplete.');
-    const available = data.version >= 4 && data.selection ? data.selection : { routines: true, blocks: true, cueProfiles: true, customSounds: true, sessions: true, settings: true };
+    const available = data.version >= 4 && data.selection ? data.selection : { routines: true, blocks: true, cueProfiles: true, customSounds: true, queues: data.version >= 5, sessions: true, settings: true };
     const requested = normalizeSelection(selection || available);
     const selected = Object.fromEntries(Object.keys(requested).map((key) => [key, Boolean(requested[key] && available[key] !== false)]));
     const blocks = data.version >= 2 && Array.isArray(data.blocks) ? data.blocks : [];
     const cueProfiles = data.version >= 3 && Array.isArray(data.cueProfiles) ? data.cueProfiles : [];
     const customSounds = data.version >= 3 && Array.isArray(data.customSounds) ? data.customSounds : [];
+    const queues = data.version >= 5 && Array.isArray(data.queues) ? data.queues : [];
 
     if (replace) {
       if (selected.routines) await this._clearRaw('routines');
       if (selected.blocks) await this._clearRaw('blocks');
       if (selected.cueProfiles) await this._clearRaw('cueProfiles');
       if (selected.customSounds) { await this._clearRaw('customSounds'); await this._clearRaw('customSoundMeta').catch(() => {}); }
+      if (selected.queues) await this._clearRaw('queues');
       if (selected.sessions) await this._clearRaw('sessions');
     }
 
@@ -552,10 +599,11 @@ export class TimerDB {
       await this.put('customSounds', { ...rest, data: base64ToArrayBuffer(dataBase64) });
     }
     if (selected.routines) for (const routine of data.routines) if (routine?.id && routine?.type && routine?.config) await this.put('routines', normalizeSavedTimerRecord(routine));
+    if (selected.queues) for (const queue of queues) if (queue?.id && Array.isArray(queue?.items)) await this.put('queues', normalizeQueuePreset(queue));
     if (selected.sessions) for (const session of data.sessions) if (session?.id && Number.isFinite(session?.startedAt)) await this.put('sessions', session);
     if (selected.settings && data.settings) await this.saveSettings({ ...defaultSettings, ...data.settings });
     for (const item of quarantine || []) await this.quarantineRecord(item);
-    return { selected, counts: { routines: data.routines.length, blocks: blocks.length, cueProfiles: cueProfiles.length, customSounds: customSounds.length, sessions: data.sessions.length } };
+    return { selected, counts: { routines: data.routines.length, blocks: blocks.length, cueProfiles: cueProfiles.length, customSounds: customSounds.length, queues: queues.length, sessions: data.sessions.length } };
   }
 
   async createRecoverySnapshot({ kind = 'manual', label = '', payload = null } = {}) {
@@ -566,7 +614,7 @@ export class TimerDB {
       counts: {
         routines: data.routines?.length || 0, blocks: data.blocks?.length || 0,
         cueProfiles: data.cueProfiles?.length || 0, customSounds: data.customSounds?.length || 0,
-        sessions: data.sessions?.length || 0
+        queues: data.queues?.length || 0, sessions: data.sessions?.length || 0
       },
       sizeEstimate: canonicalStringify(data).length
     };
@@ -615,12 +663,12 @@ export class TimerDB {
   async clearQuarantine() { return this._clearRaw('quarantine'); }
 
   async dataHealth() {
-    const [routines, blocks, profiles, sounds, sessions, recovery, quarantine, changes, tombstones] = await Promise.all([
-      this.count('routines'), this.count('blocks'), this.count('cueProfiles'), this.count('customSoundMeta'), this.count('sessions'),
+    const [routines, blocks, profiles, sounds, queues, sessions, recovery, quarantine, changes, tombstones] = await Promise.all([
+      this.count('routines'), this.count('blocks'), this.count('cueProfiles'), this.count('customSoundMeta'), this.count('queues'), this.count('sessions'),
       this.count('recovery'), this.count('quarantine'), this.count('changes'), this.count('tombstones')
     ]);
     return {
-      counts: { routines, blocks, cueProfiles: profiles, customSounds: sounds, sessions },
+      counts: { routines, blocks, cueProfiles: profiles, customSounds: sounds, queues, sessions },
       recoveryCount: recovery, quarantineCount: quarantine, pendingChanges: changes, tombstoneCount: tombstones,
       deviceId: this.deviceId
     };
