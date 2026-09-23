@@ -28,6 +28,7 @@ All v2.4 certification scenarios remain required, plus:
 - Database tests cover Saved Queue round-trip, active queue recovery state and backup v5.
 - Compatibility tests verify pre-v5 replace restores cannot erase queue presets.
 - Static certification verifies the queue module is in the offline shell and queue UI/control wiring exists.
+- The v2.5 performance budget allows at most 132 KiB gzip for the full offline shell; the independent hard release ceiling remains 135 KiB.
 - Static release certification validates v2.5/v17 metadata.
 - Existing twenty-runtime isolation, per-runtime persistence, cue arbitration, overtime recovery, historical backup compatibility and adversarial engine tests continue to pass.
 
