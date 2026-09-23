@@ -2169,9 +2169,11 @@ async function saveSavedTimerMetadata(id) {
   const root = $('#sheet-root');
   if (!timer || !root) return;
   const value = (field) => root.querySelector(`[data-saved-meta="${field}"]`)?.value ?? '';
+  const nextTitle = String(value('title')).trim() || timer.title || 'Saved Timer';
   const next = normalizeSavedTimerRecord({
     ...timer,
-    title: String(value('title')).trim() || timer.title || 'Saved Timer',
+    title: nextTitle,
+    config: timer.config ? { ...structuredClone(timer.config), title: nextTitle } : timer.config,
     icon: value('icon'),
     accent: value('accent'),
     description: value('description'),
