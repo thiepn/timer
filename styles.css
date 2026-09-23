@@ -570,3 +570,67 @@ html[data-large-controls="true"] .sheet .btn, html[data-large-controls="true"] .
   .active-timer-card { grid-template-columns: minmax(0,1fr) auto auto; }
   .active-timer-time { min-width: 4.6rem; }
 }
+
+/* v2.2 Quick Timer 2.0 & universal Home */
+.sr-only { position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+.home-head { align-items: center; }
+.active-count-pill { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 38%, var(--border)); background: var(--accent-soft); }
+.quick-card-v2 { text-align: left; display: grid; gap: 14px; padding: clamp(18px, 4vw, 26px); }
+.quick-card-head { align-items: flex-start; }
+.quick-entry { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 10px; align-items: stretch; }
+.quick-duration-input {
+  width: 100%; min-width: 0; min-height: 66px; border: 1px solid var(--border); border-radius: 16px;
+  background: var(--surface-2); color: var(--text); padding: 8px 16px; font-size: clamp(1.8rem, 8vw, 3rem);
+  font-weight: 820; letter-spacing: -.045em; font-variant-numeric: tabular-nums;
+}
+.quick-duration-input[aria-invalid="true"] { border-color: var(--danger); }
+.quick-start-btn { min-width: 116px; min-height: 66px; border-radius: 16px; font-size: 1rem; }
+.quick-input-preview { min-height: 20px; margin-top: -6px; color: var(--text-2); font-size: .82rem; }
+.error-text { color: var(--danger) !important; }
+.quick-adjust-row { display: flex; flex-wrap: wrap; gap: 7px; }
+.quick-adjust-chip, .text-btn {
+  min-height: 38px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); color: var(--text-2);
+  padding: 6px 11px; font-size: .8rem; font-weight: 800;
+}
+.quick-adjust-chip:hover, .text-btn:hover { color: var(--text); border-color: color-mix(in srgb, var(--accent) 38%, var(--border)); }
+.text-btn { min-height: 32px; border-color: transparent; background: transparent; padding-inline: 6px; }
+.quick-duration-group { display: grid; gap: 8px; padding-top: 2px; }
+.quick-group-label { color: var(--text-2); font-size: .72rem; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
+.quick-duration-chips { display: flex; flex-wrap: wrap; gap: 7px; }
+.quick-start-chip { min-width: 64px; padding-inline: 12px; }
+.preset-btn.subtle { background: transparent; color: var(--text-2); }
+.quick-customize-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+.quick-adjust-edit-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
+.setting-action-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+
+.home-active-section { margin-top: 0; }
+.active-timer-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; margin-top: 12px; }
+.active-timer-card { display: grid; gap: 10px; padding: 14px; min-width: 0; }
+.active-timer-main { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 12px; align-items: center; width: 100%; min-width: 0; border: 0; background: transparent; color: inherit; padding: 0; text-align: left; }
+.active-timer-copy { display: grid; min-width: 0; gap: 3px; }
+.active-timer-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.active-timer-copy small { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.active-timer-time { min-width: 0; font-size: clamp(1.55rem, 5vw, 2.35rem); font-weight: 840; letter-spacing: -.04em; font-variant-numeric: tabular-nums; text-align: end; }
+.active-timer-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.active-timer-actions .btn { flex: 1 1 auto; min-width: 64px; }
+
+.home-shortcuts-section { margin-top: 18px; }
+.home-shortcuts { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+.home-shortcut { min-height: 82px; display: grid; grid-template-columns: 42px minmax(0,1fr); gap: 12px; align-items: center; text-align: left; border: 1px solid var(--border); border-radius: 15px; background: var(--surface); color: var(--text); padding: 13px; }
+.home-shortcut:hover { border-color: color-mix(in srgb, var(--accent) 48%, var(--border)); }
+.home-shortcut.primary-shortcut { background: color-mix(in srgb, var(--accent-soft) 72%, var(--surface)); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.shortcut-icon { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 12px; background: var(--surface-2); color: var(--accent); font-size: 1.25rem; font-weight: 900; }
+.home-shortcut span:last-child { min-width: 0; display: grid; gap: 4px; }
+.home-shortcut small { color: var(--text-2); line-height: 1.25; overflow-wrap: anywhere; }
+
+@media (max-width: 680px) {
+  .active-timer-grid, .home-shortcuts { grid-template-columns: 1fr; }
+  .quick-adjust-edit-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 460px) {
+  .quick-entry { grid-template-columns: 1fr; }
+  .quick-start-btn { min-height: 54px; }
+  .quick-duration-input { min-height: 62px; }
+  .quick-customize-grid { grid-template-columns: 1fr; }
+  .setting-action-row { align-items: flex-start; }
+}

@@ -1,4 +1,5 @@
 import { canonicalStringify, hashCanonical } from './resilience.js';
+import { DEFAULT_QUICK_PRESETS, DEFAULT_QUICK_ADJUSTMENTS } from './quick.js';
 
 const DB_NAME = 'thiepn-timer';
 const DB_VERSION = 6;
@@ -86,8 +87,10 @@ export const defaultSettings = {
   largeControls: false,
   reduceMotion: 'system',
   screenReaderOptimized: false,
-  quickPresets: [30000, 60000, 90000, 120000, 180000, 300000],
-  startPresetImmediately: false,
+  quickPresets: [...DEFAULT_QUICK_PRESETS],
+  quickRecentDurations: [],
+  quickAdjustments: [...DEFAULT_QUICK_ADJUSTMENTS],
+  startPresetImmediately: false, // retained for backup compatibility; v2.2 pinned durations are always one-tap starts
   wallAutoHide: true
 };
 

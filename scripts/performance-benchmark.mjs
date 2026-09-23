@@ -22,9 +22,10 @@ const base = Date.now();
 const sessions = Array.from({ length: 10000 }, (_, i) => ({ id: `s${i}`, title: 'Benchmark', mode: 'interval', startedAt: base - i * 60000, activeDurationMs: 60000, workMs: 40000, restMs: 20000, pausedMs: 0 }));
 const analytics = measure('Summarize 10,000 sessions', () => summarizeRange(sessions));
 
+
 const shellFiles = [
   'index.html','styles.css','manifest.webmanifest','sw.js',
-  'src/core.js','src/db.js','src/audio.js','src/analytics.js','src/resilience.js','src/device.js','src/i18n.js','src/accessibility.js','src/performance.js','src/app.js'
+  'src/core.js','src/db.js','src/audio.js','src/analytics.js','src/resilience.js','src/device.js','src/i18n.js','src/accessibility.js','src/performance.js','src/coordinator.js','src/quick.js','src/app.js'
 ];
 const shellGzipBytes = shellFiles.reduce((total, file) => total + zlib.gzipSync(fs.readFileSync(new URL(`../${file}`, import.meta.url))).length, 0);
 console.log(`Offline shell gzip sum: ${(shellGzipBytes / 1024).toFixed(1)} KiB`);

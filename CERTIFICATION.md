@@ -1,4 +1,4 @@
-# Timer v2.1 Certification
+# Timer v2.2 Certification
 
 ## Automated release gate
 
@@ -11,19 +11,16 @@ The production release must pass `npm run certify`, which runs:
 
 ## Certified automated scenarios
 
-All v2.0 certification scenarios remain required, plus:
+All v2.1 certification scenarios remain required, plus:
 
-- Twenty independent timer runtimes can coexist without sharing pause/deadline state.
-- Pausing one timer leaves other timers advancing normally.
-- Multiple active runtime snapshots restore together.
-- Per-runtime recovery checkpoints are sequence-guarded and independently clearable.
-- A stale completed repeat cycle cannot clear the newer cycle checkpoint for the same runtime.
-- Overtime is explicit coordinator state, can be paused/finished, and survives persisted restore including offline elapsed wall time.
-- Repeat completion starts a fresh engine cycle under the same stable runtime identity.
-- Start Next is emitted as an explicit orchestration intent instead of silently starting arbitrary data.
-- Cue generations and countdown de-duplication are isolated by runtime.
-- The service-worker shell contains the coordinator module and the static release gate validates v2.1/v13 metadata.
+- Quick duration parser accepts `90`, `90s`, `1:30`, `3m`, `1h 20m`, `h:mm:ss` and decimal unit notation.
+- Malformed, zero, negative, ambiguous and excessive Quick Timer inputs are rejected before a timer starts.
+- Recent durations are unique, newest-first and bounded.
+- Pinned/adjustment duration normalization removes duplicates and invalid values.
+- The service-worker shell contains both the coordinator and Quick Timer modules.
+- Static release certification validates v2.2/v14 metadata.
+- Existing twenty-runtime isolation, per-runtime persistence, cue arbitration, overtime recovery, historical backup compatibility and adversarial engine tests continue to pass.
 
 ## Environment-limited checks
 
-A local Chromium smoke launch remains environment-limited by the container's DBus/UPower setup. Physical Android/TalkBack/Bluetooth/call/thermal checks remain outside this automated environment; see `KNOWN_LIMITATIONS.md`.
+Physical Android/TalkBack/Bluetooth/call/thermal behavior remains outside this automated environment. A pure PWA still cannot guarantee exact alarms after the browser process is fully suspended or killed; see `KNOWN_LIMITATIONS.md`.

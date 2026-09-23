@@ -1,12 +1,12 @@
 # Timer
 
-Current app version: **2.1.0**.
+Current app version: **2.2.0**.
 
 A local-first universal timer built as a zero-build PWA for GitHub Pages, ranging from simple countdowns and stopwatches to programmable interval and sequence timers.
 
 ## Included in the current build
 
-- Quick countdown timer with configurable presets
+- Quick Timer 2.0 with typed duration entry (`90s`, `1:30`, `3m`, `1h 20m`), one-tap pinned/recent durations, Repeat Last and customizable Home adjustment buttons
 - Stopwatch with laps
 - Work/rest intervals and Tabata
 - Circuits with timed or manual steps
@@ -66,6 +66,8 @@ The app uses relative paths and is ready to be served from the repository root w
 - `src/audio.js` — audio, speech, haptic, wake-lock and notification adapters
 - `src/analytics.js` — pure session analysis, comparisons, records, calendars and history export
 - `src/performance.js` — performance budgets, live scheduling policy, instrumentation and deferred-maintenance coordinator
+- `src/coordinator.js` — multi-runtime timer coordination, completion actions and overtime/repeat orchestration
+- `src/quick.js` — deterministic Quick Timer duration parsing, normalization and recency helpers
 - `src/app.js` — application coordinator and UI
 - `sw.js` — offline application shell
 
@@ -195,6 +197,17 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 - Service-worker runtime caching is restricted to the declared app shell so arbitrary same-origin GETs cannot grow cache storage indefinitely.
 - Added deterministic performance budgets, large-fixture regression tests, a benchmark command and a GitHub Actions quality workflow.
 - Current reference benchmark on the development environment: ~11 ms for a 1,000-step generated compile, ~10 ms for a 10,000-session summary, and ~98 KiB gzip for the summed offline shell assets.
+
+
+## v2.2.0 Quick Timer 2.0 and new Home
+
+- Rebuilt Home around Quick Timer and Active Timers instead of workout-specific shortcuts.
+- Quick Timer accepts `90`, `90s`, `1:30`, `3m`, `1h 20m`, `h:mm:ss`, and decimal unit notation through a deterministic parser.
+- Pinned and recent durations start immediately with one tap; recent values are unique, newest-first and bounded.
+- Added configurable `+10s / +30s / +1m`-style buttons used by Quick Timer and adjustable active countdown cards.
+- Active Timer cards expose independent pause/resume and direct positive adjustments without opening full-screen mode.
+- Added a prominent Repeat Last shortcut plus fast Stopwatch, Interval and More Timers actions.
+- Quick Timer preferences remain normal Settings data, so existing backup/export flows preserve them without a schema migration.
 
 
 ## v2.1.0 universal timer kernel

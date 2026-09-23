@@ -13,6 +13,7 @@ import { LOCALE_OPTIONS, resolveLocale, applyDocumentLocale, localizeDOM, transl
 import { FocusTrap, Announcer, focusMainHeading, isInteractiveTarget, timerEventAnnouncement } from './accessibility.js';
 import { PerformanceMetrics, MaintenanceCoordinator, liveSchedulerPolicy, reduceMotionEnabled } from './performance.js';
 import { TimerCoordinator, COMPLETION_ACTIONS } from './coordinator.js';
+import { parseDurationInput, durationInputText, normalizeDurationList, pushRecentDuration, DEFAULT_QUICK_PRESETS, DEFAULT_QUICK_ADJUSTMENTS } from './quick.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -23,7 +24,7 @@ const ms = (seconds) => Math.max(0, Math.round(Number(seconds || 0) * 1000));
 const sec = (milliseconds) => Math.round(Number(milliseconds || 0) / 1000);
 const mins = (minutes) => ms(Number(minutes || 0) * 60);
 const pct = (n) => `${Math.round(clamp(n || 0, 0, 1) * 100)}%`;
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.2.0';
 
 const BUILDER_META = {
   interval: { name: 'Interval', desc: 'Work / rest repetitions' },
@@ -144,6 +145,9 @@ const state = {
   builderEditingBlockId: null,
   builderCueOverrides: {},
   quickMs: 120000,
+  quickInput: '2m',
+  quickInputError: '',
+  quickSettingsWriteChain: Promise.resolve(),
   engine: null,
   engineUnsub: null,
   activeMeta: null,
@@ -210,6 +214,70 @@ const tr = (key, vars = {}) => i18nT(key, currentLocale(), vars);
 const durationLabel = (value, options = {}) => formatDuration(value, currentLocale(), { numberingSystem: state.settings?.numberSystem || 'system', ...options });
 const uiDate = (value, options = {}) => formatDate(value, currentLocale(), options, state.settings?.timeFormat || 'system', state.settings?.numberSystem || 'system');
 const uiNumber = (value, options = {}) => formatNumber(value, currentLocale(), options, state.settings?.numberSystem || 'system');
+
+function quickPresets() {
+  return normalizeDurationList(state.settings.quickPresets || DEFAULT_QUICK_PRESETS, { limit: 8 });
+}
+
+function quickRecentDurations() {
+  return normalizeDurationList(state.settings.quickRecentDurations || [], { limit: 8 });
+}
+
+function quickAdjustments() {
+  const values = normalizeDurationList(state.settings.quickAdjustments || DEFAULT_QUICK_ADJUSTMENTS, { limit: 3, maxMs: 3600000 });
+  return values.length === 3 ? values : [...DEFAULT_QUICK_ADJUSTMENTS];
+}
+
+function setQuickDuration(milliseconds, { syncInput = true } = {}) {
+  const parsed = parseDurationInput(`${Math.max(1, Math.round(Number(milliseconds || 0) / 1000))}s`);
+  if (!parsed.ok) return false;
+  state.quickMs = parsed.ms;
+  state.quickInputError = '';
+  if (syncInput) state.quickInput = durationInputText(parsed.ms);
+  return true;
+}
+
+function quickInputResult(value = state.quickInput) {
+  return parseDurationInput(value);
+}
+
+function updateQuickInputFeedback() {
+  const input = $('[data-quick-input]');
+  const preview = $('[data-quick-preview]');
+  const start = $('[data-action="start-quick-input"]');
+  if (!input) return;
+  const result = quickInputResult(input.value);
+  state.quickInput = input.value;
+  state.quickInputError = result.ok ? '' : result.error;
+  if (result.ok) {
+    state.quickMs = result.ms;
+    input.setAttribute('aria-invalid', 'false');
+    if (preview) { preview.textContent = `${durationLabel(result.ms)} · ready to start`; preview.classList.remove('error-text'); }
+    if (start) start.disabled = false;
+  } else {
+    input.setAttribute('aria-invalid', 'true');
+    if (preview) { preview.textContent = result.error; preview.classList.add('error-text'); }
+    if (start) start.disabled = true;
+  }
+}
+
+function rememberQuickDuration(milliseconds) {
+  state.settings.quickRecentDurations = pushRecentDuration(state.settings.quickRecentDurations || [], milliseconds, 8);
+  const snapshot = structuredClone(state.settings);
+  state.quickSettingsWriteChain = state.quickSettingsWriteChain
+    .catch(() => {})
+    .then(() => state.db.saveSettings(snapshot))
+    .catch(() => {});
+  return state.quickSettingsWriteChain;
+}
+
+async function startQuickDuration(milliseconds, { background = false } = {}) {
+  if (!setQuickDuration(milliseconds)) return toast('Choose a valid Quick Timer duration.');
+  const duration = state.quickMs;
+  void rememberQuickDuration(duration);
+  const title = `${durationLabel(duration)} Timer`;
+  return startSession(buildCountdown({ durationMs: duration, label: title }), { mode: 'countdown', title, config: { durationMs: duration }, source: 'quick' }, { background });
+}
 
 const cue = new CueManager(() => ({ ...state.settings, voice: state.settings.screenReaderOptimized ? false : state.settings.voice }), () => state.cueProfiles, async (id) => state.db.get('customSounds', id));
 const wakeLock = new WakeLockManager();
@@ -630,44 +698,41 @@ function render() {
 }
 
 function renderTimerHome() {
-  const presets = state.settings.quickPresets || defaultSettings.quickPresets;
-  const recent = state.sessions.slice(0, 3);
+  const pinned = quickPresets();
+  const recentDurations = quickRecentDurations();
+  const adjustments = quickAdjustments();
+  const lastSession = state.sessions.find((session) => session?.plan);
+  const parsed = quickInputResult();
+  const preview = parsed.ok ? `${durationLabel(parsed.ms)} · ready to start` : parsed.error;
   main.innerHTML = `
-    <div class="page-head"><div><h1>Timer</h1><p>Start fast. Configure only when you need it.</p></div></div>
-    ${coordinator.size() ? `<section class="section active-timers-section"><div class="row-between"><h2 class="section-title" style="margin:0">Active Timers</h2><span class="pill">${coordinator.size()}</span></div><div class="list" style="margin-top:12px">${coordinator.list().map(activeTimerCard).join('')}</div></section>` : ''}
-    <section class="card quick-card">
-      <div class="quick-label">Quick Timer</div>
-      <button class="quick-time" data-action="edit-quick" aria-label="Set quick timer duration">${formatClock(state.quickMs)}</button>
-      <div class="quick-controls">
-        <button class="btn" data-action="quick-adjust" data-delta="-15000">−15</button>
-        <button class="btn primary big" data-action="start-quick">Start</button>
-        <button class="btn" data-action="quick-adjust" data-delta="15000">+15</button>
+    <div class="page-head home-head"><div><h1>Timer</h1><p>One timer or many. Start in seconds.</p></div>${coordinator.size() ? `<span class="pill active-count-pill">${coordinator.size()} active</span>` : ''}</div>
+
+    ${coordinator.size() ? `<section class="section active-timers-section home-active-section"><div class="row-between"><div><h2 class="section-title" style="margin:0">Active Timers</h2><div class="small muted" style="margin-top:4px">All timers keep running independently.</div></div><span class="pill">${coordinator.size()}</span></div><div class="active-timer-grid">${coordinator.list().map(activeTimerCard).join('')}</div></section>` : ''}
+
+    <section class="card quick-card quick-card-v2">
+      <div class="row-between quick-card-head"><div><div class="quick-label">Quick Timer</div><div class="small muted">Try 90s, 1:30, 3m, or 1h 20m.</div></div><button class="btn ghost compact-btn" data-action="customize-quick">Customize</button></div>
+      <form class="quick-entry" data-quick-form novalidate>
+        <label class="sr-only" for="quick-duration-input">Quick Timer duration</label>
+        <input id="quick-duration-input" class="quick-duration-input" data-quick-input inputmode="text" autocomplete="off" spellcheck="false" value="${esc(state.quickInput)}" placeholder="3m" aria-describedby="quick-duration-preview" aria-invalid="${parsed.ok ? 'false' : 'true'}">
+        <button class="btn primary quick-start-btn" type="submit" data-action="start-quick-input" ${parsed.ok ? '' : 'disabled'}>Start</button>
+      </form>
+      <div id="quick-duration-preview" class="quick-input-preview ${parsed.ok ? '' : 'error-text'}" data-quick-preview>${esc(preview)}</div>
+      <div class="quick-adjust-row" aria-label="Quick duration adjustments">
+        ${adjustments.map((value) => `<button class="quick-adjust-chip" type="button" data-action="quick-add" data-ms="${value}">+${esc(durationInputText(value))}</button>`).join('')}
       </div>
-      <div class="quick-presets">
-        ${presets.map((p) => `<button class="preset-btn ${p === state.quickMs ? 'active' : ''}" data-action="quick-preset" data-ms="${p}">${durationLabel(p)}</button>`).join('')}
-      </div>
+      <div class="quick-duration-group"><div class="quick-group-label">Pinned</div><div class="quick-duration-chips">${pinned.map((value) => `<button class="preset-btn quick-start-chip" data-action="quick-start-duration" data-ms="${value}" aria-label="Start ${esc(durationLabel(value))} timer">${esc(durationInputText(value))}</button>`).join('')}</div></div>
+      ${recentDurations.length ? `<div class="quick-duration-group"><div class="row-between"><div class="quick-group-label">Recent</div><button class="text-btn" data-action="clear-quick-recent">Clear</button></div><div class="quick-duration-chips recent-duration-chips">${recentDurations.slice(0, 8).map((value) => `<button class="preset-btn subtle quick-start-chip" data-action="quick-start-duration" data-ms="${value}" aria-label="Start recent ${esc(durationLabel(value))} timer">${esc(durationInputText(value))}</button>`).join('')}</div></div>` : ''}
     </section>
 
-    <section class="section">
-      <h2 class="section-title">Quick Start</h2>
-      <div class="mode-grid">
-        ${modeCard('interval')}${modeCard('emom')}${modeCard('stopwatch')}${modeCard('amrap')}
-      </div>
-    </section>
-
-    <section class="section">
-      <div class="row-between"><h2 class="section-title" style="margin:0">More Timers</h2><button class="btn ghost" data-action="create">Browse all</button></div>
-      <div class="mode-grid" style="margin-top:12px">
-        ${['tabata','circuit','boxing','run-walk','for-time','ladder','pyramid','custom'].map(modeCard).join('')}
-      </div>
-    </section>
-
-    <section class="section">
-      <div class="row-between"><h2 class="section-title" style="margin:0">Recent</h2><button class="btn ghost" data-route="history">History</button></div>
-      <div class="list" style="margin-top:12px">
-        ${recent.length ? recent.map(sessionRow).join('') : `<div class="card empty">Completed timers will appear here.</div>`}
+    <section class="section home-shortcuts-section">
+      <div class="home-shortcuts">
+        ${lastSession ? `<button class="home-shortcut primary-shortcut" data-action="repeat-session" data-id="${esc(lastSession.id)}"><span class="shortcut-icon" aria-hidden="true">↻</span><span><strong>Repeat Last</strong><small>${esc(lastSession.title)} · ${esc(durationLabel(lastSession.activeDurationMs || lastSession.plannedDurationMs || 0))}</small></span></button>` : ''}
+        <button class="home-shortcut" data-action="open-builder" data-type="stopwatch"><span class="shortcut-icon" aria-hidden="true">◷</span><span><strong>Stopwatch</strong><small>Open-ended timing with laps</small></span></button>
+        <button class="home-shortcut" data-action="open-builder" data-type="interval"><span class="shortcut-icon" aria-hidden="true">↔</span><span><strong>Interval</strong><small>Alternating timed phases</small></span></button>
+        <button class="home-shortcut" data-action="create"><span class="shortcut-icon" aria-hidden="true">＋</span><span><strong>More Timers</strong><small>Sequences, specialized timers and advanced builders</small></span></button>
       </div>
     </section>`;
+  requestAnimationFrame(() => updateQuickInputFeedback());
 }
 
 function activeTimerCard(runtime) {
@@ -677,7 +742,64 @@ function activeTimerCard(runtime) {
   const value = view.status === 'overtime' ? view.overtimeMs : (current.remainingMs != null ? current.remainingMs : current.elapsedMs);
   const time = `${view.status === 'overtime' ? '+' : ''}${formatClock(value || 0, { countUp: current.remainingMs == null })}`;
   const status = view.status === 'paused' ? 'Paused' : view.status === 'overtime' ? 'Overtime' : translateBuiltInLabel(current.label || view.title, currentLocale());
-  return `<div class="list-row active-timer-card" data-active-runtime="${esc(runtime.id)}"><button class="list-row-main" data-action="focus-active" data-id="${esc(runtime.id)}"><div class="list-row-title">${esc(view.title || runtime.meta?.title || 'Timer')}</div><div class="list-row-meta active-timer-status">${esc(status)}</div></button><strong class="active-timer-time">${esc(time)}</strong><button class="icon-btn" data-action="active-toggle" data-id="${esc(runtime.id)}" aria-label="Pause or resume ${esc(view.title || 'timer')}">${view.status === 'paused' ? '▶' : 'Ⅱ'}</button></div>`;
+  const adjustable = current.remainingMs != null && view.status !== 'overtime';
+  const adjustments = quickAdjustments();
+  return `<article class="card active-timer-card" data-active-runtime="${esc(runtime.id)}">
+    <button class="active-timer-main" data-action="focus-active" data-id="${esc(runtime.id)}">
+      <span class="active-timer-copy"><strong>${esc(view.title || runtime.meta?.title || 'Timer')}</strong><small class="active-timer-status">${esc(status)}</small></span>
+      <span class="active-timer-time">${esc(time)}</span>
+    </button>
+    <div class="active-timer-actions">
+      <button class="btn compact-btn" data-action="active-toggle" data-id="${esc(runtime.id)}" aria-label="Pause or resume ${esc(view.title || 'timer')}">${view.status === 'paused' ? 'Resume' : 'Pause'}</button>
+      ${adjustable ? adjustments.map((delta) => `<button class="btn ghost compact-btn active-adjust-btn" data-action="active-adjust" data-id="${esc(runtime.id)}" data-delta="${delta}" ${view.status === 'paused' ? 'disabled' : ''}>+${esc(durationInputText(delta))}</button>`).join('') : ''}
+    </div>
+  </article>`;
+}
+
+function showQuickCustomizeSheet() {
+  const pinned = [...quickPresets()];
+  while (pinned.length < 6) pinned.push(DEFAULT_QUICK_PRESETS[pinned.length] || 60000);
+  const adjustments = quickAdjustments();
+  showSheet('Customize Quick Timer', `<div class="stack quick-customize-sheet">
+    <div><div class="section-title">Pinned durations</div><div class="small muted">These start immediately with one tap from Home. Use the same formats as Quick Timer.</div></div>
+    <div class="quick-customize-grid">${pinned.slice(0,6).map((value,index) => `<label class="custom-number-label">Pinned ${index+1}<input class="input" data-quick-preset-edit value="${esc(durationInputText(value))}" inputmode="text"></label>`).join('')}</div>
+    <div><div class="section-title">Adjustment buttons</div><div class="small muted">Shown on Quick Timer and adjustable active countdowns.</div></div>
+    <div class="quick-customize-grid quick-adjust-edit-grid">${adjustments.map((value,index) => `<label class="custom-number-label">Adjustment ${index+1}<input class="input" data-quick-adjust-edit value="${esc(durationInputText(value))}" inputmode="text"></label>`).join('')}</div>
+    <div class="row" style="flex-wrap:wrap"><button class="btn primary" data-action="save-quick-customize">Save</button><button class="btn" data-action="reset-quick-customize">Reset defaults</button></div>
+  </div>`);
+}
+
+async function saveQuickCustomizeSheet() {
+  const presetInputs = $$('[data-quick-preset-edit]');
+  const adjustmentInputs = $$('[data-quick-adjust-edit]');
+  const presets = [];
+  for (const input of presetInputs) {
+    const result = parseDurationInput(input.value);
+    if (!result.ok) { input.focus(); return toast(`Pinned duration: ${result.error}`, 4200); }
+    presets.push(result.ms);
+  }
+  const adjustments = [];
+  for (const input of adjustmentInputs) {
+    const result = parseDurationInput(input.value, { maxMs: 3600000 });
+    if (!result.ok) { input.focus(); return toast(`Adjustment: ${result.error}`, 4200); }
+    adjustments.push(result.ms);
+  }
+  state.settings.quickPresets = normalizeDurationList(presets, { limit: 8 });
+  state.settings.quickAdjustments = normalizeDurationList(adjustments, { limit: 3, maxMs: 3600000 });
+  if (!state.settings.quickPresets.length || state.settings.quickAdjustments.length !== 3) return toast('Quick Timer needs at least one pinned duration and three valid adjustment buttons.');
+  await saveSettings();
+  closeSheet();
+  if (state.route === 'timer' && !state.engine) renderTimerHome();
+  toast('Quick Timer customized.');
+}
+
+async function resetQuickCustomizeSheet() {
+  state.settings.quickPresets = [...DEFAULT_QUICK_PRESETS];
+  state.settings.quickAdjustments = [...DEFAULT_QUICK_ADJUSTMENTS];
+  await saveSettings();
+  closeSheet();
+  if (state.route === 'timer' && !state.engine) renderTimerHome();
+  toast('Quick Timer defaults restored.');
 }
 
 function modeCard(type) {
@@ -1630,7 +1752,8 @@ function updateActiveTimerCards() {
     const status = $('.active-timer-status', card);
     if (status) status.textContent = view.status === 'paused' ? 'Paused' : view.status === 'overtime' ? 'Overtime' : translateBuiltInLabel(current.label || view.title, currentLocale());
     const toggle = $('[data-action="active-toggle"]', card);
-    if (toggle) toggle.textContent = view.status === 'paused' ? '▶' : 'Ⅱ';
+    if (toggle) toggle.textContent = view.status === 'paused' ? 'Resume' : 'Pause';
+    for (const adjust of $$('[data-action="active-adjust"]', card)) adjust.disabled = view.status === 'paused' || view.status === 'overtime';
   }
 }
 
@@ -2147,8 +2270,8 @@ function renderSettings() {
       <button class="btn" data-action="show-keyboard-shortcuts">Keyboard shortcuts</button>
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">Timer</h2>
-      <div class="field"><label for="adjust-setting">Time adjustment</label><select id="adjust-setting" class="select" data-setting="adjustmentMs"><option value="5000" ${s.adjustmentMs===5000?'selected':''}>5 seconds</option><option value="15000" ${s.adjustmentMs===15000?'selected':''}>15 seconds</option><option value="30000" ${s.adjustmentMs===30000?'selected':''}>30 seconds</option><option value="60000" ${s.adjustmentMs===60000?'selected':''}>1 minute</option></select></div>
-      ${settingToggle('Start quick presets immediately', 'startPresetImmediately', s.startPresetImmediately, 'Tap a quick duration to start without pressing Start')}
+      <div class="field"><label for="adjust-setting">Live timer adjustment</label><select id="adjust-setting" class="select" data-setting="adjustmentMs"><option value="5000" ${s.adjustmentMs===5000?'selected':''}>5 seconds</option><option value="15000" ${s.adjustmentMs===15000?'selected':''}>15 seconds</option><option value="30000" ${s.adjustmentMs===30000?'selected':''}>30 seconds</option><option value="60000" ${s.adjustmentMs===60000?'selected':''}>1 minute</option></select></div>
+      <div class="setting-action-row"><div><strong>Quick Timer</strong><div class="small muted">Pinned one-tap durations, recent durations, and Home adjustment buttons.</div></div><button class="btn" data-action="customize-quick">Customize</button></div>
       ${settingToggle('Keep screen awake', 'keepAwake', s.keepAwake, 'Uses Screen Wake Lock when supported')}
       ${settingToggle('Wall layout auto-hide', 'wallAutoHide', s.wallAutoHide, 'Hide controls after a few seconds')}
     </section>
@@ -2607,7 +2730,9 @@ async function boot() {
   perf.mark('boot:settings');
   refreshVoices();
   if ('speechSynthesis' in globalThis) globalThis.speechSynthesis.onvoiceschanged = () => { refreshVoices(); if (state.route === 'settings' && !state.engine) renderSettings(); };
-  state.quickMs = state.settings.quickPresets?.[3] || 120000;
+  state.quickMs = quickPresets()[3] || quickPresets()[0] || 120000;
+  state.quickInput = durationInputText(state.quickMs);
+  state.quickInputError = '';
   state.deviceCapabilities = detectDeviceCapabilities();
   applyTheme();
   const activePromise = state.db.getActiveSessions().catch(() => []);
@@ -2732,6 +2857,10 @@ function updateCircuitInput(target) {
 }
 
 document.addEventListener('input', (e) => {
+  if (e.target.matches?.('[data-quick-input]')) {
+    updateQuickInputFeedback();
+    return;
+  }
   if (e.target.matches?.('[data-library-search]')) {
     state.libraryQuery = e.target.value;
     state.librarySearchActive = true;
@@ -2756,6 +2885,20 @@ document.addEventListener('input', (e) => {
   updateCustomParameterInput(e.target);
   updateBlockParameterInput(e.target);
 });
+document.addEventListener('submit', async (e) => {
+  if (!e.target.matches?.('[data-quick-form]')) return;
+  e.preventDefault();
+  const input = $('[data-quick-input]', e.target);
+  const result = parseDurationInput(input?.value || state.quickInput);
+  if (!result.ok) {
+    state.quickInputError = result.error;
+    updateQuickInputFeedback();
+    input?.focus();
+    return;
+  }
+  await startQuickDuration(result.ms);
+});
+
 document.addEventListener('change', async (e) => {
   updateBuilderInput(e.target); updateBuilderCueInput(e.target); updateCircuitInput(e.target); updateCustomInput(e.target); updateCustomCueInput(e.target); updateCustomParameterInput(e.target); updateBlockParameterInput(e.target);
   if (e.target.matches?.('[data-history-mode]')) { state.historyMode = e.target.value || 'all'; state.historyVisible = 100; return renderHistory(); }
@@ -2785,6 +2928,15 @@ document.addEventListener('click', async (e) => {
   if (action === 'active-toggle') {
     const id = btn.dataset.id;
     coordinator.togglePause(id);
+    await persistRuntime(id);
+    updateActiveTimerCards();
+    broadcastActiveSnapshot();
+    return;
+  }
+  if (action === 'active-adjust') {
+    const id = btn.dataset.id;
+    const changed = coordinator.command(id, 'adjust', Number(btn.dataset.delta || 0));
+    if (!changed) return toast('This timer cannot be adjusted right now.');
     await persistRuntime(id);
     updateActiveTimerCards();
     broadcastActiveSnapshot();
@@ -2826,14 +2978,26 @@ document.addEventListener('click', async (e) => {
   if (action === 'custom-preview') return showCustomPreview();
   if (action === 'confirm-param-start') return confirmParameterizedStart();
 
-  if (action === 'quick-preset') { state.quickMs = Number(btn.dataset.ms); renderTimerHome(); if (state.settings.startPresetImmediately) startSession(buildCountdown({ durationMs: state.quickMs, label: `${durationLabel(state.quickMs)} Timer` }), { mode: 'countdown', title: `${durationLabel(state.quickMs)} Timer`, config: { durationMs: state.quickMs } }); return; }
-  if (action === 'quick-adjust') { state.quickMs = clamp(state.quickMs + Number(btn.dataset.delta), 1000, 24 * 3600000); return renderTimerHome(); }
-  if (action === 'edit-quick') {
-    const raw = prompt('Timer duration in seconds', String(Math.round(state.quickMs / 1000)));
-    if (raw != null && Number(raw) > 0) { state.quickMs = clamp(ms(raw), 1000, 24 * 3600000); renderTimerHome(); }
+  if (action === 'quick-start-duration') return startQuickDuration(Number(btn.dataset.ms));
+  if (action === 'quick-add') {
+    const input = $('[data-quick-input]');
+    const result = parseDurationInput(input?.value || state.quickInput);
+    const base = result.ok ? result.ms : state.quickMs;
+    const next = Math.min(7 * 86400000, Math.max(1000, base + Number(btn.dataset.ms || 0)));
+    setQuickDuration(next);
+    if (input) input.value = state.quickInput;
+    updateQuickInputFeedback();
+    input?.focus();
     return;
   }
-  if (action === 'start-quick') return startSession(buildCountdown({ durationMs: state.quickMs, label: `${durationLabel(state.quickMs)} Timer` }), { mode: 'countdown', title: `${durationLabel(state.quickMs)} Timer`, config: { durationMs: state.quickMs } });
+  if (action === 'clear-quick-recent') {
+    state.settings.quickRecentDurations = [];
+    await state.db.saveSettings(state.settings).catch(() => {});
+    return renderTimerHome();
+  }
+  if (action === 'customize-quick') return showQuickCustomizeSheet();
+  if (action === 'save-quick-customize') return saveQuickCustomizeSheet();
+  if (action === 'reset-quick-customize') return resetQuickCustomizeSheet();
 
   if (action === 'start-routine') return startRoutine(btn.dataset.id);
   if (action === 'edit-routine') { const r = state.routines.find((x) => x.id === btn.dataset.id); if (r) return openBuilder(r.type, r); }

@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.2.0
+
+### Added
+- Quick Timer 2.0 with deterministic parsing for bare seconds, `90s`, `1:30`, `h:mm:ss`, unit strings such as `3m`, and mixed input such as `1h 20m`.
+- One-tap pinned Quick Timer durations and a bounded most-recent duration list.
+- Prominent Home Active Timers cards with independent pause/resume plus configurable positive adjustment buttons for adjustable countdowns.
+- Repeat Last shortcut using the most recent repeatable completed session.
+- Quick Timer customization sheet for pinned durations and three Home adjustment buttons.
+- Dedicated `src/quick.js` module with parser/normalization tests.
+
+### Improved
+- Home is now utility-first rather than workout-first: Quick Timer and Active Timers dominate the screen, while Stopwatch, Interval and additional timer builders are secondary shortcuts.
+- Starting another Quick Timer no longer requires touching or stopping existing active timers; it enters the v2.1 coordinator as another independent runtime.
+- Quick Timer recent-duration writes are serialized so rapid consecutive starts preserve deterministic recency order.
+- Performance benchmark now measures the complete current application shell, including coordinator and Quick Timer modules.
+
+### Compatibility
+- IndexedDB remains v6 and backup payload remains v4; new Quick Timer preferences live inside the existing Settings record.
+- Legacy `startPresetImmediately` data remains readable for backup compatibility, but v2.2 pinned Home durations are intentionally one-tap starts.
+- Service-worker cache generation bumped to v14.
+
 ## 2.1.0
 
 ### Added
