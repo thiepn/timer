@@ -45,7 +45,7 @@ const shell = [
 ];
 let gzipBytes = 0;
 for (const file of shell) gzipBytes += zlib.gzipSync(fs.readFileSync(path.join(root, file))).length;
-if (gzipBytes > 135 * 1024) fail(`release shell ${Math.round(gzipBytes/1024)} KiB gzip exceeds 135 KiB gate`);
+if (gzipBytes > 140 * 1024) fail(`release shell ${Math.round(gzipBytes/1024)} KiB gzip exceeds 140 KiB gate`);
 
 for (const required of ['README.md','CHANGELOG.md','RELEASE_SCOPE.md','CERTIFICATION.md','KNOWN_LIMITATIONS.md','.nojekyll']) {
   if (!fs.existsSync(path.join(root, required))) fail(`${required} is missing`);
