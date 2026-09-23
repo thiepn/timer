@@ -188,7 +188,26 @@ const DE = {
   'Export JSON': 'JSON exportieren',
   'Notes': 'Notizen',
   'Save note': 'Notiz speichern',
-  'Repeat timer': 'Timer wiederholen'
+  'Repeat timer': 'Timer wiederholen',
+  'One timer or many. Start in seconds.': 'Ein Timer oder mehrere. In Sekunden starten.',
+  'Active Timers': 'Aktive Timer',
+  'All timers keep running independently.': 'Alle Timer laufen unabhängig weiter.',
+  'Try 90s, 1:30, 3m, or 1h 20m.': 'Zum Beispiel 90s, 1:30, 3m oder 1h 20m.',
+  'Customize': 'Anpassen',
+  'Pinned': 'Angepinnt',
+  'Recent': 'Zuletzt',
+  'Clear': 'Leeren',
+  'Repeat Last': 'Letzten wiederholen',
+  'Open-ended timing with laps': 'Offene Zeitmessung mit Runden',
+  'Alternating timed phases': 'Abwechselnde Zeitphasen',
+  'Sequences, specialized timers and advanced builders': 'Sequenzen, Spezialtimer und erweiterte Builder',
+  'Customize Quick Timer': 'Schnelltimer anpassen',
+  'Pinned durations': 'Angepinnte Dauern',
+  'These start immediately with one tap from Home. Use the same formats as Quick Timer.': 'Diese starten auf der Startseite mit einem Tippen. Verwende dieselben Formate wie beim Schnelltimer.',
+  'Adjustment buttons': 'Anpassungsschaltflächen',
+  'Shown on Quick Timer and adjustable active countdowns.': 'Werden beim Schnelltimer und bei anpassbaren aktiven Countdowns angezeigt.',
+  'Reset defaults': 'Standard zurücksetzen',
+  'Live timer adjustment': 'Live-Timer-Anpassung'
 };
 
 const SOURCE_TRANSLATIONS = { de: DE };

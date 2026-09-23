@@ -1,15 +1,14 @@
-# Timer v2.1 Release Scope
+# Timer v2.2 Release Scope
 
-Timer v2.1 begins the post-v2 universal-timer architecture while preserving every v2.0 timer mode and data format.
+Timer v2.2 is the Quick Timer 2.0 and Home redesign release built on the v2.1 multi-timer kernel.
 
 Production scope includes:
 
-- The complete v2.0 countdown, stopwatch, interval, custom-routine, cue, history, backup, accessibility and PWA feature set.
-- A new `TimerCoordinator` above the existing deterministic `TimerEngine`, allowing multiple independent active timer runtimes under one device/runtime owner.
-- Per-runtime active recovery checkpoints with migration from the legacy singleton `active/current` record.
-- Minimal Active Timers UI: background the focused timer, see all active timers on Home, pause/resume an individual timer and focus it again.
-- Explicit completion primitives for Stop, Overtime, Repeat and Start Next. Stop, Overtime and Repeat have coordinator semantics; Start Next is exposed as an orchestration intent for the later Sequence/Completion Actions phase.
-- Shared-device services—Wake Lock, ownership heartbeat, service-worker update deferral and maintenance suspension—remain active until the final active timer ends.
-- Per-runtime cue generations and serialized speech so simultaneous timers share one AudioContext without cancelling or overlapping one another incorrectly.
+- Deterministic Quick Timer parsing for bare seconds, unit notation, `m:ss`, and `h:mm:ss`, bounded from 1 second through the Quick Timer maximum.
+- One-tap pinned durations and a bounded recent-duration list stored in normal Settings data.
+- A utility-first Home with prominent Active Timers, direct pause/resume, direct positive adjustments on adjustable countdowns, Repeat Last, Stopwatch, Interval and More Timers shortcuts.
+- User customization of pinned Quick Timer durations and three Home adjustment buttons using the same parser as the main Quick Timer field.
+- Starting any pinned/recent/custom Quick Timer adds a new coordinator runtime without disturbing existing timers.
+- Existing v2.1 ownership, recovery, cue, Wake Lock, notification and multi-runtime guarantees remain unchanged.
 
-This release deliberately does **not** attempt the polished Multi-Timer Workspace, generic Saved Timer migration, Sequence Timer UI, chained completion-action editor or native Android background service. Those belong to later roadmap phases.
+This release deliberately does **not** implement Saved Timer metadata/collections, the full Sequence Timer UX, the dedicated Multi-Timer Workspace, QR sharing or native Android exact alarms/widgets. Those remain later roadmap phases.
