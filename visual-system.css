@@ -1162,6 +1162,13 @@ html[data-reduce-motion="on"]::view-transition-new(app-content) {
   font-size:.82rem;
   font-weight:650;
 }
+.quick-instrument[data-quick-numeral-size="medium"] .quick-dial-time {
+  font-size:clamp(2.45rem,7vw,4.25rem);
+}
+.quick-instrument[data-quick-numeral-size="long"] .quick-dial-time {
+  font-size:clamp(2.05rem,6vw,3.45rem);
+  letter-spacing:-.055em;
+}
 .quick-instrument.invalid .quick-dial-shell::before {
   background:conic-gradient(var(--state-danger),var(--state-danger));
 }
