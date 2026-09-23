@@ -352,6 +352,10 @@ textarea.input,
 .bottom-nav { border-radius:var(--radius-4); }
 .sheet { border-radius:var(--radius-5) var(--radius-5) 0 0; }
 
+@media (min-width:760px) {
+  .sheet { border-radius:var(--radius-5); }
+}
+
 /* Control hierarchy and tactile response */
 .btn,
 .icon-btn,
