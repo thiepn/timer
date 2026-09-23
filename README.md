@@ -1,6 +1,6 @@
 # Timer
 
-Current app version: **2.3.0**.
+Current app version: **2.4.0**.
 
 A local-first universal timer built as a zero-build PWA for GitHub Pages, ranging from simple countdowns and stopwatches to programmable interval and sequence timers.
 
@@ -18,6 +18,8 @@ A local-first universal timer built as a zero-build PWA for GitHub Pages, rangin
 - Ladder and pyramid generators
 - Sequence timers with nested sections/patterns, timed/manual steps, launch parameters, safe arithmetic formulas, progression generators, seeded random pools, reusable linked blocks, duration scaling/target fitting, deterministic compilation and plan preview
 - Universal Saved Timers for countdowns, stopwatches, intervals, sequences and specialized templates, with pin/favorite/archive, icons, accents, descriptions, collections, tags, sorting, duplicate and bulk organization
+- Multi-Timer Workspace with persistent ordering, groups/colors, grid/compact/focus layouts, bulk pause/resume/stop, and per-runtime editing
+- Completion actions: Stop, Overtime, Repeat and Start Next, including recovery-safe Saved Timer chains
 - Session history with semantic event timelines, calendar/stats views, actual-vs-planned review, objective comparable records, mode-specific analytics, notes, filtering and CSV/JSON export
 - Focus, Classic, Strength and Wall live layouts
 - Pause/resume, skip, previous, restart, time adjustment and fullscreen
@@ -198,6 +200,16 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 - Added deterministic performance budgets, large-fixture regression tests, a benchmark command and a GitHub Actions quality workflow.
 - Current reference benchmark on the development environment: ~11 ms for a 1,000-step generated compile, ~10 ms for a 10,000-session summary, and ~98 KiB gzip for the summed offline shell assets.
 
+
+## v2.4.0 Multi-Timer Workspace & completion actions
+
+- Added a dedicated Multi-Timer Workspace for every active runtime, with live cards, persistent ordering, groups, colors, and grid/compact/focus layouts.
+- Added bulk Pause All, Resume All and Stop All plus per-timer reorder, rename, grouping, coloring and safe manual stop.
+- Saved Timers can define default completion behavior: Stop, count Overtime, Repeat automatically, or Start Next.
+- Start Next targets another Saved Timer and carries its target's own completion rule forward, enabling deterministic chains.
+- Chain configuration and workspace metadata live in per-runtime recovery records, so reload/recovery preserves order, grouping and the next action.
+- Manual End/Stop explicitly bypasses automation, preventing an intentional user stop from accidentally repeating or starting the next timer.
+- Existing v2.3 Saved Timer records, v2.2 Quick Timer behavior, v2.1 multi-runtime recovery, IndexedDB v6 and backup payload v4 remain compatible.
 
 ## v2.2.0 Quick Timer 2.0 and new Home
 
