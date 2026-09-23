@@ -173,11 +173,29 @@ export class CueManager {
     this.getCustomSound = getCustomSound;
     this.ctx = null;
     this.muted = false;
-    this.generation = 0;
+    this.generations = new Map([['default', 0]]);
     this.delivered = new Set();
     this.activeSources = new Set();
+    this.sourceScopes = new WeakMap();
     this.customBufferCache = new Map();
     this.maxCustomBuffers = 4;
+    this.speechQueue = [];
+    this.speechCurrent = null;
+  }
+
+  get generation() { return this.generations.get('default') || 0; }
+  set generation(value) { this.generations.set('default', Number(value) || 0); }
+  generationFor(scope = 'default') { return this.generations.get(String(scope)) || 0; }
+  bumpGeneration(scope = 'default') {
+    scope = String(scope);
+    const value = this.generationFor(scope) + 1;
+    this.generations.set(scope, value);
+    return value;
+  }
+
+  clearDelivered(scope = 'default') {
+    const prefix = `${String(scope)}:`;
+    for (const key of [...this.delivered]) if (String(key).startsWith(prefix)) this.delivered.delete(key);
   }
 
   async init() {
@@ -190,37 +208,53 @@ export class CueManager {
     } catch { return false; }
   }
 
-  beginSession() {
-    this.generation += 1;
-    this.delivered.clear();
-    this.cancelSpeech();
+  beginSession(_meta, scope = 'default') {
+    this.bumpGeneration(scope);
+    this.clearDelivered(scope);
+    this.cancelSpeech(scope);
   }
 
-  endSession() {
-    this.generation += 1;
+  endSession(scope = 'default') {
+    this.bumpGeneration(scope);
+    this.clearDelivered(scope);
+    this.cancelSpeech(scope);
+    this.stopSources(scope);
+  }
+
+  endAllSessions() {
+    for (const scope of [...this.generations.keys()]) this.bumpGeneration(scope);
     this.delivered.clear();
     this.cancelSpeech();
     this.stopSources();
     try { globalThis.navigator?.vibrate?.(0); } catch {}
   }
 
-  stopSources() {
+  stopSources(scope = null) {
     for (const source of [...this.activeSources]) {
+      if (scope != null && this.sourceScopes.get(source) !== String(scope)) continue;
       try { source.stop?.(); } catch {}
+      this.activeSources.delete(source);
     }
-    this.activeSources.clear();
   }
 
-  cancelSpeech() {
-    try { globalThis.speechSynthesis?.cancel?.(); } catch {}
+  cancelSpeech(scope = null) {
+    const target = scope == null ? null : String(scope);
+    if (target == null) this.speechQueue = [];
+    else this.speechQueue = this.speechQueue.filter((item) => item.scope !== target);
+    if (this.speechCurrent && (target == null || this.speechCurrent.scope === target)) {
+      try { globalThis.speechSynthesis?.cancel?.(); } catch {}
+      this.speechCurrent = null;
+      queueMicrotask(() => this.drainSpeech());
+    }
   }
 
   config(snapshot, step) {
     return resolveCueConfig(this.getSettings?.() || {}, this.getProfiles?.() || [], snapshot?.meta?.cueOverrides || {}, step?.cueOverrides || {});
   }
 
-  tone(spec, config, generation = this.generation) {
-    if (!config.sound || this.muted || !this.ctx || this.ctx.state !== 'running' || generation !== this.generation) return;
+  tone(spec, config, generation = this.generationFor('default'), scope = 'default') {
+    scope = String(scope);
+    if (!config.sound || this.muted || !this.ctx || this.ctx.state !== 'running' || generation !== this.generationFor(scope)) return;
     const osc = this.ctx.createOscillator();
     const amp = this.ctx.createGain();
     const at = this.ctx.currentTime + Math.max(0, Number(spec.delay) || 0);
@@ -232,13 +266,15 @@ export class CueManager {
     amp.gain.exponentialRampToValueAtTime(.0001, at + Math.max(.02, Number(spec.duration) || .08));
     osc.connect(amp).connect(this.ctx.destination);
     this.activeSources.add(osc);
+    this.sourceScopes.set(osc, scope);
     osc.addEventListener?.('ended', () => this.activeSources.delete(osc), { once: true });
     osc.start(at);
     osc.stop(at + Math.max(.03, Number(spec.duration) || .08) + .03);
   }
 
-  async customSound(id, config, generation = this.generation) {
-    if (!config.sound || this.muted || !id || generation !== this.generation) return false;
+  async customSound(id, config, generation = this.generationFor('default'), scope = 'default') {
+    scope = String(scope);
+    if (!config.sound || this.muted || !id || generation !== this.generationFor(scope)) return false;
     try {
       if (!await this.init()) return false;
       let buffer = this.customBufferCache.get(id);
@@ -257,29 +293,31 @@ export class CueManager {
         }
         this.customBufferCache.set(id, buffer);
       }
-      if (generation !== this.generation) return false;
+      if (generation !== this.generationFor(scope)) return false;
       const source = this.ctx.createBufferSource();
       const gainNode = this.ctx.createGain();
       source.buffer = buffer;
       gainNode.gain.value = clamp((config.profileGain ?? 1) * (config.masterVolume ?? 1), 0, 2);
       source.connect(gainNode).connect(this.ctx.destination);
       this.activeSources.add(source);
+      this.sourceScopes.set(source, scope);
       source.addEventListener?.('ended', () => this.activeSources.delete(source), { once: true });
       source.start();
       return true;
     } catch { return false; }
   }
 
-  async play(kind, config, override = '', generation = this.generation) {
+  async play(kind, config, override = '', generation = this.generationFor('default'), scope = 'default') {
+    scope = String(scope);
     if (!config.sound || this.muted || override === 'off') return;
     if (String(override).startsWith('custom:')) {
-      const ok = await this.customSound(String(override).slice(7), config, generation);
+      const ok = await this.customSound(String(override).slice(7), config, generation, scope);
       if (ok) return;
       override = '';
     }
     if (!await this.init()) return;
     const soundKind = override && override !== 'default' ? override : kind;
-    for (const spec of soundRecipe(config.soundPack, soundKind)) this.tone(spec, config, generation);
+    for (const spec of soundRecipe(config.soundPack, soundKind)) this.tone(spec, config, generation, scope);
   }
 
   haptic(kind, config) {
@@ -290,19 +328,40 @@ export class CueManager {
     try { globalThis.navigator.vibrate(patterns[kind] || [45]); } catch {}
   }
 
-  speak(text, config) {
+  speak(text, config, scope = 'default', generation = this.generationFor(scope)) {
+    scope = String(scope);
     if (!config.voice || this.muted || !text || !('speechSynthesis' in globalThis) || !('SpeechSynthesisUtterance' in globalThis)) return;
-    try {
-      this.cancelSpeech();
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = config.voiceRate || 1.05;
-      utterance.volume = config.voiceVolume ?? .9;
-      if (config.voiceURI && globalThis.speechSynthesis?.getVoices) {
-        const voice = globalThis.speechSynthesis.getVoices().find((item) => item.voiceURI === config.voiceURI);
-        if (voice) utterance.voice = voice;
+    this.speechQueue.push({ text: String(text), config: { ...config }, scope, generation });
+    this.drainSpeech();
+  }
+
+  drainSpeech() {
+    if (this.speechCurrent || this.muted || !('speechSynthesis' in globalThis) || !('SpeechSynthesisUtterance' in globalThis)) return;
+    while (this.speechQueue.length) {
+      const item = this.speechQueue.shift();
+      if (item.generation !== this.generationFor(item.scope)) continue;
+      try {
+        const utterance = new SpeechSynthesisUtterance(item.text);
+        utterance.rate = item.config.voiceRate || 1.05;
+        utterance.volume = item.config.voiceVolume ?? .9;
+        if (item.config.voiceURI && globalThis.speechSynthesis?.getVoices) {
+          const voice = globalThis.speechSynthesis.getVoices().find((candidate) => candidate.voiceURI === item.config.voiceURI);
+          if (voice) utterance.voice = voice;
+        }
+        this.speechCurrent = item;
+        const done = () => {
+          if (this.speechCurrent === item) this.speechCurrent = null;
+          queueMicrotask(() => this.drainSpeech());
+        };
+        utterance.onend = done;
+        utterance.onerror = done;
+        globalThis.speechSynthesis.speak(utterance);
+      } catch {
+        this.speechCurrent = null;
+        continue;
       }
-      speechSynthesis.speak(utterance);
-    } catch {}
+      return;
+    }
   }
 
   nextStep(snapshot) {
@@ -315,76 +374,88 @@ export class CueManager {
     return key ? (config[key] || '') : '';
   }
 
-  onEvent(event, snapshot) {
+  onEvent(event, snapshot, scope = 'default') {
+    scope = String(scope);
     const step = event.step || (snapshot?.plan?.kind === 'timeline' ? snapshot.plan.steps?.[snapshot.currentIndex] : null);
     if (event.type === 'step-started') {
-      this.generation += 1;
-      const generation = this.generation;
+      const generation = this.bumpGeneration(scope);
+      this.clearDelivered(scope);
+      this.cancelSpeech(scope);
+      this.stopSources(scope);
       const config = this.config(snapshot, step);
       const phase = step?.phase;
       const kind = phase === 'rest' || phase === 'recovery' || phase === 'cooldown' ? 'rest' : phase === 'prepare' ? 'prepare' : 'work';
-      void this.play(kind, config, config.transitionSound || this.mappedSound(config, kind), generation);
+      void this.play(kind, config, config.transitionSound || this.mappedSound(config, kind), generation, scope);
       this.haptic(kind, config);
-      this.speak(speechForStep(step, config, this.nextStep(snapshot)), config);
+      this.speak(speechForStep(step, config, this.nextStep(snapshot)), config, scope, generation);
       return;
     }
     if (event.type === 'manual-completed') {
       const config = this.config(snapshot, step);
-      void this.play('rest', config, this.mappedSound(config, 'rest'), this.generation);
+      const generation = this.generationFor(scope);
+      void this.play('rest', config, this.mappedSound(config, 'rest'), generation, scope);
       this.haptic('rest', config);
       return;
     }
     if (event.type === 'session-completed') {
-      this.generation += 1;
+      const generation = this.bumpGeneration(scope);
+      this.clearDelivered(scope);
+      this.cancelSpeech(scope);
       const config = this.config(snapshot, null);
-      void this.play('finish', config, this.mappedSound(config, 'finish'), this.generation);
+      void this.play('finish', config, this.mappedSound(config, 'finish'), generation, scope);
       this.haptic('finish', config);
-      this.speak(config.voiceVerbosity === 'detailed' ? 'Workout complete.' : 'Complete.', config);
+      const title = String(snapshot?.meta?.title || snapshot?.plan?.title || '').trim();
+      const phrase = title ? `${title} complete.` : (config.voiceVerbosity === 'detailed' ? 'Timer complete.' : 'Complete.');
+      this.speak(phrase, config, scope, generation);
       return;
     }
     if (event.type === 'session-paused' || event.type === 'step-skipped' || event.type === 'step-restarted') {
-      this.generation += 1;
-      this.cancelSpeech();
-      this.stopSources();
+      this.bumpGeneration(scope);
+      this.clearDelivered(scope);
+      this.cancelSpeech(scope);
+      this.stopSources(scope);
     }
   }
 
-  deliverTick(kind, view, snapshot, config, soundOverride = '') {
-    const key = `${view.current?.id || 'session'}:${kind}`;
+  deliverTick(kind, view, snapshot, config, soundOverride = '', scope = 'default') {
+    scope = String(scope);
+    const key = `${scope}:${view.current?.id || 'session'}:${kind}`;
     if (this.delivered.has(key)) return false;
     this.delivered.add(key);
-    void this.play(kind, config, soundOverride, this.generation);
+    const generation = this.generationFor(scope);
+    void this.play(kind, config, soundOverride, generation, scope);
     this.haptic(kind, config);
     return true;
   }
 
-  tick(view, snapshot) {
-    if (this.muted || !view?.current || view.status !== 'running') return;
+  tick(view, snapshot, scope = 'default') {
+    scope = String(scope);
+    if (this.muted || !view?.current || !['running', 'overtime'].includes(view.status)) return;
     const step = snapshot?.plan?.kind === 'timeline' ? snapshot.plan.steps?.[snapshot.currentIndex] : view.current;
     const config = this.config(snapshot, step);
     const rem = view.current.remainingMs;
     const progress = view.current.progress;
     if (rem != null && rem > 0 && config.countdownCues && rem <= 3100) {
       const sec = Math.ceil(rem / 1000);
-      if (sec >= 1 && sec <= 3) this.deliverTick(`countdown-${sec}`, view, snapshot, config, this.mappedSound(config, 'countdown') || 'countdown');
+      if (sec >= 1 && sec <= 3) this.deliverTick(`countdown-${sec}`, view, snapshot, config, this.mappedSound(config, 'countdown') || 'countdown', scope);
       return;
     }
     if (rem != null && config.warningSeconds > 3) {
       const target = config.warningSeconds * 1000;
       if (rem <= target && rem > Math.max(3100, target - 1600)) {
-        if (this.deliverTick('warning', view, snapshot, config, this.mappedSound(config, 'warning') || 'warning') && config.voice && config.voiceVerbosity === 'detailed') this.speak(`${config.warningSeconds} seconds remaining.`, config);
+        if (this.deliverTick('warning', view, snapshot, config, this.mappedSound(config, 'warning') || 'warning', scope) && config.voice && config.voiceVerbosity === 'detailed') this.speak(`${config.warningSeconds} seconds remaining.`, config, scope);
         return;
       }
     }
     if (config.customPercent != null && progress != null) {
       const target = config.customPercent / 100;
       if (progress >= target && progress <= Math.min(1, target + .12)) {
-        this.deliverTick(`custom-${config.customPercent}`, view, snapshot, config, config.customSound || this.mappedSound(config, 'halfway') || 'halfway');
+        this.deliverTick(`custom-${config.customPercent}`, view, snapshot, config, config.customSound || this.mappedSound(config, 'halfway') || 'halfway', scope);
         return;
       }
     }
     if (config.halfwayCue && progress != null && progress >= .5 && progress <= .62) {
-      this.deliverTick('halfway', view, snapshot, config, this.mappedSound(config, 'halfway') || 'halfway');
+      this.deliverTick('halfway', view, snapshot, config, this.mappedSound(config, 'halfway') || 'halfway', scope);
     }
   }
 
@@ -406,7 +477,7 @@ export class CueManager {
   }
 
   clearCustomSoundCache(id) { if (id) this.customBufferCache.delete(id); else this.customBufferCache.clear(); }
-  toggleMute() { this.muted = !this.muted; if (this.muted) this.endSession(); return this.muted; }
+  toggleMute() { this.muted = !this.muted; if (this.muted) this.endAllSessions(); return this.muted; }
 }
 
 export class WakeLockManager {
@@ -461,13 +532,13 @@ export async function showCompletionNotification(title, body = 'Timer complete',
   });
 }
 
-export async function showActiveSessionNotification(title, body = 'Timer is running') {
+export async function showActiveSessionNotification(title, body = 'Timer is running', { sessionId } = {}) {
   return showTimerNotification(title, {
     body,
-    tag: 'timer-active',
+    tag: sessionId ? `timer-active:${sessionId}` : 'timer-active',
     silent: true,
     renotify: false,
-    data: { url: './?launch=active', type: 'active' }
+    data: { url: './?launch=active', type: 'active', sessionId }
   });
 }
 

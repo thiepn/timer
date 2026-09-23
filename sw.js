@@ -1,4 +1,4 @@
-const CACHE = 'thiepn-timer-v12';
+const CACHE = 'thiepn-timer-v13';
 const APP_SHELL = [
   './',
   './index.html',
@@ -14,9 +14,10 @@ const APP_SHELL = [
   './src/i18n.js',
   './src/accessibility.js',
   './src/performance.js',
+  './src/coordinator.js',
   './src/app.js'
 ];
-const APP_SHELL_URLS = new Set(APP_SHELL.map((path) => new URL(path, self.registration.scope).href));
+const APP_SHELL_URLS = new Set(APP_SHELL.map((path) => new URL(path, self.location.href).href));
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(APP_SHELL)));
@@ -56,19 +57,20 @@ self.addEventListener('fetch', (event) => {
   }
 
   event.respondWith((async () => {
-    const cacheableShellAsset = APP_SHELL_URLS.has(url.href);
-    if (cacheableShellAsset) {
+    const isShellAsset = APP_SHELL_URLS.has(url.href);
+    if (isShellAsset) {
       const cached = await caches.match(event.request);
       if (cached) return cached;
     }
     try {
       const response = await fetch(event.request);
-      if (response.ok && cacheableShellAsset) {
+      if (response.ok && isShellAsset) {
         const cache = await caches.open(CACHE);
         cache.put(event.request, response.clone());
       }
       return response;
     } catch {
+      if (isShellAsset) return (await caches.match(event.request)) || new Response('', { status: 504, statusText: 'Offline' });
       return new Response('', { status: 504, statusText: 'Offline' });
     }
   })());

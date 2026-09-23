@@ -1,6 +1,6 @@
 # Known Platform Limitations
 
-Timer v2.0 is a local-first web/PWA application. These limitations are deliberate and are not represented as working native features:
+Timer v2.1 is a local-first web/PWA application. These limitations are deliberate and are not represented as working native features:
 
 - A pure PWA cannot guarantee an exact local alarm after Android has fully suspended or killed the browser process.
 - A true Android home-screen App Widget is native-only and is not included.
@@ -12,4 +12,4 @@ Timer v2.0 is a local-first web/PWA application. These limitations are deliberat
 
 ## Certification boundary
 
-The automated v2.0 release gate certifies deterministic engine behavior, persistence, backup compatibility, security/static policy, accessibility contracts, performance budgets and PWA packaging. This environment does not provide a physical Android device, Bluetooth stack or phone-call lifecycle, so real-device Bluetooth/music/call/thermal behavior is not claimed as laboratory-certified by the automated suite.
+The automated v2.1 release gate certifies deterministic engine behavior, persistence, backup compatibility, security/static policy, accessibility contracts, performance budgets and PWA packaging. This environment does not provide a physical Android device, Bluetooth stack or phone-call lifecycle, so real-device Bluetooth/music/call/thermal behavior is not claimed as laboratory-certified by the automated suite.

@@ -1,8 +1,8 @@
 # Timer
 
-Current app version: **2.0.0**.
+Current app version: **2.1.0**.
 
-A local-first workout interval timer built as a zero-build PWA for GitHub Pages.
+A local-first universal timer built as a zero-build PWA for GitHub Pages, ranging from simple countdowns and stopwatches to programmable interval and sequence timers.
 
 ## Included in the current build
 
@@ -106,7 +106,7 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 ## v1.3.0 advanced generators and formulas
 
 - Added a small safe arithmetic formula language implemented with an internal parser/AST; no `eval`, `Function`, DOM, network, or arbitrary code execution is used.
-- Timed durations, manual caps, repeat counts, progression work/rest, and generator counts can resolve from formulas before the workout starts.
+- Timed durations, manual caps, repeat counts, progression work/rest, and generator counts can resolve from formulas before the timer starts.
 - Formula context includes `round`, `rounds`, `outerRound`, `outerRounds`, `index`, `base`, `previous`, plus explicit numeric/duration launch-parameter variables.
 - Added formula helpers: `min`, `max`, `clamp`, `round`, `floor`, `ceil`, and `abs`.
 - Added Progression Generator nodes for increasing/decreasing work/rest patterns and ladder-style routines.
@@ -161,7 +161,7 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 - Added single active-runtime ownership using Web Locks where available with a short local lease fallback. Secondary windows become read-only observers instead of restoring duplicate cue/persistence engines.
 - Added BroadcastChannel coordination, semantic active-session heartbeat snapshots, explicit ownership takeover and owner-focus requests.
 - Added a same-device read-only Wall display window driven from the authoritative timer snapshot.
-- Service-worker updates now wait safely during active sessions and can be explicitly applied afterward without surprise workout reloads.
+- Service-worker updates now wait safely during active sessions and can be explicitly applied afterward without surprise timer reloads.
 - Notification clicks carry launch intent; optional active-session notifications are static/best-effort and never treated as exact background alarms.
 - Added optional experimental Media Session/headset controls with cleanup at session end.
 - Added Device & PWA capability diagnostics and explicit native-only reporting for true home-screen widgets and exact local alarms.
@@ -170,13 +170,13 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 ## v1.8.0 accessibility, internationalization and interaction hardening
 
 - Added a dedicated accessibility layer with focus-contained dialogs, focus restoration, route-heading focus, semantic live announcements, and shortcut guards that ignore interactive/text-entry controls.
-- Live timer updates no longer rely on per-second ARIA announcements; phase changes, pause/resume, manual completion and workout completion are announced semantically instead.
+- Live timer updates no longer rely on per-second ARIA announcements; phase changes, pause/resume, manual completion and timer completion is announced semantically instead.
 - Added large-control, high-contrast, text-size, reduced-motion, screen-reader-optimization, time-format and digit-format preferences. Browser pinch zoom remains enabled.
 - Added forced-colors support and additional resilience for 200–400% zoom, long strings and mobile virtual keyboards.
 - Added an internationalization layer with English, German, expanded pseudo-localization and RTL pseudo-localization; dates and human-readable durations are locale-aware while stored timer data remains locale-independent.
 - Added runtime language switching for normal screens, localized built-in phase labels and notification text, plus explicit RTL direction handling.
 - Wall-mode controls no longer auto-hide while keyboard focus is inside the live control surface.
-- Added a keyboard-shortcut reference surface and ensured global workout shortcuts cannot double-fire when a button/input is focused.
+- Added a keyboard-shortcut reference surface and ensured global timer shortcuts cannot double-fire when a button/input is focused.
 
 
 ## v1.9.0 performance, battery and scale hardening
@@ -190,11 +190,22 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 - Live timer scheduling is battery-aware: hidden/paused sessions perform no visual ticks, stopwatch uses 10 Hz, Wall/reduced-motion modes use 4 Hz, and smooth progress is capped near 30 Hz.
 - Live semantic DOM (phase, round, next, mode panels) updates only when semantic state changes rather than on every animation frame.
 - Secondary Wall display windows use low-frequency timestamp-derived updates instead of a continuous animation-frame loop.
-- Heavy maintenance is suspended during active workouts and resumed afterward.
+- Heavy maintenance is suspended during active timers and resumed afterward.
 - Custom audio decode caching is bounded with LRU eviction.
 - Service-worker runtime caching is restricted to the declared app shell so arbitrary same-origin GETs cannot grow cache storage indefinitely.
 - Added deterministic performance budgets, large-fixture regression tests, a benchmark command and a GitHub Actions quality workflow.
 - Current reference benchmark on the development environment: ~11 ms for a 1,000-step generated compile, ~10 ms for a 10,000-session summary, and ~98 KiB gzip for the summed offline shell assets.
+
+
+## v2.1.0 universal timer kernel
+
+- Added a `TimerCoordinator` that owns multiple independent `TimerEngine` runtimes under one device/runtime owner.
+- Multiple countdowns, stopwatches, intervals and advanced timers can remain active simultaneously without sharing pause/deadline state.
+- Added per-runtime IndexedDB checkpoints in the `activeSessions` store with automatic migration from the legacy singleton `active/current` checkpoint.
+- Added explicit completion primitives: Stop, Overtime, Repeat and Start Next. Overtime and repeat are implemented at the coordinator layer without duplicating the core timer engine.
+- Added a minimal Active Timers home section and a `Run in background` action so one timer can be left running while another is started.
+- Cue generation and countdown de-duplication are namespaced per runtime while all timers share one AudioContext; speech is queued so timers do not talk over each other.
+- Wake Lock, runtime ownership and maintenance suspension now remain active until the last timer finishes.
 
 ## v2.0.0 production certification
 

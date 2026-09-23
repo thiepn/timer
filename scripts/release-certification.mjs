@@ -8,7 +8,7 @@ const read = (name) => fs.readFileSync(path.join(root, name), 'utf8');
 const fail = (message) => { throw new Error(`Release certification failed: ${message}`); };
 
 const pkg = JSON.parse(read('package.json'));
-if (pkg.version !== '2.0.0') fail(`package version is ${pkg.version}, expected 2.0.0`);
+if (pkg.version !== '2.1.0') fail(`package version is ${pkg.version}, expected 2.1.0`);
 
 const html = read('index.html');
 if (!/Content-Security-Policy/i.test(html)) fail('Content Security Policy is missing');
@@ -17,7 +17,7 @@ if (/user-scalable\s*=\s*no/i.test(html) || /maximum-scale\s*=\s*1/i.test(html))
 
 const sw = read('sw.js');
 const cacheMatch = sw.match(/const CACHE = 'thiepn-timer-v(\d+)'/);
-if (!cacheMatch || Number(cacheMatch[1]) !== 12) fail('service-worker cache generation must be v12');
+if (!cacheMatch || Number(cacheMatch[1]) !== 13) fail('service-worker cache generation must be v13');
 
 const app = read('src/app.js');
 const appImports = [...app.matchAll(/from\s+['"](\.\/[^'"]+\.js)['"]/g)].map((m) => `./src/${m[1].replace(/^\.\//, '')}`);
@@ -31,12 +31,12 @@ if (!manifest.start_url || !manifest.scope || !Array.isArray(manifest.icons) || 
 
 const sourceFiles = fs.readdirSync(path.join(root, 'src')).filter((name) => name.endsWith('.js'));
 for (const file of sourceFiles) {
-  const source = read(`src/${file}`);
-  if (/\beval\s*\(/.test(source)) fail(`${file} contains eval()`);
-  if (/\bnew\s+Function\s*\(/.test(source)) fail(`${file} contains new Function()`);
-  if (/document\.write\s*\(/.test(source)) fail(`${file} contains document.write()`);
-  if (/\bTODO\b|\bFIXME\b/.test(source)) fail(`${file} still contains TODO/FIXME markers`);
-  for (const match of source.matchAll(/from\s+['"]([^'"]+)['"]/g)) if (!match[1].startsWith('.')) fail(`${file} imports non-local module ${match[1]}`);
+  const text = read(`src/${file}`);
+  if (/\beval\s*\(/.test(text)) fail(`${file} contains eval()`);
+  if (/\bnew\s+Function\s*\(/.test(text)) fail(`${file} contains new Function()`);
+  if (/document\.write\s*\(/.test(text)) fail(`${file} contains document.write()`);
+  if (/\bTODO\b|\bFIXME\b/.test(text)) fail(`${file} still contains TODO/FIXME markers`);
+  for (const match of text.matchAll(/from\s+['"]([^'"]+)['"]/g)) if (!match[1].startsWith('.')) fail(`${file} imports non-local module ${match[1]}`);
 }
 
 const shell = [
@@ -52,7 +52,7 @@ for (const required of ['README.md','CHANGELOG.md','RELEASE_SCOPE.md','CERTIFICA
 }
 
 const readme = read('README.md');
-if (!readme.includes('Current app version: **2.0.0**')) fail('README does not identify v2.0.0');
+if (!readme.includes('Current app version: **2.1.0**')) fail('README does not identify v2.1.0');
 
 console.log('Static release certification: PASS');
 console.log(`Version: ${pkg.version}`);

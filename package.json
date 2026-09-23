@@ -1,11 +1,11 @@
 {
   "name": "thiepn-timer",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check src/core.js && node --check src/db.js && node --check src/audio.js && node --check src/analytics.js && node --check src/resilience.js && node --check src/device.js && node --check src/i18n.js && node --check src/accessibility.js && node --check src/performance.js && node --check src/app.js && node --check sw.js",
+    "check": "node --check src/core.js && node --check src/db.js && node --check src/audio.js && node --check src/analytics.js && node --check src/resilience.js && node --check src/device.js && node --check src/i18n.js && node --check src/accessibility.js && node --check src/performance.js && node --check src/coordinator.js && node --check src/app.js && node --check sw.js",
     "benchmark": "node scripts/performance-benchmark.mjs",
     "certify": "npm test && npm run check && npm run benchmark && node scripts/release-certification.mjs"
   }

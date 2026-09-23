@@ -9,6 +9,8 @@ import {
 import { TimerDB } from '../src/db.js';
 import { SessionOwnershipManager } from '../src/device.js';
 
+const repoRoot = path.resolve(new URL('..', import.meta.url).pathname);
+
 function seeded(seed) {
   let x = seed | 0;
   return () => {
@@ -145,11 +147,11 @@ test('production JavaScript contains no arbitrary-code execution primitives', ()
   const src = path.resolve(new URL('../src/', import.meta.url).pathname);
   const files = fs.readdirSync(src).filter((name) => name.endsWith('.js'));
   for (const file of files) {
-    const source = fs.readFileSync(path.join(src, file), 'utf8');
-    assert.doesNotMatch(source, /\beval\s*\(/, `${file} contains eval()`);
-    assert.doesNotMatch(source, /\bnew\s+Function\s*\(/, `${file} contains new Function()`);
-    assert.doesNotMatch(source, /document\.write\s*\(/, `${file} contains document.write()`);
-    for (const match of source.matchAll(/from\s+['"]([^'"]+)['"]/g)) {
+    const text = fs.readFileSync(path.join(src, file), 'utf8');
+    assert.doesNotMatch(text, /\beval\s*\(/, `${file} contains eval()`);
+    assert.doesNotMatch(text, /\bnew\s+Function\s*\(/, `${file} contains new Function()`);
+    assert.doesNotMatch(text, /document\.write\s*\(/, `${file} contains document.write()`);
+    for (const match of text.matchAll(/from\s+['"]([^'"]+)['"]/g)) {
       assert.ok(match[1].startsWith('.'), `${file} imports non-local module ${match[1]}`);
     }
   }
@@ -158,7 +160,23 @@ test('production JavaScript contains no arbitrary-code execution primitives', ()
 test('service-worker shell includes every local application module import', () => {
   const root = path.resolve(new URL('..', import.meta.url).pathname);
   const app = fs.readFileSync(path.join(root, 'src/app.js'), 'utf8');
-  const sw = fs.readFileSync(path.join(root, 'sw.js'), 'utf8');
+  const sw = fs.readFileSync(path.join(repoRoot, 'sw.js'), 'utf8');
   const imports = [...app.matchAll(/from\s+['"](\.\/[^'"]+\.js)['"]/g)].map((match) => `./src/${match[1].replace(/^\.\//, '')}`);
   for (const imported of imports) assert.ok(sw.includes(`'${imported}'`) || sw.includes(`"${imported}"`), `service worker misses ${imported}`);
+});
+
+test('v2.1 persistence source declares multi-runtime schema and singleton migration', () => {
+  const dbSource = fs.readFileSync(path.join(repoRoot, 'src/db.js'), 'utf8');
+  assert.match(dbSource, /const DB_VERSION = 6/);
+  assert.match(dbSource, /createObjectStore\('activeSessions'/);
+  assert.match(dbSource, /legacyActive\.get\('current'\)/);
+  assert.match(dbSource, /legacyActive\.delete\('current'\)/);
+});
+
+test('v2.1 release metadata and offline shell include coordinator', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
+  const sw = fs.readFileSync(path.join(repoRoot, 'sw.js'), 'utf8');
+  assert.equal(pkg.version, '2.1.0');
+  assert.match(sw, /thiepn-timer-v13/);
+  assert.match(sw, /\.\/src\/coordinator\.js/);
 });

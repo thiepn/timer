@@ -1,15 +1,15 @@
-# Timer v2.0 Release Scope
+# Timer v2.1 Release Scope
 
-Timer v2.0 is feature-frozen. The production scope includes:
+Timer v2.1 begins the post-v2 universal-timer architecture while preserving every v2.0 timer mode and data format.
 
-- Countdown, stopwatch/laps, intervals, Tabata, circuits, EMOM, AMRAP, For Time, Boxing, Run/Walk, ladders and pyramids.
-- Custom routines with nested sections/repeats, parameters, reusable blocks, formulas, progression generators and seeded randomization.
-- Sound/voice/haptic cue profiles, per-routine/per-step cue overrides and local custom audio.
-- Focus, Classic, Strength and Wall live layouts with recovery, locking, fullscreen and keyboard operation.
-- Local routine library, history/session review, factual analytics and objective comparable records.
-- Versioned backup/restore, encrypted backups, recovery snapshots, quarantine and portable routine packages.
-- Local-first offline PWA, launcher shortcuts, deep links, single-runtime multi-window ownership, read-only Wall display and optional Media Session controls.
-- Accessibility/i18n architecture, German UI coverage, pseudo/RTL testing, zoom preservation, high contrast and reduced motion.
-- Performance budgets, scale tests and release certification gates.
+Production scope includes:
 
-After this freeze, only correctness, security, compatibility, accessibility and release-documentation changes belong in v2.0.x. New product capability belongs in a later minor/major release.
+- The complete v2.0 countdown, stopwatch, interval, custom-routine, cue, history, backup, accessibility and PWA feature set.
+- A new `TimerCoordinator` above the existing deterministic `TimerEngine`, allowing multiple independent active timer runtimes under one device/runtime owner.
+- Per-runtime active recovery checkpoints with migration from the legacy singleton `active/current` record.
+- Minimal Active Timers UI: background the focused timer, see all active timers on Home, pause/resume an individual timer and focus it again.
+- Explicit completion primitives for Stop, Overtime, Repeat and Start Next. Stop, Overtime and Repeat have coordinator semantics; Start Next is exposed as an orchestration intent for the later Sequence/Completion Actions phase.
+- Shared-device services—Wake Lock, ownership heartbeat, service-worker update deferral and maintenance suspension—remain active until the final active timer ends.
+- Per-runtime cue generations and serialized speech so simultaneous timers share one AudioContext without cancelling or overlapping one another incorrectly.
+
+This release deliberately does **not** attempt the polished Multi-Timer Workspace, generic Saved Timer migration, Sequence Timer UI, chained completion-action editor or native Android background service. Those belong to later roadmap phases.

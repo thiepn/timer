@@ -7,11 +7,12 @@ import {
 import { TimerDB, defaultSettings, requestPersistentStorage, storageEstimate } from './db.js';
 import { CueManager, WakeLockManager, requestNotificationPermission, showCompletionNotification, showActiveSessionNotification, closeTimerNotification, BUILTIN_CUE_PROFILES, SOUND_PACKS, cueProfileById, profileSettings } from './audio.js';
 import { analyzeSession, comparisonFingerprint, comparableSessions, objectiveRecord, factualTrend, summarizeRange, startOfLocalDay, startOfLocalWeek, monthCalendar, sessionsToCsv } from './analytics.js';
-import { createBackupArchive, verifyBackupArchive, encryptBackupArchive, decryptBackupArchive, isLegacyBackup, isEncryptedBackup, isBackupArchive, isRoutinePackage, backupCounts, assertBackupEntityLimits } from './resilience.js';
+import { createBackupArchive, verifyBackupArchive, encryptBackupArchive, decryptBackupArchive, isLegacyBackup, isEncryptedBackup, isBackupArchive, isRoutinePackage, backupCounts } from './resilience.js';
 import { SessionOwnershipManager, MediaSessionManager, parseLaunchCommand, detectDeviceCapabilities } from './device.js';
 import { LOCALE_OPTIONS, resolveLocale, applyDocumentLocale, localizeDOM, translateSource, translateBuiltInLabel, phaseLabel as localizedPhaseLabel, formatDuration, formatDate, formatNumber, t as i18nT } from './i18n.js';
 import { FocusTrap, Announcer, focusMainHeading, isInteractiveTarget, timerEventAnnouncement } from './accessibility.js';
 import { PerformanceMetrics, MaintenanceCoordinator, liveSchedulerPolicy, reduceMotionEnabled } from './performance.js';
+import { TimerCoordinator, COMPLETION_ACTIONS } from './coordinator.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -22,7 +23,7 @@ const ms = (seconds) => Math.max(0, Math.round(Number(seconds || 0) * 1000));
 const sec = (milliseconds) => Math.round(Number(milliseconds || 0) / 1000);
 const mins = (minutes) => ms(Number(minutes || 0) * 60);
 const pct = (n) => `${Math.round(clamp(n || 0, 0, 1) * 100)}%`;
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.1.0';
 
 const BUILDER_META = {
   interval: { name: 'Interval', desc: 'Work / rest repetitions' },
@@ -138,10 +139,6 @@ const state = {
   customSounds: [],
   availableVoices: [],
   sessions: [],
-  historyLoadedAll: false,
-  historyLoading: false,
-  historyVisible: 100,
-  historySearchTimer: 0,
   builder: null,
   builderEditingId: null,
   builderEditingBlockId: null,
@@ -150,6 +147,9 @@ const state = {
   engine: null,
   engineUnsub: null,
   activeMeta: null,
+  activeTimerId: null,
+  finalizingTimers: new Set(),
+  multiTimerTimeout: 0,
   liveRaf: 0,
   liveTimeout: 0,
   liveLastFrame: 0,
@@ -174,12 +174,18 @@ const state = {
   historyQuery: '',
   historyMode: 'all',
   historyMonth: new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime(),
+  historyLoadedAll: false,
+  historyLoading: false,
+  historyVisible: 100,
+  historySearchTimer: 0,
   pendingRestore: null,
   recoverySnapshots: [],
   quarantineItems: [],
   dataHealth: null,
   lastRestoreSnapshotId: null,
   remoteActive: null,
+  remoteActiveSessions: [],
+  remoteFocusedTimerId: null,
   remoteEngine: null,
   remoteRaf: 0,
   remoteTimer: 0,
@@ -195,18 +201,20 @@ const state = {
   bootPerformance: null
 };
 
+const perf = new PerformanceMetrics();
+perf.mark('app:module');
+const maintenance = new MaintenanceCoordinator();
+
 const currentLocale = () => state.locale || resolveLocale(state.settings?.language || 'system');
 const tr = (key, vars = {}) => i18nT(key, currentLocale(), vars);
 const durationLabel = (value, options = {}) => formatDuration(value, currentLocale(), { numberingSystem: state.settings?.numberSystem || 'system', ...options });
 const uiDate = (value, options = {}) => formatDate(value, currentLocale(), options, state.settings?.timeFormat || 'system', state.settings?.numberSystem || 'system');
 const uiNumber = (value, options = {}) => formatNumber(value, currentLocale(), options, state.settings?.numberSystem || 'system');
 
-const perf = new PerformanceMetrics();
-perf.mark('app:module');
-const maintenance = new MaintenanceCoordinator();
 const cue = new CueManager(() => ({ ...state.settings, voice: state.settings.screenReaderOptimized ? false : state.settings.voice }), () => state.cueProfiles, async (id) => state.db.get('customSounds', id));
 const wakeLock = new WakeLockManager();
 const ownership = new SessionOwnershipManager();
+const coordinator = new TimerCoordinator();
 const mediaSession = new MediaSessionManager();
 const sheetFocus = new FocusTrap();
 const main = $('#app-main');
@@ -254,74 +262,135 @@ function clearLaunchQuery() {
   } catch {}
 }
 
+function hasOwnedActiveTimers() { return coordinator.size() > 0; }
+function focusedRuntime() { return state.activeTimerId ? coordinator.get(state.activeTimerId) : null; }
+function focusedView() { return state.activeTimerId ? coordinator.view(state.activeTimerId) : null; }
+
+function syncFocusedRuntime(runtimeId = state.activeTimerId) {
+  const runtime = runtimeId ? coordinator.get(runtimeId) : null;
+  state.activeTimerId = runtime?.id || null;
+  state.engine = runtime?.engine || null;
+  state.activeMeta = runtime?.meta || null;
+  return runtime;
+}
+
 function renderUpdateBanner() {
   const root = $('#update-root');
   if (!root) return;
   if (!state.updateReady) { root.innerHTML = ''; return; }
-  const active = Boolean(state.engine || state.remoteActive);
+  const active = hasOwnedActiveTimers() || Boolean(state.remoteActive);
   const deferred = state.updateDeferred;
-  root.innerHTML = `<div class="update-banner" role="status"><span>${active ? (deferred ? 'Update queued for after the active timer.' : 'Update ready. It will not interrupt the active timer.') : 'Timer update ready.'}</span><button class="btn ${active ? '' : 'primary'}" data-action="apply-update">${active ? 'Update after timer' : 'Update now'}</button></div>`;
+  root.innerHTML = `<div class="update-banner" role="status"><span>${active ? (deferred ? 'Update queued for after active timers.' : 'Update ready. It will not interrupt active timers.') : 'Timer update ready.'}</span><button class="btn ${active ? '' : 'primary'}" data-action="apply-update">${active ? 'Update after timers' : 'Update now'}</button></div>`;
 }
 
 function configureMediaSession() {
-  if (!state.settings.mediaControls || !state.engine || !mediaSession.supported()) { mediaSession.disable(); return; }
+  const runtimeId = state.activeTimerId;
+  const view = focusedView();
+  if (!state.settings.mediaControls || !runtimeId || !view || !mediaSession.supported()) { mediaSession.disable(); return; }
   mediaSession.enable({
-    play: () => { if (state.engine?.view()?.status === 'paused') { state.engine.resume(); updateLiveView(true); } },
-    pause: () => { if (state.engine?.view()?.status === 'running') { state.engine.pause(); updateLiveView(true); } },
-    next: () => { state.engine?.next(); updateLiveView(true); },
-    previous: () => { state.engine?.previous(); updateLiveView(true); },
-    stop: () => { if (state.engine?.view()?.status === 'running') { state.engine.pause(); updateLiveView(true); } }
+    play: () => { if (focusedView()?.status === 'paused') { coordinator.resume(runtimeId); updateLiveView(true); } },
+    pause: () => { if (['running','overtime'].includes(focusedView()?.status)) { coordinator.pause(runtimeId); updateLiveView(true); } },
+    next: () => { coordinator.command(runtimeId, 'next'); updateLiveView(true); },
+    previous: () => { coordinator.command(runtimeId, 'previous'); updateLiveView(true); },
+    stop: () => { if (['running','overtime'].includes(focusedView()?.status)) { coordinator.pause(runtimeId); updateLiveView(true); } }
   });
-  mediaSession.update(state.engine.view());
+  mediaSession.update(view);
 }
 
-function broadcastActiveSnapshot(snapshot = state.engine?.snapshot(), meta = state.activeMeta) {
-  if (!snapshot || !ownership.isOwner()) return;
-  ownership.post('ACTIVE_SNAPSHOT', { snapshot, meta });
+function activeSnapshotBundle() {
+  return { sessions: coordinator.snapshots(), focusedTimerId: state.activeTimerId };
+}
+
+function broadcastActiveSnapshot() {
+  if (!ownership.isOwner()) return;
+  const bundle = activeSnapshotBundle();
+  if (bundle.sessions.length) ownership.post('ACTIVE_SNAPSHOT', bundle);
+  else ownership.post('NO_ACTIVE_TIMERS');
 }
 
 function startOwnershipHeartbeat() {
-  ownership.startHeartbeat(() => state.engine ? { snapshot: state.engine.snapshot(), meta: state.activeMeta } : null, 1500);
+  ownership.startHeartbeat(() => hasOwnedActiveTimers() ? activeSnapshotBundle() : null, 1500);
 }
 
-function setRemoteActive(active) {
-  if (!active?.snapshot || ['completed','cancelled'].includes(active.snapshot.status)) {
+function selectRemoteRecord(bundle) {
+  const sessions = Array.isArray(bundle?.sessions) ? bundle.sessions : (bundle?.snapshot ? [{ id: bundle.snapshot.id, snapshot: bundle.snapshot, meta: bundle.meta }] : []);
+  const live = sessions.filter((record) => record?.snapshot && (record.overtime || !['completed','cancelled'].includes(record.snapshot.status)));
+  if (!live.length) return { sessions: [], focused: null };
+  const focusedId = bundle?.focusedTimerId;
+  const focused = live.find((record) => record.id === focusedId) || live[0];
+  return { sessions: live, focused };
+}
+
+function setRemoteActive(bundle) {
+  const { sessions, focused } = selectRemoteRecord(bundle);
+  state.remoteActiveSessions = structuredClone(sessions);
+  state.remoteFocusedTimerId = focused?.id || null;
+  if (!focused) {
     state.remoteActive = null;
     state.remoteEngine = null;
     cancelAnimationFrame(state.remoteRaf);
+    clearTimeout(state.remoteTimer);
+    state.remoteRaf = 0;
+    state.remoteTimer = 0;
     return;
   }
-  state.remoteActive = { snapshot: structuredClone(active.snapshot), meta: structuredClone(active.meta || active.snapshot.meta || {}) };
-  try { state.remoteEngine = TimerEngine.restore(state.remoteActive.snapshot, new BrowserClock()); }
+  state.remoteActive = structuredClone(focused);
+  try { state.remoteEngine = TimerEngine.restore(focused.snapshot, new BrowserClock()); }
   catch { state.remoteEngine = null; }
+}
+
+function remoteActiveView() {
+  const base = state.remoteEngine?.view?.();
+  const record = state.remoteActive;
+  if (!record?.overtime) return base;
+  const persisted = Math.max(0, Number(record.overtime.accumulatedMs) || 0);
+  const checkpointWallAt = Number(record.overtime.checkpointWallAt);
+  const wallAt = Number.isFinite(checkpointWallAt) ? checkpointWallAt : (Number(record.updatedAt) || Date.now());
+  const elapsed = record.overtime.paused ? persisted : persisted + Math.max(0, Date.now() - wallAt);
+  return {
+    ...(base || {}),
+    status: record.overtime.paused ? 'paused' : 'overtime',
+    overtimeMs: elapsed,
+    current: {
+      ...(base?.current || {}),
+      label: base?.title || record.meta?.title || 'Timer',
+      phase: 'custom',
+      remainingMs: undefined,
+      elapsedMs: elapsed,
+      progress: undefined
+    }
+  };
 }
 
 function renderRemoteActive() {
   cancelAnimationFrame(state.remoteRaf);
   clearTimeout(state.remoteTimer);
+  state.remoteRaf = 0;
+  state.remoteTimer = 0;
   setLiveMode(true);
   const engine = state.remoteEngine;
-  const view = engine?.view?.();
-  if (!engine || !view || ['completed','cancelled'].includes(view.status)) {
-    main.innerHTML = `<section class="remote-session-empty"><div class="brand-mark" aria-hidden="true">◷</div><h1>${state.displayMode ? 'Wall Display' : 'Active Timer'}</h1><p class="muted">No active timer is available from another window.</p>${state.displayMode ? '<button class="btn" data-action="close-display-window">Close display</button>' : '<button class="btn primary" data-action="remote-refresh">Check again</button>'}</section>`;
+  const view = remoteActiveView();
+  if (!engine || !view || (!state.remoteActive?.overtime && ['completed','cancelled'].includes(view.status))) {
+    main.innerHTML = `<section class="remote-session-empty"><div class="brand-mark" aria-hidden="true">◷</div><h1>${state.displayMode ? 'Wall Display' : 'Active Timers'}</h1><p class="muted">No active timer is available from another window.</p>${state.displayMode ? '<button class="btn" data-action="close-display-window">Close display</button>' : '<button class="btn primary" data-action="remote-refresh">Check again</button>'}</section>`;
     return;
   }
+  const count = state.remoteActiveSessions.length;
   if (state.displayMode) {
-    main.innerHTML = `<section id="remote-live" class="live-shell layout-wall remote-display" data-phase="${esc(view.current?.phase || 'custom')}"><div class="live-top"><span id="remote-round" class="pill"></span><span class="pill">Display · read only</span></div><div class="live-main"><div id="remote-phase" class="live-phase"></div><div id="remote-time" class="live-time" role="timer"></div><div id="remote-label" class="live-label"></div></div><div class="remote-display-footer">Controlled by another Timer window</div></section>`;
+    main.innerHTML = `<section id="remote-live" class="live-shell layout-wall remote-display" data-phase="${esc(view.current?.phase || 'custom')}"><div class="live-top"><span id="remote-round" class="pill"></span><span class="pill">Display · read only${count > 1 ? ` · ${count} timers` : ''}</span></div><div class="live-main"><div id="remote-phase" class="live-phase"></div><div id="remote-time" class="live-time" role="timer"></div><div id="remote-label" class="live-label"></div></div><div class="remote-display-footer">Controlled by another Timer window</div></section>`;
   } else {
-    main.innerHTML = `<section class="remote-session"><div class="quick-label">Active in another window</div><div id="remote-time" class="quick-time"></div><h1 id="remote-label"></h1><p id="remote-phase" class="muted"></p><div class="stack"><button class="btn primary big" data-action="takeover-session">Take over here</button><button class="btn" data-action="focus-owner">Focus owner window</button></div><p class="small muted">Only one window owns audio, Wake Lock and session persistence at a time.</p></section>`;
+    main.innerHTML = `<section class="remote-session"><div class="quick-label">${count} active timer${count === 1 ? '' : 's'} in another window</div><div id="remote-time" class="quick-time"></div><h1 id="remote-label"></h1><p id="remote-phase" class="muted"></p><div class="stack"><button class="btn primary big" data-action="takeover-session">Take over all timers here</button><button class="btn" data-action="focus-owner">Focus owner window</button></div><p class="small muted">Only one window owns audio, Wake Lock and timer persistence at a time.</p></section>`;
   }
   const loop = () => {
-    if (!state.remoteEngine || state.engine) return;
+    if (!state.remoteEngine || hasOwnedActiveTimers()) return;
     try { state.remoteEngine.reconcile(); } catch {}
-    const v = state.remoteEngine.view();
-    if (!v || ['completed','cancelled'].includes(v.status)) return;
+    const v = remoteActiveView();
+    if (!v || (!state.remoteActive?.overtime && ['completed','cancelled'].includes(v.status))) return;
     const current = v.current || {};
-    const displayMs = current.remainingMs != null ? current.remainingMs : current.elapsedMs;
-    const text = formatClock(displayMs, { tenths: v.mode === 'stopwatch', countUp: current.remainingMs == null });
+    const displayMs = v.status === 'overtime' ? v.overtimeMs : (current.remainingMs != null ? current.remainingMs : current.elapsedMs);
+    const text = `${v.status === 'overtime' ? '+' : ''}${formatClock(displayMs, { tenths: v.mode === 'stopwatch', countUp: current.remainingMs == null })}`;
     if ($('#remote-time')) $('#remote-time').textContent = text;
     if ($('#remote-label')) $('#remote-label').textContent = current.label || v.title;
-    if ($('#remote-phase')) $('#remote-phase').textContent = v.status === 'paused' ? 'Paused' : (current.phase || 'Time');
+    if ($('#remote-phase')) $('#remote-phase').textContent = v.status === 'paused' ? 'Paused' : v.status === 'overtime' ? 'Overtime' : (current.phase || 'Time');
     if ($('#remote-round')) {
       const round = current.round;
       $('#remote-round').textContent = round ? `Round ${round.current} / ${round.total}` : v.title;
@@ -332,47 +401,70 @@ function renderRemoteActive() {
   loop();
 }
 
-async function restoreOwnedActive(active) {
-  if (!active?.snapshot || ['completed','cancelled'].includes(active.snapshot.status)) return false;
+async function persistRuntime(runtimeId) {
+  const record = coordinator.snapshot(runtimeId);
+  if (!record) return false;
+  await state.db.saveActiveSession(record).catch(() => {});
+  return true;
+}
+
+async function persistAllRuntimes() {
+  await Promise.allSettled(coordinator.snapshots().map((record) => state.db.saveActiveSession(record)));
+}
+
+function focusRuntime(runtimeId, { renderNow = true } = {}) {
+  const runtime = syncFocusedRuntime(runtimeId);
+  if (!runtime) return false;
+  state.completion = null;
+  setRemoteActive(null);
+  configureMediaSession();
+  if (renderNow) renderLive();
+  broadcastActiveSnapshot();
+  return true;
+}
+
+async function restoreOwnedActive(records) {
+  const valid = (records || []).filter((record) => record?.snapshot && (record.overtime || !['completed','cancelled'].includes(record.snapshot.status)));
+  if (!valid.length) return false;
   try {
     setRemoteActive(null);
-    const engine = TimerEngine.restore(active.snapshot, new BrowserClock());
-    state.engine = engine;
-    state.activeMeta = active.meta || active.snapshot.meta || {};
-    cue.beginSession(state.activeMeta);
-    attachEngine(engine, state.activeMeta);
-    if (engine.view()?.status === 'completed') { await finalizeSession(engine.snapshot(), false); return true; }
+    coordinator.restore(valid);
+    if (!coordinator.size()) return false;
     maintenance.suspend('active-session');
+    for (const runtime of coordinator.list()) cue.beginSession(runtime.meta, runtime.id);
+    const preferred = valid.find((record) => record.id === state.launchCommand?.id)?.id || valid[0]?.id || coordinator.list()[0]?.id;
+    syncFocusedRuntime(preferred);
     if (state.settings.keepAwake) wakeLock.acquire();
     configureMediaSession();
     startOwnershipHeartbeat();
+    startCoordinatorScheduler();
     broadcastActiveSnapshot();
-    renderLive();
+    if (!state.displayMode) renderLive();
     return true;
   } catch {
+    coordinator.clear();
+    syncFocusedRuntime(null);
     return false;
   }
 }
 
 async function relinquishRuntimeOwnership() {
   if (!ownership.isOwner()) return;
+  const bundle = activeSnapshotBundle();
+  await persistAllRuntimes();
+  stopLiveScheduler();
+  stopCoordinatorScheduler();
   maintenance.resume('active-session');
-  const snapshot = state.engine?.snapshot();
-  const meta = state.activeMeta;
-  if (snapshot) await state.db.saveActive(snapshot, meta).catch(() => {});
-  cancelAnimationFrame(state.liveRaf);
-  cue.endSession();
+  cue.endAllSessions();
   await wakeLock.release();
-  await closeTimerNotification('timer-active');
+  for (const record of bundle.sessions) await closeTimerNotification(`timer-active:${record.id}`);
   mediaSession.disable();
-  state.engineUnsub?.();
-  state.engineUnsub = null;
-  state.engine = null;
-  state.activeMeta = null;
-  if (snapshot) setRemoteActive({ snapshot, meta });
+  coordinator.clear();
+  syncFocusedRuntime(null);
+  if (bundle.sessions.length) setRemoteActive(bundle);
   ownership.stopHeartbeat();
   await ownership.release();
-  ownership.post('OWNER_RELEASED', { sessionId: snapshot?.id });
+  ownership.post('OWNER_RELEASED', { timerIds: bundle.sessions.map((record) => record.id) });
   renderRemoteActive();
   renderUpdateBanner();
 }
@@ -384,31 +476,37 @@ async function takeOverActiveSession() {
   for (let i = 0; i < 20; i++) {
     if (await ownership.acquire()) {
       state.pendingTakeover = false;
-      const active = await state.db.getActive().catch(() => null);
-      if (active?.snapshot && await restoreOwnedActive(active)) return;
+      const records = await state.db.getActiveSessions().catch(() => []);
+      if (records.length && await restoreOwnedActive(records)) return;
       await ownership.release();
       setRemoteActive(null);
       render();
-      return toast('The active timer has already ended.');
+      return toast('The active timers have already ended.');
     }
     await sleep(100);
   }
   state.pendingTakeover = false;
-  toast('Could not take over the timer yet. Try again.', 3600);
+  toast('Could not take over the timers yet. Try again.', 3600);
 }
 
 async function handleOwnershipMessage(message) {
   if (!message?.type) return;
   if (message.type === 'ACTIVE_SNAPSHOT' && !ownership.isOwner()) {
     setRemoteActive(message);
-    if (!state.engine) renderRemoteActive();
+    if (!hasOwnedActiveTimers()) renderRemoteActive();
     return;
   }
-  if (message.type === 'SESSION_ENDED' && !ownership.isOwner()) {
+  if (message.type === 'NO_ACTIVE_TIMERS' && !ownership.isOwner()) {
     setRemoteActive(null);
     if (state.displayMode) renderRemoteActive(); else render();
     renderUpdateBanner();
     if (state.updateDeferred) setTimeout(() => applyUpdate(), 250);
+    return;
+  }
+  if (message.type === 'TIMER_ENDED' && !ownership.isOwner()) {
+    const remaining = state.remoteActiveSessions.filter((record) => record.id !== message.runtimeId);
+    setRemoteActive({ sessions: remaining, focusedTimerId: state.remoteFocusedTimerId });
+    if (!state.remoteActive) { if (state.displayMode) renderRemoteActive(); else render(); }
     return;
   }
   if (message.type === 'TAKEOVER_REQUEST' && ownership.isOwner()) {
@@ -424,7 +522,7 @@ ownership.onMessage(handleOwnershipMessage);
 
 async function applyUpdate() {
   if (!state.updateReady || !state.swRegistration) return;
-  if (state.engine || state.remoteActive) {
+  if (hasOwnedActiveTimers() || state.remoteActive) {
     state.updateDeferred = true;
     renderUpdateBanner();
     return toast('Update queued for after the active timer.');
@@ -444,10 +542,14 @@ function markUpdateReady(registration) {
 async function handleLaunchCommand(command = { type: 'HOME' }) {
   if (!command || command.type === 'HOME') { state.route = 'timer'; return render(); }
   if (command.type === 'INVALID') { state.route = 'timer'; render(); return toast(command.reason || 'Invalid launch request.'); }
-  if (state.engine || state.remoteActive) {
-    if (command.type === 'DISPLAY') { state.displayMode = true; return renderRemoteActive(); }
-    if (command.type === 'ACTIVE_SESSION') return state.engine ? renderLive() : renderRemoteActive();
-    return state.engine ? renderLive() : renderRemoteActive();
+  if (hasOwnedActiveTimers() || state.remoteActive) {
+    if (command.type === 'DISPLAY') { state.displayMode = true; return state.engine ? renderLive() : renderRemoteActive(); }
+    if (command.type === 'ACTIVE_SESSION') {
+      if (hasOwnedActiveTimers()) return focusRuntime(state.activeTimerId || coordinator.list()[0]?.id);
+      return renderRemoteActive();
+    }
+    if (state.engine) return renderLive();
+    if (state.remoteActive) return renderRemoteActive();
   }
   if (command.type === 'QUICK') { state.route = 'timer'; return render(); }
   if (command.type === 'STOPWATCH') return openBuilder('stopwatch');
@@ -460,7 +562,9 @@ async function handleLaunchCommand(command = { type: 'HOME' }) {
   if (command.type === 'TIMER') return startSession(buildCountdown({ durationMs: command.durationMs, label: `${durationLabel(command.durationMs)} Timer` }), { mode: 'countdown', title: `${durationLabel(command.durationMs)} Timer`, config: { durationMs: command.durationMs } });
   if (command.type === 'ROUTINE') return startRoutine(command.id);
   if (command.type === 'SESSION') {
-    state.route = 'history'; render();
+    state.route = 'history';
+    await ensureFullHistory();
+    render();
     return setTimeout(() => showSessionDetail(command.id), 0);
   }
   if (command.type === 'ACTIVE_SESSION') { state.route = 'timer'; render(); return toast('No active timer.'); }
@@ -490,7 +594,7 @@ function setRoute(route) {
   state.builderEditingBlockId = null;
   if (route === 'history') {
     state.historyVisible = 100;
-    void ensureFullHistory();
+    ensureFullHistory();
   }
   render();
   focusMainHeading(main);
@@ -530,6 +634,7 @@ function renderTimerHome() {
   const recent = state.sessions.slice(0, 3);
   main.innerHTML = `
     <div class="page-head"><div><h1>Timer</h1><p>Start fast. Configure only when you need it.</p></div></div>
+    ${coordinator.size() ? `<section class="section active-timers-section"><div class="row-between"><h2 class="section-title" style="margin:0">Active Timers</h2><span class="pill">${coordinator.size()}</span></div><div class="list" style="margin-top:12px">${coordinator.list().map(activeTimerCard).join('')}</div></section>` : ''}
     <section class="card quick-card">
       <div class="quick-label">Quick Timer</div>
       <button class="quick-time" data-action="edit-quick" aria-label="Set quick timer duration">${formatClock(state.quickMs)}</button>
@@ -563,6 +668,16 @@ function renderTimerHome() {
         ${recent.length ? recent.map(sessionRow).join('') : `<div class="card empty">Completed timers will appear here.</div>`}
       </div>
     </section>`;
+}
+
+function activeTimerCard(runtime) {
+  const view = coordinator.view(runtime.id);
+  if (!view) return '';
+  const current = view.current || {};
+  const value = view.status === 'overtime' ? view.overtimeMs : (current.remainingMs != null ? current.remainingMs : current.elapsedMs);
+  const time = `${view.status === 'overtime' ? '+' : ''}${formatClock(value || 0, { countUp: current.remainingMs == null })}`;
+  const status = view.status === 'paused' ? 'Paused' : view.status === 'overtime' ? 'Overtime' : translateBuiltInLabel(current.label || view.title, currentLocale());
+  return `<div class="list-row active-timer-card" data-active-runtime="${esc(runtime.id)}"><button class="list-row-main" data-action="focus-active" data-id="${esc(runtime.id)}"><div class="list-row-title">${esc(view.title || runtime.meta?.title || 'Timer')}</div><div class="list-row-meta active-timer-status">${esc(status)}</div></button><strong class="active-timer-time">${esc(time)}</strong><button class="icon-btn" data-action="active-toggle" data-id="${esc(runtime.id)}" aria-label="Pause or resume ${esc(view.title || 'timer')}">${view.status === 'paused' ? '▶' : 'Ⅱ'}</button></div>`;
 }
 
 function modeCard(type) {
@@ -683,7 +798,7 @@ function renderBuilder() {
     body = `${field('Start', 'start', c.start, { min: 1, max: 3600, suffix: 'sec' })}${field('Peak', 'peak', c.peak, { min: 1, max: 3600, suffix: 'sec' })}${field('Step', 'step', c.step, { min: 1, max: 3600, suffix: 'sec' })}${field('Rest', 'rest', c.rest, { min: 0, max: 3600, suffix: 'sec' })}`;
   } else if (type === 'custom') {
     c.parameters ||= [];
-    body = `${renderCustomParameters(c.parameters)}${editingBlock ? '' : renderCustomCompileOptions(c)}<div class="field"><div class="row-between"><div><div class="field-label">Routine structure</div><div class="small muted">Nest patterns, formulas, generators, sections and reusable blocks. Formulas resolve before the workout starts.</div></div><button class="btn" data-action="custom-add" data-parent="">＋ Add</button></div><div class="custom-tree">${renderCustomTree(c.nodes || [])}</div>${!(c.nodes || []).length ? `<div class="empty">Add a step, repeat, generator, section, or reusable block to begin.</div>` : ''}<div class="row" style="flex-wrap:wrap"><button class="btn" data-action="custom-preview">Preview compiled plan</button>${state.blocks.length ? `<span class="pill">${state.blocks.length} reusable block${state.blocks.length === 1 ? '' : 's'}</span>` : ''}</div></div>`;
+    body = `${renderCustomParameters(c.parameters)}${editingBlock ? '' : renderCustomCompileOptions(c)}<div class="field"><div class="row-between"><div><div class="field-label">Routine structure</div><div class="small muted">Nest patterns, formulas, generators, sections and reusable blocks. Formulas resolve before the timer starts.</div></div><button class="btn" data-action="custom-add" data-parent="">＋ Add</button></div><div class="custom-tree">${renderCustomTree(c.nodes || [])}</div>${!(c.nodes || []).length ? `<div class="empty">Add a step, repeat, generator, section, or reusable block to begin.</div>` : ''}<div class="row" style="flex-wrap:wrap"><button class="btn" data-action="custom-preview">Preview compiled plan</button>${state.blocks.length ? `<span class="pill">${state.blocks.length} reusable block${state.blocks.length === 1 ? '' : 's'}</span>` : ''}</div></div>`;
   } else if (type === 'stopwatch') {
     body = `<div class="card card-pad"><strong>Stopwatch</strong><p class="muted">Open-ended timing with pause, resume and lap recording.</p></div>`;
   }
@@ -1050,7 +1165,7 @@ async function extractCustomBlock(path) {
   const info = customParentCollection(path);
   const node = customNodeAt(path);
   if (!info || !node || node.type === 'block') return;
-  const title = prompt('Reusable block name', node.label || (node.type === 'repeat' ? 'Repeat Block' : node.type === 'section' ? 'Section Block' : 'Workout Block'));
+  const title = prompt('Reusable block name', node.label || (node.type === 'repeat' ? 'Repeat Block' : node.type === 'section' ? 'Section Block' : 'Timer Block'));
   if (!title?.trim()) return;
   const refs = new Set(collectCustomParameterRefs([node], state.builder.config.parameters || []));
   const parameters = (state.builder.config.parameters || []).filter((parameter) => refs.has(parameter.id)).map((parameter) => structuredClone(parameter));
@@ -1298,61 +1413,41 @@ async function startRoutine(id) {
   await startSession(plan, { ...metaForType(routine.type, routine.config, routine.cueOverrides), title: routine.title, routineId: routine.id });
 }
 
-async function startSession(plan, meta) {
-  if (state.engine) return toast('A timer is already running.');
-  maintenance.suspend('active-session');
+async function startSession(plan, meta, options = {}) {
   if (!ownership.isOwner() && !await ownership.acquire()) {
-    const active = await state.db.getActive().catch(() => null);
-    if (active?.snapshot) { setRemoteActive(active); renderRemoteActive(); }
-    return toast('Another Timer window owns the active runtime.', 3600);
+    const records = await state.db.getActiveSessions().catch(() => []);
+    if (records.length) { setRemoteActive({ sessions: records }); renderRemoteActive(); }
+    return toast('Another Timer window owns the active runtimes.', 3600);
   }
+  const firstRuntime = coordinator.size() === 0;
   state.completion = null;
-  state.finalized = false;
+  if (firstRuntime) maintenance.suspend('active-session');
   setRemoteActive(null);
   await cue.init();
-  cue.beginSession(meta);
-  const engine = new TimerEngine(new BrowserClock());
-  attachEngine(engine, meta);
-  engine.start(plan, meta);
-  state.engine = engine;
-  state.activeMeta = meta;
-  await state.db.saveActive(engine.snapshot(), meta).catch(() => toast('Recovery checkpoint could not be saved.'));
+  const runtimeId = uid('timer');
+  cue.beginSession(meta, runtimeId);
+  const runtime = coordinator.start(plan, meta, {
+    runtimeId,
+    completionAction: options.completionAction || meta?.completionAction || COMPLETION_ACTIONS.STOP
+  });
+  await persistRuntime(runtime.id).catch(() => toast('Recovery checkpoint could not be saved.'));
   if (state.settings.keepAwake) wakeLock.acquire();
-  configureMediaSession();
   startOwnershipHeartbeat();
+  startCoordinatorScheduler();
   broadcastActiveSnapshot();
   renderUpdateBanner();
-  renderLive();
+  if (options.background) {
+    state.route = 'timer';
+    syncFocusedRuntime(null);
+    mediaSession.disable();
+    render();
+  } else {
+    focusRuntime(runtime.id);
+  }
+  return runtime;
 }
 
-function attachEngine(engine, meta) {
-  state.engineUnsub?.();
-  state.engineUnsub = engine.subscribe((event, snapshot) => {
-    cue.onEvent(event, snapshot);
-    const announcement = timerEventAnnouncement(event, {
-      phaseLabel: (phase) => localizedPhaseLabel(phase, currentLocale()),
-      translateLabel: (label) => translateBuiltInLabel(label, currentLocale()),
-      durationText: (value) => durationLabel(value, { style: 'long' }),
-      t: (key, vars) => tr(key, vars)
-    });
-    if (announcement) announcer.announce(announcement, { priority: event.type === 'session-completed' ? 'assertive' : 'polite' });
-    mediaSession.update(engine.view());
-    broadcastActiveSnapshot(snapshot, meta);
-    if (!['session-completed', 'session-cancelled'].includes(event.type)) state.db.saveActive(snapshot, meta).catch(() => {});
-    if (event.type === 'session-completed' || event.type === 'session-cancelled') finalizeSession(snapshot, event.type === 'session-cancelled');
-  });
-}
-
-async function finalizeSession(snapshot, cancelled = false) {
-  if (state.finalized) return;
-  state.finalized = true;
-  stopLiveScheduler();
-  maintenance.resume('active-session');
-  await wakeLock.release();
-  await closeTimerNotification('timer-active');
-  cue.endSession();
-  mediaSession.disable();
-  ownership.stopHeartbeat();
+function buildSessionRecord(snapshot, cancelled = false) {
   const plan = snapshot.plan;
   const activeDurationMs = Number.isFinite(snapshot.finalElapsedMs)
     ? Math.max(0, snapshot.finalElapsedMs)
@@ -1384,6 +1479,7 @@ async function finalizeSession(snapshot, cancelled = false) {
     activeDurationMs,
     plannedDurationMs: estimatePlanDuration(plan),
     pausedMs: snapshot.pausedTotalMs || 0,
+    overtimeMs: Math.max(0, Number(snapshot.overtimeMs) || 0),
     completionReason: snapshot.completionReason || (cancelled ? 'cancelled' : 'finished'),
     data: snapshot.data || {},
     phaseTotals: structuredClone(snapshot.phaseTotals || {}),
@@ -1392,25 +1488,150 @@ async function finalizeSession(snapshot, cancelled = false) {
     workMs, restMs, otherMs
   };
   record.comparisonFingerprint = comparisonFingerprint(record);
+  return record;
+}
+
+async function saveCompletedSnapshot(snapshot, cancelled = false) {
+  const record = buildSessionRecord(snapshot, cancelled);
   if (!cancelled) await state.db.put('sessions', record).catch(() => toast('Session history could not be saved.'));
-  await state.db.clearActive(snapshot.id).catch(() => {});
-  ownership.post('SESSION_ENDED', { sessionId: snapshot.id });
-  await ownership.release();
-  state.engineUnsub?.();
-  state.engineUnsub = null;
-  state.engine = null;
-  state.activeMeta = null;
-  state.liveLocked = false;
-  state.controlsHidden = false;
-  await loadCollections();
-  if (!cancelled) {
-    state.completion = record;
-    if (state.settings.notifications) showCompletionNotification(translateSource('Timer complete', currentLocale()), record.title, { sessionId: record.id });
+  return record;
+}
+
+async function finalizeRuntime(runtimeId, snapshot, cancelled = false) {
+  if (!runtimeId || state.finalizingTimers.has(runtimeId)) return;
+  state.finalizingTimers.add(runtimeId);
+  const wasFocused = state.activeTimerId === runtimeId;
+  try {
+    const record = await saveCompletedSnapshot(snapshot, cancelled);
+    await state.db.clearActiveSession(runtimeId, snapshot.id).catch(() => {});
+    cue.endSession(runtimeId);
+    await closeTimerNotification(`timer-active:${runtimeId}`);
+    coordinator.remove(runtimeId);
+    ownership.post('TIMER_ENDED', { runtimeId, sessionId: snapshot.id });
+
+    if (wasFocused) {
+      stopLiveScheduler();
+      syncFocusedRuntime(null);
+      mediaSession.disable();
+      state.liveLocked = false;
+      state.controlsHidden = false;
+    }
+
+    if (!cancelled) {
+      if (state.settings.notifications) showCompletionNotification(translateSource('Timer complete', currentLocale()), record.title, { sessionId: record.id });
+      if (wasFocused) state.completion = record;
+      else toast(`${record.title} complete.`, 3200);
+    }
+
+    await loadCollections();
+    if (!coordinator.size()) {
+      stopCoordinatorScheduler();
+      maintenance.resume('active-session');
+      await wakeLock.release();
+      ownership.stopHeartbeat();
+      await ownership.release();
+      if (state.updateDeferred) setTimeout(() => applyUpdate(), 250);
+    } else {
+      if (state.settings.keepAwake) wakeLock.acquire();
+      startOwnershipHeartbeat();
+    }
+    broadcastActiveSnapshot();
+    renderUpdateBanner();
+    if (wasFocused || !state.engine) render();
+    else updateActiveTimerCards();
+    if (wasFocused) focusMainHeading(main);
+  } finally {
+    state.finalizingTimers.delete(runtimeId);
   }
-  render();
-  focusMainHeading(main);
-  renderUpdateBanner();
-  if (state.updateDeferred) setTimeout(() => applyUpdate(), 250);
+}
+
+async function handleCoordinatorEvent(event) {
+  const runtimeId = event.runtimeId;
+  if (!runtimeId) return;
+  const runtime = coordinator.get(runtimeId);
+  if (event.type === 'engine-event') {
+    const engineEvent = event.engineEvent;
+    const snapshot = event.snapshot;
+    cue.onEvent(engineEvent, snapshot, runtimeId);
+    if (state.activeTimerId === runtimeId) {
+      if (runtime && state.engine !== runtime.engine) syncFocusedRuntime(runtimeId);
+      const announcement = timerEventAnnouncement(engineEvent, {
+        phaseLabel: (phase) => localizedPhaseLabel(phase, currentLocale()),
+        translateLabel: (label) => translateBuiltInLabel(label, currentLocale()),
+        durationText: (value) => durationLabel(value, { style: 'long' }),
+        t: (key, vars) => tr(key, vars)
+      });
+      if (announcement) announcer.announce(announcement, { priority: engineEvent.type === 'session-completed' ? 'assertive' : 'polite' });
+      mediaSession.update(focusedView() || runtime?.engine?.view?.());
+    }
+    if (!['session-completed', 'session-cancelled'].includes(engineEvent.type)) void persistRuntime(runtimeId);
+    broadcastActiveSnapshot();
+    updateActiveTimerCards();
+    return;
+  }
+  if (event.type === 'overtime-started' || event.type === 'overtime-paused' || event.type === 'overtime-resumed') {
+    void persistRuntime(runtimeId);
+    broadcastActiveSnapshot();
+    if (state.activeTimerId === runtimeId) updateLiveView(true);
+    return;
+  }
+  if (event.type === 'cycle-completed') {
+    await saveCompletedSnapshot(event.snapshot, false);
+    return;
+  }
+  if (event.type === 'cycle-restarted') {
+    if (state.activeTimerId === runtimeId) syncFocusedRuntime(runtimeId);
+    void persistRuntime(runtimeId);
+    broadcastActiveSnapshot();
+    if (state.activeTimerId === runtimeId) renderLive();
+    return;
+  }
+  if (event.type === 'runtime-terminal') {
+    await finalizeRuntime(runtimeId, event.snapshot, Boolean(event.cancelled));
+  }
+}
+
+coordinator.subscribe((event) => { void handleCoordinatorEvent(event); });
+
+function stopCoordinatorScheduler() {
+  clearTimeout(state.multiTimerTimeout);
+  state.multiTimerTimeout = 0;
+}
+
+function startCoordinatorScheduler() {
+  if (state.multiTimerTimeout || !coordinator.size()) return;
+  const loop = () => {
+    state.multiTimerTimeout = 0;
+    if (!coordinator.size() || !ownership.isOwner()) return;
+    const focused = state.activeTimerId;
+    for (const runtime of coordinator.list()) {
+      if (!(focused === runtime.id && document.visibilityState === 'visible')) {
+        try { coordinator.reconcile(runtime.id); } catch {}
+      }
+      const view = coordinator.view(runtime.id);
+      if (view && !['completed','cancelled'].includes(view.status)) cue.tick(view, runtime.engine.snapshot(), runtime.id);
+    }
+    updateActiveTimerCards();
+    const delay = document.visibilityState === 'visible' ? 250 : 1000;
+    state.multiTimerTimeout = setTimeout(loop, delay);
+  };
+  state.multiTimerTimeout = setTimeout(loop, 0);
+}
+
+function updateActiveTimerCards() {
+  for (const card of $$('[data-active-runtime]')) {
+    const runtimeId = card.dataset.activeRuntime;
+    const view = coordinator.view(runtimeId);
+    if (!view) { card.remove(); continue; }
+    const current = view.current || {};
+    const value = view.status === 'overtime' ? view.overtimeMs : (current.remainingMs != null ? current.remainingMs : current.elapsedMs);
+    const time = $('.active-timer-time', card);
+    if (time) time.textContent = `${view.status === 'overtime' ? '+' : ''}${formatClock(value || 0, { countUp: current.remainingMs == null })}`;
+    const status = $('.active-timer-status', card);
+    if (status) status.textContent = view.status === 'paused' ? 'Paused' : view.status === 'overtime' ? 'Overtime' : translateBuiltInLabel(current.label || view.title, currentLocale());
+    const toggle = $('[data-action="active-toggle"]', card);
+    if (toggle) toggle.textContent = view.status === 'paused' ? '▶' : 'Ⅱ';
+  }
 }
 
 function stopLiveScheduler() {
@@ -1422,32 +1643,27 @@ function stopLiveScheduler() {
 }
 
 function currentLiveSchedulerPolicy() {
-  const view = state.engine?.view?.();
+  const v = focusedView();
+  if (!v) return { kind: 'idle', intervalMs: 0, minFrameMs: 0 };
   return liveSchedulerPolicy({
     visible: document.visibilityState === 'visible',
-    status: view?.status || 'idle',
-    mode: view?.mode || 'generic',
-    layout: state.settings.layout || 'focus',
-    progressKnown: view?.current?.progress != null,
+    status: v.status === 'overtime' ? 'running' : v.status,
+    mode: v.mode,
+    layout: state.settings.layout,
+    progressKnown: v.current?.progress != null,
     reducedMotion: reduceMotionEnabled(state.settings.reduceMotion)
   });
 }
 
-function runLiveTick(timestamp = performance.now()) {
-  if (!state.engine) return stopLiveScheduler();
-  state.engine.reconcile();
-  if (!state.engine) return stopLiveScheduler();
-  const view = state.engine.view();
-  cue.tick(view, state.engine.session);
+function runLiveTick() {
+  if (!state.engine || !state.activeTimerId) return false;
+  try { coordinator.reconcile(state.activeTimerId); } catch {}
+  const runtime = focusedRuntime();
+  const view = focusedView();
+  if (!runtime || !view || ['completed', 'cancelled'].includes(view.status)) return false;
+  cue.tick(view, runtime.engine.snapshot(), runtime.id);
   updateLiveView(false);
-  const policy = currentLiveSchedulerPolicy();
-  if (policy.kind !== state.liveSchedulerKind) return startLiveScheduler();
-  if (policy.kind === 'animation') {
-    if (timestamp - state.liveLastFrame >= policy.minFrameMs) state.liveLastFrame = timestamp;
-    state.liveRaf = requestAnimationFrame(runLiveTick);
-  } else if (policy.kind === 'timeout') {
-    state.liveTimeout = setTimeout(() => runLiveTick(performance.now()), policy.intervalMs);
-  } else stopLiveScheduler();
+  return Boolean(state.engine);
 }
 
 function startLiveScheduler() {
@@ -1455,26 +1671,49 @@ function startLiveScheduler() {
   if (!state.engine) return;
   const policy = currentLiveSchedulerPolicy();
   state.liveSchedulerKind = policy.kind;
+  if (policy.kind === 'idle') return;
   if (policy.kind === 'animation') {
     state.liveLastFrame = 0;
-    state.liveRaf = requestAnimationFrame(runLiveTick);
-  } else if (policy.kind === 'timeout') {
-    state.liveTimeout = setTimeout(() => runLiveTick(performance.now()), policy.intervalMs);
+    const loop = (timestamp) => {
+      if (!state.engine) return;
+      const nextPolicy = currentLiveSchedulerPolicy();
+      if (nextPolicy.kind !== 'animation') return startLiveScheduler();
+      if (!state.liveLastFrame || timestamp - state.liveLastFrame >= nextPolicy.minFrameMs) {
+        state.liveLastFrame = timestamp;
+        if (!runLiveTick()) return;
+      }
+      state.liveRaf = requestAnimationFrame(loop);
+    };
+    state.liveRaf = requestAnimationFrame(loop);
+    return;
   }
+  const loop = () => {
+    if (!state.engine) return;
+    const nextPolicy = currentLiveSchedulerPolicy();
+    if (nextPolicy.kind !== 'timeout') return startLiveScheduler();
+    if (!runLiveTick()) return;
+    state.liveTimeout = setTimeout(loop, nextPolicy.intervalMs);
+  };
+  state.liveTimeout = setTimeout(loop, policy.intervalMs);
 }
 
 function renderLive() {
   if (!state.engine) return;
   setLiveMode(true);
-  state.engine.reconcile();
+  if (state.activeTimerId) coordinator.reconcile(state.activeTimerId);
   if (!state.engine) return;
-  const v = state.engine.view();
+  const v = focusedView();
+  if (!v) return;
   document.title = `${v.status === 'paused' ? translateSource('Paused', currentLocale()) : translateBuiltInLabel(v.current?.label || 'Timer', currentLocale())} — Timer`;
+  state.liveSemanticKey = '';
+  state.liveModeKey = '';
+  state.lastProgress = -1;
+  state.lastLiveSecond = null;
   main.innerHTML = `
     <section id="live-shell" class="live-shell layout-${esc(state.settings.layout)} ${v.status === 'paused' ? 'paused' : ''}" data-phase="${esc(v.current?.phase || 'custom')}">
       <div class="live-top">
         <span id="live-round" class="pill"></span>
-        <div class="row"><button class="icon-btn" data-action="live-mute" aria-label="Toggle cues">${cue.muted ? '🔇' : '🔊'}</button><button class="icon-btn" data-action="live-more" aria-label="More workout actions">⋯</button></div>
+        <div class="row"><button class="icon-btn" data-action="live-mute" aria-label="Toggle cues">${cue.muted ? '🔇' : '🔊'}</button><button class="icon-btn" data-action="live-more" aria-label="More timer actions">⋯</button></div>
       </div>
       <div class="live-main">
         <div id="live-phase" class="live-phase"></div>
@@ -1495,8 +1734,6 @@ function renderLive() {
       </div>
       ${state.liveLocked ? `<div class="lock-overlay"><button class="unlock-btn" data-action="live-unlock">🔒 Unlock controls</button></div>` : ''}
     </section>`;
-  state.liveSemanticKey = '';
-  state.liveModeKey = '';
   updateLiveView(true);
   setupWallAutoHide();
   startLiveScheduler();
@@ -1505,15 +1742,29 @@ function renderLive() {
 function updateLiveView(force = false) {
   const engine = state.engine;
   if (!engine) return;
-  const v = engine.view();
+  const v = focusedView();
   if (!v || v.status === 'completed' || v.status === 'cancelled') return;
   const current = v.current || {};
   const displayMs = current.remainingMs != null ? current.remainingMs : current.elapsedMs;
   const isCountUp = current.remainingMs == null;
   const tenths = v.mode === 'stopwatch';
-  const text = formatClock(displayMs, { tenths, countUp: isCountUp });
+  const text = `${v.status === 'overtime' ? '+' : ''}${formatClock(displayMs, { tenths, countUp: isCountUp })}`;
   const liveTime = $('#live-time');
-  if (force || liveTime?.textContent !== text) liveTime.textContent = text;
+  const timeChanged = force || liveTime?.textContent !== text;
+  if (timeChanged && liveTime) {
+    liveTime.textContent = text;
+    liveTime.setAttribute('aria-label', current.remainingMs != null ? tr('a11y.remaining', { duration: durationLabel(current.remainingMs, { style: 'long' }) }) : `${translateBuiltInLabel(current.label || v.title, currentLocale())} ${durationLabel(current.elapsedMs || 0, { style: 'long' })}`);
+  }
+
+  const p = current.progress ?? 0;
+  const progressPercent = current.progress == null ? -1 : Math.round(clamp(p, 0, 1) * 100);
+  if (force || progressPercent !== state.lastProgress || state.liveSchedulerKind === 'animation') {
+    $('#live-progress')?.style.setProperty('transform', `scaleX(${clamp(p, 0, 1)})`);
+    const progressTrack = $('#live-progress-track');
+    if (current.progress == null) progressTrack?.removeAttribute('aria-valuenow');
+    else if (force || progressPercent !== state.lastProgress) progressTrack?.setAttribute('aria-valuenow', String(progressPercent));
+    state.lastProgress = progressPercent;
+  }
 
   const round = current.round;
   const blockLabel = current.blockPath?.at(-1)?.title;
@@ -1524,43 +1775,30 @@ function updateLiveView(force = false) {
   const contextLabel = [blockLabel, sectionLabel, generatorLabel, roundLabel].filter(Boolean).join(' · ');
   const next = v.next;
   const semanticKey = [
-    v.status, current.id, current.phase, current.label, current.target, contextLabel,
-    next?.id, next?.label, state.settings.layout, state.liveLocked, cue.muted
+    v.status, v.mode, current.id || '', current.phase || '', current.label || '', current.target || '',
+    current.restingUntilDeadline ? 1 : 0, contextLabel, next?.id || '', next?.label || '', cue.muted ? 1 : 0
   ].join('|');
 
-  if (force || state.liveSemanticKey !== semanticKey) {
-    state.liveSemanticKey = semanticKey;
-    const semanticPhase = v.status === 'paused' ? translateSource('Paused', currentLocale()) : localizedPhaseLabel(current.phase || (isCountUp ? 'custom' : 'work'), currentLocale());
+  if (force || semanticKey !== state.liveSemanticKey) {
+    const semanticPhase = v.status === 'paused' ? translateSource('Paused', currentLocale()) : v.status === 'overtime' ? 'Overtime' : localizedPhaseLabel(current.phase || (isCountUp ? 'custom' : 'work'), currentLocale());
     $('#live-phase').textContent = semanticPhase;
     $('#live-label').textContent = translateBuiltInLabel(current.label || v.title, currentLocale());
     $('#live-target').textContent = current.target ? String(current.target) : '';
     $('#live-round').textContent = contextLabel || (v.mode === 'stopwatch' ? translateSource('Stopwatch', currentLocale()) : translateBuiltInLabel(v.title, currentLocale()));
     $('#live-next').innerHTML = next ? `${translateSource('Next', currentLocale())}<br><strong>${esc(translateBuiltInLabel(next.label, currentLocale()))}${next.durationMs ? ` · ${formatClock(next.durationMs)}` : ''}</strong>` : '';
     const shell = $('#live-shell');
-    shell.dataset.phase = current.phase || 'custom';
-    shell.classList.toggle('paused', v.status === 'paused');
-    shell.classList.toggle('controls-hidden', state.controlsHidden && state.settings.layout === 'wall');
+    if (shell) {
+      shell.dataset.phase = current.phase || 'custom';
+      shell.classList.toggle('paused', v.status === 'paused');
+      shell.classList.toggle('controls-hidden', state.controlsHidden && state.settings.layout === 'wall');
+    }
     $('#pause-btn').textContent = translateSource(v.status === 'paused' ? 'Resume' : 'Pause', currentLocale());
     const canAdjust = v.status === 'running' && current.remainingMs != null;
     $('#adjust-minus').disabled = !canAdjust;
     $('#adjust-plus').disabled = !canAdjust;
-    updateSecondaryAction(v);
-  }
-
-  liveTime?.setAttribute('aria-label', current.remainingMs != null ? tr('a11y.remaining', { duration: durationLabel(current.remainingMs, { style: 'long' }) }) : `${translateBuiltInLabel(current.label || v.title, currentLocale())} ${durationLabel(current.elapsedMs || 0, { style: 'long' })}`);
-  const p = current.progress ?? 0;
-  $('#live-progress').style.transform = `scaleX(${clamp(p, 0, 1)})`;
-  const progressTrack = $('#live-progress-track');
-  if (current.progress == null) progressTrack?.removeAttribute('aria-valuenow');
-  else {
-    const percent = String(Math.round(clamp(p, 0, 1) * 100));
-    if (progressTrack?.getAttribute('aria-valuenow') !== percent) progressTrack?.setAttribute('aria-valuenow', percent);
-  }
-
-  const modeKey = `${v.mode}|${current.id || ''}|${JSON.stringify(v.data || {})}`;
-  if (force || modeKey !== state.liveModeKey) {
-    state.liveModeKey = modeKey;
     renderModePanel(v);
+    updateSecondaryAction(v);
+    state.liveSemanticKey = semanticKey;
   }
 }
 
@@ -1586,7 +1824,8 @@ function updateSecondaryAction(v) {
   const btn = $('#live-secondary');
   if (!btn) return;
   const current = v.current || {};
-  if (v.mode === 'stopwatch') { btn.textContent = translateSource('Lap', currentLocale()); btn.dataset.action = 'live-lap'; btn.disabled = v.status === 'paused'; }
+  if (v.status === 'overtime') { btn.textContent = translateSource('Finish', currentLocale()); btn.dataset.action = 'live-finish'; btn.disabled = false; }
+  else if (v.mode === 'stopwatch') { btn.textContent = translateSource('Lap', currentLocale()); btn.dataset.action = 'live-lap'; btn.disabled = v.status === 'paused'; }
   else if (v.mode === 'for-time') { btn.textContent = translateSource('Finish', currentLocale()); btn.dataset.action = 'live-finish'; btn.disabled = false; }
   else if (current.manual && !current.restingUntilDeadline) { btn.textContent = translateSource('Done', currentLocale()); btn.dataset.action = 'live-done'; btn.disabled = v.status === 'paused'; }
   else if (current.restingUntilDeadline) { btn.textContent = translateSource('Resting until next block', currentLocale()); btn.dataset.action = 'noop'; btn.disabled = true; }
@@ -1730,12 +1969,8 @@ function renderHistory() {
 
 function renderHistoryList(sessions) {
   const visible = sessions.slice(0, state.historyVisible);
-  const remaining = Math.max(0, sessions.length - visible.length);
-  return `<section class="section"><div class="row-between"><h2 class="section-title" style="margin:0">Sessions</h2><span class="pill">${sessions.length}</span></div>
-    ${state.historyLoading ? '<div class="small muted history-loading">Loading full history…</div>' : ''}
-    <div class="list" style="margin-top:12px">${visible.length ? visible.map(sessionRowDetailed).join('') : `<div class="card empty">No sessions match this filter.</div>`}</div>
-    ${remaining ? `<button class="btn block history-loading" data-action="history-more">Load 100 more · ${remaining} remaining</button>` : ''}
-  </section>`;
+  const more = Math.max(0, sessions.length - visible.length);
+  return `<section class="section"><div class="row-between"><h2 class="section-title" style="margin:0">Sessions</h2><span class="pill">${sessions.length}</span></div>${state.historyLoading ? `<div class="small muted history-loading">Loading full history in the background…</div>` : ''}<div class="list" style="margin-top:12px">${visible.length ? visible.map(sessionRowDetailed).join('') : `<div class="card empty">No sessions match this filter.</div>`}</div>${more ? `<button class="btn block" data-action="history-more" style="margin-top:12px">Load ${Math.min(100, more)} more · ${more} remaining</button>` : ''}</section>`;
 }
 
 function renderHistoryCalendar(sessions) {
@@ -1885,6 +2120,8 @@ function renderSettings() {
   const caps = state.deviceCapabilities;
   const voices = state.availableVoices || [];
   const selectedProfile = cueProfileById(s.cueProfileId || 'standard', state.cueProfiles);
+  const perfMeasures = state.bootPerformance?.measures || {};
+  const bootMs = Number(perfMeasures.bootInteractiveMs);
   const localeOptions = LOCALE_OPTIONS.map((option) => `<option value="${esc(option.id)}" ${s.language === option.id ? 'selected' : ''}>${esc(option.label)}</option>`).join('');
   const voiceOptions = `<option value="" ${!s.voiceURI ? 'selected' : ''}>System default</option>${voices.map((voice) => `<option value="${esc(voice.voiceURI)}" ${s.voiceURI === voice.voiceURI ? 'selected' : ''}>${esc(voice.name)} · ${esc(voice.lang)}${voice.localService ? ' · Local' : ''}</option>`).join('')}`;
   const customProfileRows = state.cueProfiles.length ? state.cueProfiles.map((profile) => `<div class="list-row"><div class="list-row-main"><div class="list-row-title">${esc(profile.title)}</div><div class="list-row-meta">${esc(SOUND_PACKS[profile.soundPack]?.title || profile.soundPack || 'Clean')} · ${profile.voice ? 'Voice' : 'No voice'} · ${profile.warningSeconds || 0}s warning</div></div><button class="icon-btn" data-action="delete-cue-profile" data-id="${esc(profile.id)}" aria-label="Delete ${esc(profile.title)}">×</button></div>`).join('') : `<div class="small muted">No custom cue profiles yet.</div>`;
@@ -1974,16 +2211,16 @@ function renderSettings() {
         ${capabilityRow('True home-screen widget', false, 'Native only')}
         ${capabilityRow('Exact local alarm', false, 'Native only')}
       </div>
-      <div class="small muted">Primary reliable workout mode remains a visible installed PWA with Wake Lock. Background/locked-screen behavior is best effort unless a future native shell is added.</div>
+      <div class="small muted">Primary reliable timer mode remains a visible installed PWA with Wake Lock. Background/locked-screen behavior is best effort unless a future native shell is added.</div>
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">Performance & Scale</h2>
-      <div class="capability-grid">
-        <div class="capability-row"><span>Boot to interactive</span><strong>${state.bootPerformance != null ? `${Math.round(state.bootPerformance)} ms` : '—'}</strong></div>
-        <div class="capability-row"><span>History in memory</span><strong>${state.sessions.length}${state.historyLoadedAll ? ' full' : ' recent'}</strong></div>
-        <div class="capability-row"><span>Live scheduler</span><strong>${esc(state.liveSchedulerKind || 'idle')}</strong></div>
-        <div class="capability-row"><span>Maintenance queued</span><strong>${maintenance.pending()}</strong></div>
+      <div class="data-health-grid">
+        <div class="metric"><strong>${Number.isFinite(bootMs) ? `${Math.round(bootMs)} ms` : '—'}</strong><span>Interactive boot</span></div>
+        <div class="metric"><strong>${state.historyLoadedAll ? state.sessions.length : `Recent ${state.sessions.length}`}</strong><span>History in memory</span></div>
+        <div class="metric"><strong>${state.liveSchedulerKind}</strong><span>Live scheduler</span></div>
+        <div class="metric"><strong>${maintenance.pending()}</strong><span>Maintenance queued</span></div>
       </div>
-      <div class="small muted">Heavy storage/recovery maintenance is deferred during active workouts. History loads 10,000 sessions only when History is opened.</div>
+      <div class="small muted">The live timer stops visual work when hidden or paused, uses 10 Hz for stopwatch, low-frequency ticks for Wall/reduced-motion modes, and at most ~30 Hz for smooth progress. Full History loads on demand rather than during app startup.</div>
     </section>
     <section class="card form-card" style="margin-top:12px"><h2 class="section-title">App</h2>
       <button class="btn" data-action="install">Install PWA</button>
@@ -2037,16 +2274,17 @@ async function repeatSession(id) {
 }
 
 function liveMoreSheet() {
-  const v = state.engine?.view();
+  const v = focusedView();
   if (!v) return;
-  showSheet('Workout', `<div class="sheet-list">
+  showSheet('Timer', `<div class="sheet-list">
+    <button class="sheet-item" data-action="live-background">Run in background · Active Timers</button>
     ${v.planKind === 'timeline' ? `<button class="sheet-item" data-action="live-restart">Restart current step</button><button class="sheet-item" data-action="live-previous">Previous step</button>` : ''}
     <button class="sheet-item" data-action="live-lock">Lock controls</button>
     <button class="sheet-item" data-action="live-layout">Layout: ${esc(state.settings.layout)}</button>
     <button class="sheet-item" data-action="live-fullscreen">Toggle fullscreen</button>
     <button class="sheet-item" data-action="open-display-window">Open Wall display window</button>
     <button class="sheet-item" data-action="live-mute">${cue.muted ? 'Unmute cues' : 'Mute cues'}</button>
-    <button class="sheet-item" data-action="live-end" style="color:var(--danger)">End workout</button>
+    <button class="sheet-item" data-action="live-end" style="color:var(--danger)">End timer</button>
   </div>`);
 }
 
@@ -2310,7 +2548,8 @@ async function installApp() {
   } else toast('Use your browser menu and choose “Install app” or “Add to Home screen”.', 4200);
 }
 
-async function loadCollections({ historyLimit = state.historyLoadedAll ? 10000 : 100 } = {}) {
+async function loadCollections({ fullHistory = (state.route === 'history' && state.historyLoadedAll) } = {}) {
+  const historyLimit = fullHistory ? 10000 : 100;
   const [routines, blocks, cueProfiles, customSounds, sessions] = await Promise.all([
     state.db.all('routines').catch(() => []),
     state.db.all('blocks').catch(() => []),
@@ -2323,6 +2562,7 @@ async function loadCollections({ historyLimit = state.historyLoadedAll ? 10000 :
   state.cueProfiles = cueProfiles;
   state.customSounds = customSounds;
   state.sessions = sessions;
+  state.historyLoadedAll = Boolean(fullHistory);
 }
 
 async function ensureFullHistory() {
@@ -2330,24 +2570,29 @@ async function ensureFullHistory() {
   state.historyLoading = true;
   if (state.route === 'history') renderHistory();
   try {
-    state.sessions = await state.db.recentSessions(10000).catch(() => state.sessions);
+    const sessions = await state.db.recentSessions(10000);
+    state.sessions = sessions;
     state.historyLoadedAll = true;
-  } finally {
+  } catch {}
+  finally {
     state.historyLoading = false;
     if (state.route === 'history' && !state.engine) renderHistory();
   }
 }
 
 function schedulePostBootMaintenance() {
-  maintenance.enqueue('storage-health', async () => {
+  maintenance.enqueue('persistent-storage', async () => {
     state.storagePersistent = await requestPersistentStorage();
+  }, { priority: 'soon', delay: 250 });
+  maintenance.enqueue('data-health', async () => {
     await refreshDataResilience();
     if (state.route === 'settings' && !state.engine) renderSettings();
-  }, { priority: 'soon', delay: 150 });
-  maintenance.enqueue('daily-recovery', async () => {
-    await state.db.ensureDailyRecoverySnapshot().catch(() => {});
-    await state.db.pruneTombstones().catch(() => {});
   });
+  maintenance.enqueue('daily-recovery', async () => {
+    await state.db.ensureDailyRecoverySnapshot();
+    await refreshDataResilience();
+  });
+  maintenance.enqueue('tombstone-gc', () => state.db.pruneTombstones());
 }
 
 async function boot() {
@@ -2359,41 +2604,39 @@ async function boot() {
   try { await state.db.open(); } catch { toast('Storage unavailable. Timers can still run, but recovery may be limited.', 5000); }
   perf.mark('boot:db');
   state.settings = await state.db.loadSettings().catch(() => ({ ...defaultSettings }));
+  perf.mark('boot:settings');
   refreshVoices();
   if ('speechSynthesis' in globalThis) globalThis.speechSynthesis.onvoiceschanged = () => { refreshVoices(); if (state.route === 'settings' && !state.engine) renderSettings(); };
   state.quickMs = state.settings.quickPresets?.[3] || 120000;
   state.deviceCapabilities = detectDeviceCapabilities();
   applyTheme();
-  await loadCollections({ historyLimit: 100 });
-  perf.mark('boot:data');
-  void registerPwa();
+  const activePromise = state.db.getActiveSessions().catch(() => []);
+  await loadCollections({ fullHistory: false });
+  perf.mark('boot:collections');
+  registerPwa();
 
-  const active = await state.db.getActive().catch(() => null);
-  if (active?.snapshot && !['completed','cancelled'].includes(active.snapshot.status)) {
+  const active = await activePromise;
+  if (active.length) {
     if (state.displayMode) {
-      setRemoteActive(active);
+      setRemoteActive({ sessions: active });
       renderRemoteActive();
-      perf.mark('boot:interactive');
-      state.bootPerformance = perf.measure('bootInteractiveMs', 'boot:start', 'boot:interactive');
-      schedulePostBootMaintenance();
-      return;
-    }
-    if (await ownership.acquire()) {
+    } else if (await ownership.acquire()) {
       if (!await restoreOwnedActive(active)) {
         await ownership.release();
-        await state.db.clearActive().catch(() => {});
-        toast('The previous active timer could not be restored.', 4200);
+        await state.db.clearAllActiveSessions().catch(() => {});
+        toast('The previous active timers could not be restored.', 4200);
         await handleLaunchCommand(state.launchCommand);
       }
     } else {
-      setRemoteActive(active);
+      setRemoteActive({ sessions: active });
       renderRemoteActive();
     }
   } else if (state.displayMode) renderRemoteActive();
   else await handleLaunchCommand(state.launchCommand);
 
   perf.mark('boot:interactive');
-  state.bootPerformance = perf.measure('bootInteractiveMs', 'boot:start', 'boot:interactive');
+  perf.measure('bootInteractiveMs', 'boot:start', 'boot:interactive');
+  state.bootPerformance = perf.snapshot();
   schedulePostBootMaintenance();
 }
 
@@ -2415,7 +2658,7 @@ async function registerPwa() {
       });
     });
     navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (state.reloadOnControllerChange && !state.engine && !state.remoteActive) location.reload();
+      if (state.reloadOnControllerChange && !hasOwnedActiveTimers() && !state.remoteActive) location.reload();
     });
     navigator.serviceWorker.addEventListener('message', (event) => {
       if (event.data?.type === 'LAUNCH_URL' && event.data.url) handleLaunchCommand(parseLaunchCommand(event.data.url));
@@ -2428,34 +2671,42 @@ async function registerPwa() {
 }
 
 async function onVisibilityChange() {
-  if (!state.engine || !ownership.isOwner()) return;
+  if (!hasOwnedActiveTimers() || !ownership.isOwner()) return;
   if (document.visibilityState === 'hidden') {
     stopLiveScheduler();
-    const snapshot = state.engine.snapshot();
-    await state.db.saveActive(snapshot, state.activeMeta).catch(() => {});
-    broadcastActiveSnapshot(snapshot, state.activeMeta);
+    await persistAllRuntimes();
+    broadcastActiveSnapshot();
     if (state.settings.activeNotifications && globalThis.Notification?.permission === 'granted') {
-      const view = state.engine.view();
-      showActiveSessionNotification(translateBuiltInLabel(view.title || 'Timer', currentLocale()), `${translateBuiltInLabel(view.current?.label || 'Timer', currentLocale())} · ${translateSource('Tap to return', currentLocale())}`).catch(() => {});
+      for (const runtime of coordinator.list()) {
+        const view = coordinator.view(runtime.id);
+        if (!view || ['completed','cancelled'].includes(view.status)) continue;
+        showActiveSessionNotification(
+          translateBuiltInLabel(view.title || 'Timer', currentLocale()),
+          `${view.status === 'overtime' ? 'Overtime' : translateBuiltInLabel(view.current?.label || 'Timer', currentLocale())} · ${translateSource('Tap to return', currentLocale())}`,
+          { sessionId: runtime.id }
+        ).catch(() => {});
+      }
     }
   } else {
-    await closeTimerNotification('timer-active');
-    // Keep foreground sessions on the monotonic clock. Re-basing to wall time here
-    // would make manual system-clock changes look like workout time.
-    state.engine.reconcile();
+    for (const runtime of coordinator.list()) await closeTimerNotification(`timer-active:${runtime.id}`);
+    for (const runtime of coordinator.list()) {
+      if (!runtime.overtime) {
+        try { coordinator.reconcile(runtime.id); } catch {}
+      }
+    }
     cue.init().catch(() => {});
-    const status = state.engine?.view()?.status;
-    if (state.settings.keepAwake && status && !['completed', 'cancelled'].includes(status)) wakeLock.acquire();
+    if (state.settings.keepAwake && coordinator.size()) wakeLock.acquire();
+    if (state.engine) startLiveScheduler();
+    startCoordinatorScheduler();
     configureMediaSession();
     broadcastActiveSnapshot();
-    startLiveScheduler();
   }
 }
 
 document.addEventListener('visibilitychange', onVisibilityChange);
-window.addEventListener('pagehide', () => { if (state.engine && ownership.isOwner()) state.db.saveActive(state.engine.snapshot(), state.activeMeta).catch(() => {}); });
+window.addEventListener('pagehide', () => { if (hasOwnedActiveTimers() && ownership.isOwner()) void persistAllRuntimes(); });
 window.addEventListener('resize', () => { if (state.engine) updateLiveView(true); });
-window.addEventListener('unload', () => { if (!state.engine) ownership.dispose(); });
+window.addEventListener('unload', () => { if (!hasOwnedActiveTimers()) ownership.dispose(); });
 
 function updateBuilderInput(target) {
   if (!state.builder) return;
@@ -2488,9 +2739,10 @@ document.addEventListener('input', (e) => {
   }
   if (e.target.matches?.('[data-history-search]')) {
     state.historyQuery = e.target.value;
+    state.historyVisible = 100;
     clearTimeout(state.historySearchTimer);
     state.historySearchTimer = setTimeout(() => {
-      state.historyVisible = 100;
+      if (state.route !== 'history' || state.engine) return;
       renderHistory();
       requestAnimationFrame(() => { const input = $('[data-history-search]'); if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); } });
     }, 80);
@@ -2506,7 +2758,7 @@ document.addEventListener('input', (e) => {
 });
 document.addEventListener('change', async (e) => {
   updateBuilderInput(e.target); updateBuilderCueInput(e.target); updateCircuitInput(e.target); updateCustomInput(e.target); updateCustomCueInput(e.target); updateCustomParameterInput(e.target); updateBlockParameterInput(e.target);
-  if (e.target.matches?.('[data-history-mode]')) { state.historyMode = e.target.value || 'all'; return renderHistory(); }
+  if (e.target.matches?.('[data-history-mode]')) { state.historyMode = e.target.value || 'all'; state.historyVisible = 100; return renderHistory(); }
   if (e.target.dataset.setting) {
     const key = e.target.dataset.setting;
     const numeric = new Set(['adjustmentMs','warningSeconds','voiceRate','voiceVolume','masterVolume','profileGain']);
@@ -2528,7 +2780,16 @@ document.addEventListener('click', async (e) => {
   if (action === 'apply-update') return applyUpdate();
   if (action === 'takeover-session') return takeOverActiveSession();
   if (action === 'focus-owner') { ownership.requestFocus(); return; }
-  if (action === 'remote-refresh') { const active = await state.db.getActive().catch(() => null); setRemoteActive(active); return state.remoteActive ? renderRemoteActive() : render(); }
+  if (action === 'remote-refresh') { const active = await state.db.getActiveSessions().catch(() => []); setRemoteActive({ sessions: active }); return state.remoteActive ? renderRemoteActive() : render(); }
+  if (action === 'focus-active') { closeSheet(); return focusRuntime(btn.dataset.id); }
+  if (action === 'active-toggle') {
+    const id = btn.dataset.id;
+    coordinator.togglePause(id);
+    await persistRuntime(id);
+    updateActiveTimerCards();
+    broadcastActiveSnapshot();
+    return;
+  }
   if (action === 'close-display-window') { try { window.close(); } catch {} return; }
   if (action === 'open-display-window') {
     closeSheet();
@@ -2591,8 +2852,8 @@ document.addEventListener('click', async (e) => {
   if (action === 'repeat-session') return repeatSession(btn.dataset.id);
   if (action === 'delete-session') { if (confirm('Delete this session?')) { await state.db.delete('sessions', btn.dataset.id); closeSheet(); await loadCollections(); render(); } return; }
   if (action === 'save-session-note') { const session = state.sessions.find((item) => item.id === btn.dataset.id); const input = document.querySelector(`[data-session-note][data-id="${CSS.escape(btn.dataset.id)}"]`); if (session && input) { session.notes = String(input.value || '').slice(0, 10000); await state.db.put('sessions', session); await loadCollections(); toast('Session note saved.'); } return; }
-  if (action === 'history-view') { state.historyView = btn.dataset.view || 'list'; state.historyVisible = 100; void ensureFullHistory(); return renderHistory(); }
   if (action === 'history-more') { state.historyVisible += 100; return renderHistory(); }
+  if (action === 'history-view') { state.historyView = btn.dataset.view || 'list'; if (state.historyView !== 'list') ensureFullHistory(); return renderHistory(); }
   if (action === 'history-month') { const d = new Date(state.historyMonth); d.setMonth(d.getMonth() + Number(btn.dataset.delta || 0)); state.historyMonth = new Date(d.getFullYear(), d.getMonth(), 1).getTime(); return renderHistory(); }
   if (action === 'history-day') return showHistoryDay(Number(btn.dataset.day));
   if (action === 'history-export-json') return exportHistoryJson();
@@ -2680,24 +2941,35 @@ document.addEventListener('click', async (e) => {
   if (action === 'clear-history') { if (confirm('Clear all session history? Saved routines will remain.')) { await state.db.clear('sessions'); await loadCollections(); renderHistory(); toast('History cleared.'); } return; }
   if (action === 'install') return installApp();
 
-  if (action === 'live-pause') { state.engine.view().status === 'paused' ? state.engine.resume() : state.engine.pause(); updateLiveView(true); startLiveScheduler(); return; }
-  if (action === 'live-adjust') { state.engine.adjust(Number(btn.dataset.delta)); updateLiveView(true); return; }
-  if (action === 'live-next') { state.engine.next(); updateLiveView(true); return; }
-  if (action === 'live-done') { state.engine.completeManual(); updateLiveView(true); return; }
-  if (action === 'live-finish') { state.engine.finish('finished'); return; }
-  if (action === 'live-lap') { state.engine.addLap(); updateLiveView(true); return; }
-  if (action === 'amrap-round') { const d = state.engine.session.data || {}; state.engine.setData({ rounds: (d.rounds || 0) + 1, reps: 0 }); updateLiveView(true); return; }
-  if (action === 'amrap-reps') { const d = state.engine.session.data || {}; state.engine.setData({ reps: Math.max(0, (d.reps || 0) + Number(btn.dataset.delta)) }); updateLiveView(true); return; }
+  if (action === 'live-pause') { coordinator.togglePause(state.activeTimerId); updateLiveView(true); startLiveScheduler(); return; }
+  if (action === 'live-adjust') { coordinator.command(state.activeTimerId, 'adjust', Number(btn.dataset.delta)); updateLiveView(true); return; }
+  if (action === 'live-next') { coordinator.command(state.activeTimerId, 'next'); updateLiveView(true); return; }
+  if (action === 'live-done') { coordinator.command(state.activeTimerId, 'manual'); updateLiveView(true); return; }
+  if (action === 'live-finish') { coordinator.command(state.activeTimerId, 'finish', 'finished'); return; }
+  if (action === 'live-lap') { coordinator.command(state.activeTimerId, 'lap'); updateLiveView(true); return; }
+  if (action === 'amrap-round') { const d = state.engine.session.data || {}; coordinator.command(state.activeTimerId, 'data', { rounds: (d.rounds || 0) + 1, reps: 0 }); updateLiveView(true); return; }
+  if (action === 'amrap-reps') { const d = state.engine.session.data || {}; coordinator.command(state.activeTimerId, 'data', { reps: Math.max(0, (d.reps || 0) + Number(btn.dataset.delta)) }); updateLiveView(true); return; }
   if (action === 'live-more') return liveMoreSheet();
-  if (action === 'live-restart') { closeSheet(); state.engine.restart(); updateLiveView(true); return; }
-  if (action === 'live-previous') { closeSheet(); state.engine.previous(); updateLiveView(true); return; }
+  if (action === 'live-background') {
+    closeSheet();
+    stopLiveScheduler();
+    syncFocusedRuntime(null);
+    mediaSession.disable();
+    state.route = 'timer';
+    setLiveMode(false);
+    render();
+    broadcastActiveSnapshot();
+    return;
+  }
+  if (action === 'live-restart') { closeSheet(); coordinator.command(state.activeTimerId, 'restart'); updateLiveView(true); return; }
+  if (action === 'live-previous') { closeSheet(); coordinator.command(state.activeTimerId, 'previous'); updateLiveView(true); return; }
   if (action === 'live-lock') { closeSheet(); state.liveLocked = true; renderLive(); return; }
   if (action === 'live-unlock') { state.liveLocked = false; renderLive(); return; }
   if (action === 'live-layout') return layoutSheet();
   if (action === 'select-layout') { state.settings.layout = btn.dataset.layout; await saveSettings(); closeSheet(); renderLive(); return; }
   if (action === 'live-mute') { cue.toggleMute(); closeSheet(); if (state.engine) renderLive(); return; }
   if (action === 'live-fullscreen') { closeSheet(); try { if (document.fullscreenElement) await document.exitFullscreen(); else await document.documentElement.requestFullscreen?.(); } catch {} return; }
-  if (action === 'live-end') { closeSheet(); if (confirm('End this workout now? The partial session will be saved.')) state.engine.finish('user-ended'); return; }
+  if (action === 'live-end') { closeSheet(); if (confirm('End this timer now? The partial session will be saved.')) coordinator.command(state.activeTimerId, 'finish', 'user-ended'); return; }
   if (action === 'completion-done') { state.completion = null; state.route = 'timer'; render(); return; }
   if (action === 'noop') return;
 });
@@ -2707,18 +2979,18 @@ importFile.addEventListener('change', async () => { const file = importFile.file
 document.addEventListener('keydown', (e) => {
   if (!state.engine || $('#sheet-root [data-sheet]') || isInteractiveTarget(e.target)) return;
   let handled = true;
-  if (e.code === 'Space') state.engine.view().status === 'paused' ? state.engine.resume() : state.engine.pause();
-  else if (e.key === 'ArrowRight') state.engine.next();
-  else if (e.key === 'ArrowLeft') state.engine.previous();
-  else if (e.key === 'ArrowUp') state.engine.adjust(state.settings.adjustmentMs);
-  else if (e.key === 'ArrowDown') state.engine.adjust(-state.settings.adjustmentMs);
-  else if (e.key.toLowerCase() === 'r') state.engine.restart();
+  if (e.code === 'Space') coordinator.togglePause(state.activeTimerId);
+  else if (e.key === 'ArrowRight') coordinator.command(state.activeTimerId, 'next');
+  else if (e.key === 'ArrowLeft') coordinator.command(state.activeTimerId, 'previous');
+  else if (e.key === 'ArrowUp') coordinator.command(state.activeTimerId, 'adjust', state.settings.adjustmentMs);
+  else if (e.key === 'ArrowDown') coordinator.command(state.activeTimerId, 'adjust', -state.settings.adjustmentMs);
+  else if (e.key.toLowerCase() === 'r') coordinator.command(state.activeTimerId, 'restart');
   else if (e.key.toLowerCase() === 'm') cue.toggleMute();
   else if (e.key.toLowerCase() === 'l') { state.liveLocked = !state.liveLocked; renderLive(); }
   else if (e.key.toLowerCase() === 'f') { if (document.fullscreenElement) document.exitFullscreen?.(); else document.documentElement.requestFullscreen?.(); }
   else if (e.key === '?' || (e.key === '/' && e.shiftKey)) { showSheet('Keyboard shortcuts', `<div class="shortcut-grid"><div class="shortcut-row"><span>Pause / Resume</span><kbd>Space</kbd></div><div class="shortcut-row"><span>Next interval</span><kbd>→</kbd></div><div class="shortcut-row"><span>Previous interval</span><kbd>←</kbd></div><div class="shortcut-row"><span>Adjust time</span><kbd>↑ / ↓</kbd></div><div class="shortcut-row"><span>Restart step</span><kbd>R</kbd></div><div class="shortcut-row"><span>Mute / Unmute</span><kbd>M</kbd></div><div class="shortcut-row"><span>Lock / Unlock</span><kbd>L</kbd></div><div class="shortcut-row"><span>Fullscreen</span><kbd>F</kbd></div></div>`); }
   else handled = false;
-  if (handled) { e.preventDefault(); updateLiveView(true); }
+  if (handled) { e.preventDefault(); updateLiveView(true); if (e.code === 'Space') startLiveScheduler(); }
 });
 
 boot();
