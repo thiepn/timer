@@ -1052,6 +1052,141 @@ function renderActiveQueuePanel() {
   </section>`;
 }
 
+
+function queueRow(queue) {
+  const normalized = normalizeQueuePreset(queue);
+  const duration = normalized.items.reduce((total, item) => {
+    const timer = queueTimerById(item.savedTimerId);
+    const d = timer ? savedTimerDuration(timer) : null;
+    return total == null || d == null ? null : total + d;
+  }, 0);
+  return `<div class="queue-preset-row">
+    <button class="queue-preset-main" data-action="edit-queue" data-id="${esc(normalized.id)}"><strong>${esc(normalized.title)}</strong><span>${normalized.items.length} timer${normalized.items.length === 1 ? '' : 's'}${normalized.loop ? ' · loops' : ''}${duration != null ? ` · ${esc(durationLabel(duration))}` : ''}</span></button>
+    <button class="btn compact-btn" data-action="start-queue" data-id="${esc(normalized.id)}">Start</button>
+    <button class="icon-btn danger-text" data-action="delete-queue" data-id="${esc(normalized.id)}" aria-label="Delete ${esc(normalized.title)}">×</button>
+  </div>`;
+}
+
+function showQueueLibrarySheet() {
+  showSheet('Timer Queues', `<div class="stack">
+    <button class="btn primary block" data-action="new-queue">＋ New Queue</button>
+    <div class="queue-preset-list">${state.queues.length ? state.queues.map(queueRow).join('') : '<div class="empty">No saved queues yet.</div>'}</div>
+  </div>`);
+}
+
+function defaultQueueTitleFromView() {
+  if (state.libraryView?.startsWith('collection:')) return `${state.libraryView.slice('collection:'.length)} Queue`;
+  if (state.libraryView === 'favorites') return 'Favorites Queue';
+  if (state.libraryView === 'pinned') return 'Pinned Queue';
+  return 'Timer Queue';
+}
+
+function openQueueBuilderFromTimerIds(timerIds = [], title = 'Timer Queue') {
+  const preset = queuePresetFromTimerIds(timerIds, { id: uid('queue'), title });
+  state.queueDraft = normalizeQueuePreset(preset);
+  renderQueueBuilderSheet();
+}
+
+function showQueueBuilder(queueId = null) {
+  const queue = queueId ? state.queues.find((item) => item.id === queueId) : null;
+  state.queueDraft = normalizeQueuePreset(queue ? structuredClone(queue) : { id: uid('queue'), title: 'Timer Queue', items: [], loop: false });
+  renderQueueBuilderSheet();
+}
+
+function renderQueueBuilderSheet() {
+  const queue = normalizeQueuePreset(state.queueDraft || { id: uid('queue'), title: 'Timer Queue', items: [] });
+  state.queueDraft = queue;
+  const itemRows = queue.items.map((item, index) => {
+    const timer = queueTimerById(item.savedTimerId);
+    return `<div class="queue-builder-item" draggable="true" data-queue-draft-index="${index}">
+      <div class="queue-drag-handle" aria-hidden="true">⋮⋮</div>
+      <div class="queue-builder-copy"><strong>${esc(timer?.title || 'Missing Saved Timer')}</strong><small>${esc(timer ? (BUILDER_META[timer.type]?.name || timer.type) : item.savedTimerId)}</small></div>
+      <select class="select queue-action-select" data-queue-item-action data-index="${index}" aria-label="Completion behavior for ${esc(timer?.title || 'queue item')}">
+        <option value="advance" ${item.action === 'advance' ? 'selected' : ''}>Advance</option>
+        <option value="overtime" ${item.action === 'overtime' ? 'selected' : ''}>Overtime</option>
+        <option value="repeat" ${item.action === 'repeat' ? 'selected' : ''}>Repeat</option>
+        <option value="stop" ${item.action === 'stop' ? 'selected' : ''}>Stop queue</option>
+      </select>
+      <div class="queue-item-buttons">
+        <button class="icon-btn" data-action="queue-item-move" data-index="${index}" data-delta="-1" ${index === 0 ? 'disabled' : ''} aria-label="Move earlier">↑</button>
+        <button class="icon-btn" data-action="queue-item-move" data-index="${index}" data-delta="1" ${index === queue.items.length - 1 ? 'disabled' : ''} aria-label="Move later">↓</button>
+        <button class="icon-btn danger-text" data-action="queue-item-remove" data-index="${index}" aria-label="Remove item">×</button>
+      </div>
+    </div>`;
+  }).join('');
+  showSheet(queue.id && state.queues.some((item) => item.id === queue.id) ? 'Edit Queue' : 'New Queue', `<div class="stack queue-builder">
+    <label class="field"><span>Name</span><input class="input" data-queue-draft-field="title" maxlength="120" value="${esc(queue.title)}"></label>
+    <label class="field"><span>Description</span><textarea class="input" rows="2" maxlength="500" data-queue-draft-field="description" placeholder="Optional">${esc(queue.description || '')}</textarea></label>
+    <label class="check-row"><input type="checkbox" data-queue-draft-loop ${queue.loop ? 'checked' : ''}> <span><strong>Loop whole queue</strong><small>After the final item, start again at item 1 and increment the queue cycle.</small></span></label>
+    <div class="row-between"><div><div class="section-title" style="margin:0">Queue items</div><div class="small muted">Drag to reorder, or use the arrow buttons.</div></div><button class="btn" data-action="queue-add-timer">＋ Add Timer</button></div>
+    <div class="queue-builder-list">${itemRows || '<div class="empty">Add Saved Timers to build the queue.</div>'}</div>
+    <div class="row queue-builder-actions" style="flex-wrap:wrap"><button class="btn primary" data-action="save-queue-draft">Save Queue</button><button class="btn" data-action="save-start-queue-draft" ${queue.items.length ? '' : 'disabled'}>Save & Start</button></div>
+  </div>`);
+}
+
+function showQueueTimerPicker() {
+  const timers = state.routines.filter((item) => !item.archived);
+  showSheet('Add Saved Timer', `<div class="sheet-list">${timers.length ? timers.map((timer) => `<button class="sheet-item" data-action="queue-add-picked-timer" data-id="${esc(timer.id)}"><div><strong>${esc(timer.title)}</strong><div class="small muted">${esc(BUILDER_META[timer.type]?.name || timer.type)} · ${esc(typeSummary(timer.type, timer.config || {}))}</div></div><span>＋</span></button>`).join('') : '<div class="empty">No Saved Timers available.</div>'}<button class="btn block" data-action="queue-return-builder">Back to Queue</button></div>`);
+}
+
+function addQueueDraftTimer(timerId) {
+  const timer = queueTimerById(timerId);
+  if (!timer || !state.queueDraft) return;
+  const next = normalizeQueuePreset({
+    ...state.queueDraft,
+    items: [...state.queueDraft.items, { id: uid('queue_item'), savedTimerId: timer.id, title: timer.title, action: QUEUE_STEP_ACTIONS.ADVANCE }]
+  });
+  state.queueDraft = next;
+  renderQueueBuilderSheet();
+}
+
+function moveQueueDraftItem(index, delta) {
+  if (!state.queueDraft) return;
+  const to = Math.max(0, Math.min(state.queueDraft.items.length - 1, Number(index) + Number(delta)));
+  state.queueDraft.items = reorderQueueItems(state.queueDraft.items, Number(index), to);
+  renderQueueBuilderSheet();
+}
+
+function removeQueueDraftItem(index) {
+  if (!state.queueDraft) return;
+  state.queueDraft.items.splice(Number(index), 1);
+  state.queueDraft = normalizeQueuePreset(state.queueDraft);
+  renderQueueBuilderSheet();
+}
+
+async function saveQueueDraft({ start = false } = {}) {
+  if (!state.queueDraft) return;
+  const titleInput = $('#sheet-root [data-queue-draft-field="title"]');
+  const descriptionInput = $('#sheet-root [data-queue-draft-field="description"]');
+  const loopInput = $('#sheet-root [data-queue-draft-loop]');
+  state.queueDraft.title = String(titleInput?.value || state.queueDraft.title || 'Timer Queue').trim().slice(0, 120) || 'Timer Queue';
+  state.queueDraft.description = String(descriptionInput?.value || '').trim().slice(0, 500);
+  state.queueDraft.loop = Boolean(loopInput?.checked);
+  state.queueDraft = normalizeQueuePreset(state.queueDraft);
+  if (!state.queueDraft.items.length) return toast('Add at least one Saved Timer before saving.');
+  const invalid = state.queueDraft.items.find((item) => !queueTimerById(item.savedTimerId));
+  if (invalid) return toast('Remove missing Saved Timers before saving this queue.', 4200);
+  const saved = await state.db.saveQueue(state.queueDraft);
+  await loadCollections();
+  state.queueDraft = null;
+  closeSheet();
+  toast('Queue saved.');
+  if (start) await startQueue(saved.id);
+  else if (state.route === 'library') renderLibrary();
+}
+
+async function deleteQueue(id) {
+  const queue = state.queues.find((item) => item.id === id);
+  if (!queue) return;
+  if (!confirm(`Delete queue “${queue.title}”?`)) return;
+  await state.db.delete('queues', id);
+  await loadCollections();
+  closeSheet();
+  if (state.route === 'library') renderLibrary();
+  else showQueueLibrarySheet();
+  toast('Queue deleted.');
+}
+
 function workspaceTitle(runtime) {
   return runtime?.meta?.workspaceTitle || runtime?.meta?.title || coordinator.view(runtime?.id)?.title || 'Timer';
 }
