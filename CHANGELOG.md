@@ -1,5 +1,22 @@
 # Changelog
 
+## Visual V3 — App Shell, Navigation & Spatial Architecture
+
+### Added
+- Offline SVG shell icon system replacing Unicode primary-navigation symbols.
+- Contextual floating top chrome with route-aware title state and scroll-reactive depth.
+- Floating mobile navigation dock with quieter inactive states and a stronger active destination.
+- Persistent desktop navigation rail with brand, destinations and New Timer action.
+- Route-aware wide-screen content bounds for Workspace, Library and History.
+- Progressive View Transition hooks for route changes with reduced-motion fallback.
+
+### Improved
+- Sheets now use a stronger modal material, bounded backdrop blur, inset phone geometry and centered desktop presentation.
+- Builder entry keeps contextual shell state synchronized.
+- Workspace maps to the Timer navigation destination instead of leaving navigation visually unselected.
+- Live timing mode removes desktop rail, mobile dock and top chrome so the timer stage stays edge-to-edge.
+- Service-worker cache generation bumped to v19 and the SVG sprite is part of the offline shell.
+
 ## Visual V2 — Design System V3
 
 ### Added
