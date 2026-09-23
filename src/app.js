@@ -861,6 +861,7 @@ function renderMultiTimerWorkspace() {
       <div class="segmented workspace-layout-switch" role="group" aria-label="Workspace layout">${layoutButton('grid','Grid')}${layoutButton('compact','Compact')}${layoutButton('focus','Focus')}</div>
       <div class="workspace-bulk-actions"><button class="btn compact-btn" data-action="workspace-pause-all" ${runtimes.length ? '' : 'disabled'}>Pause all</button><button class="btn compact-btn" data-action="workspace-resume-all" ${runtimes.length ? '' : 'disabled'}>Resume all</button><button class="btn compact-btn danger" data-action="workspace-stop-all" ${runtimes.length ? '' : 'disabled'}>Stop all</button></div>
     </section>
+    ${layout === 'focus' && runtimes.length > 1 ? `<div class="workspace-focus-strip">${runtimes.map((runtime) => `<button class="${focusId === runtime.id ? 'active' : ''}" data-action="workspace-focus" data-id="${esc(runtime.id)}">${esc(workspaceTitle(runtime))}</button>`).join('')}</div>` : ''}
     ${runtimes.length ? `<div class="workspace-groups layout-${layout}">${groupSections}</div>` : `<div class="card empty workspace-empty"><h2>No active timers</h2><p>Launch a saved timer or create a new one.</p><div class="row" style="justify-content:center;flex-wrap:wrap"><button class="btn primary" data-action="workspace-launch-saved">Launch Saved Timer</button><button class="btn" data-action="create">Create Timer</button></div></div>`}`;
 }
 
@@ -1983,6 +1984,21 @@ function updateActiveTimerCards() {
     if (toggle) toggle.textContent = view.status === 'paused' ? 'Resume' : 'Pause';
     for (const adjust of $$('[data-action="active-adjust"]', card)) adjust.disabled = view.status === 'paused' || view.status === 'overtime';
   }
+  for (const card of $('[data-workspace-runtime]')) {
+    const runtimeId = card.dataset.workspaceRuntime;
+    const runtime = coordinator.get(runtimeId);
+    const view = coordinator.view(runtimeId);
+    if (!runtime || !view) { card.remove(); continue; }
+    const current = view.current || {};
+    const value = view.status === 'overtime' ? view.overtimeMs : (current.remainingMs != null ? current.remainingMs : current.elapsedMs);
+    const time = $('.workspace-time', card);
+    if (time) time.textContent = `${view.status === 'overtime' ? '+' : ''}${formatClock(value || 0, { tenths: view.mode === 'stopwatch', countUp: current.remainingMs == null })}`;
+    const phase = view.status === 'paused' ? 'Paused' : view.status === 'overtime' ? 'Overtime' : translateBuiltInLabel(current.label || view.title, currentLocale());
+    const meta = $('.workspace-timer-copy small', card);
+    if (meta) meta.textContent = `${runtime.meta?.workspaceGroup || 'Ungrouped'} · ${phase}`;
+    const toggle = $('[data-action="active-toggle"]', card);
+    if (toggle) toggle.textContent = view.status === 'paused' ? 'Resume' : 'Pause';
+  }
 }
 
 function stopLiveScheduler() {
@@ -2834,7 +2850,9 @@ function liveMoreSheet() {
   const v = focusedView();
   if (!v) return;
   showSheet('Timer', `<div class="sheet-list">
-    <button class="sheet-item" data-action="live-background">Run in background · Active Timers</button>
+    <button class="sheet-item" data-action="open-workspace">Open Multi-Timer Workspace</button>
+    <button class="sheet-item" data-action="workspace-edit-timer" data-id="${esc(state.activeTimerId)}">Grouping & completion action</button>
+    <button class="sheet-item" data-action="live-background">Run in background · Home</button>
     ${v.planKind === 'timeline' ? `<button class="sheet-item" data-action="live-restart">Restart current step</button><button class="sheet-item" data-action="live-previous">Previous step</button>` : ''}
     <button class="sheet-item" data-action="live-lock">Lock controls</button>
     <button class="sheet-item" data-action="live-layout">Layout: ${esc(state.settings.layout)}</button>
@@ -3382,6 +3400,38 @@ document.addEventListener('click', async (e) => {
     broadcastActiveSnapshot();
     return;
   }
+  if (action === 'open-workspace') return openWorkspace();
+  if (action === 'workspace-launch-saved') return showWorkspaceLaunchSheet();
+  if (action === 'workspace-launch-routine') {
+    const id = btn.dataset.id;
+    closeSheet();
+    const runtime = await startSavedRoutineAutomated(id, { background: true, backgroundRoute: 'workspace' });
+    if (!runtime) toast('Saved Timer could not be launched.', 4200);
+    return;
+  }
+  if (action === 'workspace-edit-timer') return showWorkspaceTimerSettings(btn.dataset.id);
+  if (action === 'workspace-save-timer') return saveWorkspaceTimerSettings(btn.dataset.id);
+  if (action === 'workspace-layout') {
+    const layout = btn.dataset.layout;
+    if (!['grid','compact','focus'].includes(layout)) return;
+    state.settings.workspaceLayout = layout;
+    await saveSettings();
+    return renderMultiTimerWorkspace();
+  }
+  if (action === 'workspace-focus') { state.workspaceFocusId = btn.dataset.id; return renderMultiTimerWorkspace(); }
+  if (action === 'workspace-move') {
+    if (coordinator.move(btn.dataset.id, Number(btn.dataset.delta || 0))) await persistWorkspaceOrder();
+    return renderMultiTimerWorkspace();
+  }
+  if (action === 'workspace-pause-all') { coordinator.pauseAll(); await persistAllRuntimes(); broadcastActiveSnapshot(); updateActiveTimerCards(); return; }
+  if (action === 'workspace-resume-all') { coordinator.resumeAll(); await persistAllRuntimes(); broadcastActiveSnapshot(); updateActiveTimerCards(); return; }
+  if (action === 'workspace-stop') { coordinator.command(btn.dataset.id, 'stop', 'user-ended'); return; }
+  if (action === 'workspace-stop-all') {
+    const ids = coordinator.list().map((runtime) => runtime.id);
+    if (!ids.length || !confirm(`Stop all ${ids.length} active timer${ids.length === 1 ? '' : 's'}? Partial sessions will be saved.`)) return;
+    for (const id of ids) coordinator.command(id, 'stop', 'user-ended');
+    return;
+  }
   if (action === 'close-display-window') { try { window.close(); } catch {} return; }
   if (action === 'open-display-window') {
     closeSheet();
@@ -3616,7 +3666,7 @@ document.addEventListener('click', async (e) => {
   if (action === 'select-layout') { state.settings.layout = btn.dataset.layout; await saveSettings(); closeSheet(); renderLive(); return; }
   if (action === 'live-mute') { cue.toggleMute(); closeSheet(); if (state.engine) renderLive(); return; }
   if (action === 'live-fullscreen') { closeSheet(); try { if (document.fullscreenElement) await document.exitFullscreen(); else await document.documentElement.requestFullscreen?.(); } catch {} return; }
-  if (action === 'live-end') { closeSheet(); if (confirm('End this timer now? The partial session will be saved.')) coordinator.command(state.activeTimerId, 'finish', 'user-ended'); return; }
+  if (action === 'live-end') { closeSheet(); if (confirm('End this timer now? The partial session will be saved.')) coordinator.command(state.activeTimerId, 'stop', 'user-ended'); return; }
   if (action === 'completion-done') { state.completion = null; state.route = 'timer'; render(); return; }
   if (action === 'noop') return;
 });
