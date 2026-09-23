@@ -56,6 +56,19 @@ export function parseDurationInput(value, { minMs = MIN_MS, maxMs = DEFAULT_MAX_
   return success(totalMs, source);
 }
 
+export function quickDurationDial(milliseconds) {
+  const ms = Math.max(MIN_MS, Math.round(Number(milliseconds) || MIN_MS));
+  const totalSeconds = Math.max(1, Math.round(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const withinHourSeconds = totalSeconds % 3600;
+  const ratio = hours > 0 && withinHourSeconds === 0 ? 1 : withinHourSeconds / 3600;
+  return {
+    hours,
+    withinHourSeconds,
+    sweepDegrees: Math.max(2, Math.min(360, Math.round(ratio * 360)))
+  };
+}
+
 export function durationInputText(milliseconds) {
   const totalSeconds = Math.max(1, Math.round(Number(milliseconds || 0) / 1000));
   const days = Math.floor(totalSeconds / 86400);
