@@ -1,27 +1,28 @@
-# Timer v2.4 Release Scope
+# Timer v2.5 Release Scope
 
-Timer v2.4 turns the existing multi-runtime kernel into a user-facing workspace and completes the completion-action orchestration layer.
+Timer v2.5 turns one-off Start Next chains into a first-class queue and automation system.
 
 Production scope includes:
 
-- A dedicated Multi-Timer Workspace for all locally owned active timers.
-- Grid, compact and focus workspace layouts.
-- Persistent timer order across active-session checkpoints and process-loss restore.
-- Runtime display names, groups and colors without mutating historical timer-plan truth.
-- Per-timer pause/resume, focus, reorder, edit and explicit stop.
-- Bulk Pause All, Resume All and Stop All operations.
-- Direct launching of Saved Timers from the workspace.
-- Completion actions: Stop, Overtime, Repeat and Start Next.
-- Saved Timer completion defaults and Start Next targets.
-- Chained Saved Timer launching with default/last parameter values for parameterized sequence timers.
-- Foreground chains transfer focus to the next timer; background chains preserve another timer's focus.
-- Manual stop/end always bypasses automation.
-- Workspace order, completion configuration and chain targets persist in active recovery records.
+- Saved Queue presets containing ordered Saved Timer references.
+- Visual queue building with drag-and-drop plus keyboard/touch-safe move controls.
+- Arbitrary queue length up to the bounded queue-model limit.
+- Queued-but-not-started timers shown before execution.
+- Per-step behavior: Advance, Overtime, Repeat Step or Stop Queue.
+- Whole-queue looping with explicit cycle count.
+- Start, Pause, Resume, Skip and Stop Queue controls.
+- Queue progress, current position, completed-step and skipped-step counters.
+- Direct Saved Timer launching from queues while retaining independent runtime timing truth.
+- Conversion of current Library views/collections and multi-selected Saved Timers into queues.
+- Recovery-safe active queue state with current step, cycle, paused status and runtime linkage.
+- Saved Queue persistence, backup/export and restore.
+- Queue execution alongside unrelated independent timers in the Multi-Timer Workspace.
 
 Compatibility boundary:
 
-- IndexedDB remains v6.
-- Backup payload remains v4; backup versions v1-v4 remain importable.
-- Saved Timer storage remains the existing `routines` store.
-- Active workspace metadata remains recovery state and is not added to portable user backups.
-- Native Android exact alarms, foreground services and widgets remain outside the PWA boundary.
+- IndexedDB upgrades from v6 to v7 by adding `queues` and `activeQueues`; existing stores are unchanged.
+- Backup payload upgrades from v4 to v5 to carry Saved Queue presets.
+- Backup versions v1-v4 remain importable. Replace restores from pre-v5 backups do not clear queue presets because those formats had no queue category.
+- Active Queue runs are recovery state and are intentionally excluded from portable backups.
+- Saved Timers continue to use the existing `routines` store.
+- Native exact alarms, foreground services and Android widgets remain outside the PWA boundary.
