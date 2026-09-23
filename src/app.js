@@ -7,7 +7,7 @@ import {
 import { TimerDB, defaultSettings, requestPersistentStorage, storageEstimate } from './db.js';
 import { CueManager, WakeLockManager, requestNotificationPermission, showCompletionNotification, showActiveSessionNotification, closeTimerNotification, BUILTIN_CUE_PROFILES, SOUND_PACKS, cueProfileById, profileSettings } from './audio.js';
 import { analyzeSession, comparisonFingerprint, comparableSessions, objectiveRecord, factualTrend, summarizeRange, startOfLocalDay, startOfLocalWeek, monthCalendar, sessionsToCsv } from './analytics.js';
-import { createBackupArchive, verifyBackupArchive, encryptBackupArchive, decryptBackupArchive, isLegacyBackup, isEncryptedBackup, isBackupArchive, isRoutinePackage, backupCounts } from './resilience.js';
+import { createBackupArchive, verifyBackupArchive, encryptBackupArchive, decryptBackupArchive, isLegacyBackup, isEncryptedBackup, isBackupArchive, isRoutinePackage, backupCounts, assertBackupEntityLimits } from './resilience.js';
 import { SessionOwnershipManager, MediaSessionManager, parseLaunchCommand, detectDeviceCapabilities } from './device.js';
 import { LOCALE_OPTIONS, resolveLocale, applyDocumentLocale, localizeDOM, translateSource, translateBuiltInLabel, phaseLabel as localizedPhaseLabel, formatDuration, formatDate, formatNumber, t as i18nT } from './i18n.js';
 import { FocusTrap, Announcer, focusMainHeading, isInteractiveTarget, timerEventAnnouncement } from './accessibility.js';
@@ -3304,6 +3304,7 @@ function backupSelectionFromSheet(root = document) {
     blocks: root.querySelector('[data-backup-part="blocks"]')?.checked !== false,
     cueProfiles: root.querySelector('[data-backup-part="cueProfiles"]')?.checked !== false,
     customSounds: root.querySelector('[data-backup-part="customSounds"]')?.checked !== false,
+    queues: root.querySelector('[data-backup-part="queues"]')?.checked !== false,
     sessions: root.querySelector('[data-backup-part="sessions"]')?.checked !== false,
     settings: root.querySelector('[data-backup-part="settings"]')?.checked !== false
   };
@@ -3313,7 +3314,7 @@ function showBackupExportSheet() {
   showSheet('Create Backup', `<div class="stack">
     <div class="small muted">Choose what to include. Full backups are recommended for disaster recovery.</div>
     <div class="backup-parts">
-      ${[['routines','Routines'],['blocks','Reusable blocks'],['cueProfiles','Cue profiles'],['customSounds','Custom sounds'],['sessions','Session history'],['settings','Settings']].map(([key,label]) => `<label class="check-row"><input type="checkbox" data-backup-part="${key}" checked> <span>${label}</span></label>`).join('')}
+      ${[['routines','Saved timers'],['queues','Saved queues'],['blocks','Reusable blocks'],['cueProfiles','Cue profiles'],['customSounds','Custom sounds'],['sessions','Session history'],['settings','Settings']].map(([key,label]) => `<label class="check-row"><input type="checkbox" data-backup-part="${key}" checked> <span>${label}</span></label>`).join('')}
     </div>
     <div class="field"><label for="backup-password">Password encryption <span class="muted">(optional)</span></label><input id="backup-password" class="input" type="password" autocomplete="new-password" placeholder="Leave blank for normal backup"><div class="tiny">Encrypted backups cannot be recovered if the password is lost.</div></div>
     <button class="btn primary big" data-action="confirm-export-backup">Export backup</button>
@@ -3382,15 +3383,15 @@ async function exportRoutinePackage(routineId) {
 }
 
 function backupPreviewCounts(payload) {
-  if (isRoutinePackage(payload)) return { routines: payload.routine ? 1 : 0, blocks: payload.blocks?.length || 0, cueProfiles: payload.cueProfiles?.length || 0, customSounds: payload.customSounds?.length || 0, sessions: 0 };
+  if (isRoutinePackage(payload)) return { routines: payload.routine ? 1 : 0, queues: 0, blocks: payload.blocks?.length || 0, cueProfiles: payload.cueProfiles?.length || 0, customSounds: payload.customSounds?.length || 0, sessions: 0 };
   return backupCounts(payload);
 }
 
 function validateIncomingPayload(payload) {
   if (isRoutinePackage(payload)) {
-    payload = { format: 'thiepn-timer-backup', version: 4, exportedAt: payload.exportedAt, selection: { routines: true, blocks: true, cueProfiles: true, customSounds: true, sessions: false, settings: false }, routines: payload.routine ? [payload.routine] : [], blocks: payload.blocks || [], cueProfiles: payload.cueProfiles || [], customSounds: payload.customSounds || [], sessions: [], settings: null };
+    payload = { format: 'thiepn-timer-backup', version: 5, exportedAt: payload.exportedAt, selection: { routines: true, queues: false, blocks: true, cueProfiles: true, customSounds: true, sessions: false, settings: false }, routines: payload.routine ? [payload.routine] : [], queues: [], blocks: payload.blocks || [], cueProfiles: payload.cueProfiles || [], customSounds: payload.customSounds || [], sessions: [], settings: null };
   }
-  if (!payload || payload.format !== 'thiepn-timer-backup' || ![1,2,3,4].includes(Number(payload.version)) || !Array.isArray(payload.routines) || !Array.isArray(payload.sessions)) throw new Error('Unsupported or incomplete Timer backup.');
+  if (!payload || payload.format !== 'thiepn-timer-backup' || ![1,2,3,4,5].includes(Number(payload.version)) || !Array.isArray(payload.routines) || !Array.isArray(payload.sessions)) throw new Error('Unsupported or incomplete Timer backup.');
   assertBackupEntityLimits(payload);
   const quarantine = [];
   const validSounds = [];
@@ -3417,7 +3418,14 @@ function validateIncomingPayload(payload) {
     else validSessions.push(session);
   }
   const profiles = payload.version >= 3 && Array.isArray(payload.cueProfiles) ? payload.cueProfiles.filter((profile) => profile?.id && profile?.title) : [];
-  const cleaned = { ...payload, version: 4, routines: validRoutines, blocks: validBlocks, cueProfiles: profiles, customSounds: validSounds, sessions: validSessions, settings: payload.settings || null };
+  const validQueues = [];
+  const sourceQueues = payload.version >= 5 && Array.isArray(payload.queues) ? payload.queues : [];
+  for (const queue of sourceQueues) {
+    const normalized = normalizeQueuePreset(queue);
+    if (!queue?.id || !normalized.items.length || normalized.items.length > 250) quarantine.push({ source: 'backup', entityType: 'queue', entityId: queue?.id || '', reason: 'Invalid queue preset', record: queue });
+    else validQueues.push(normalized);
+  }
+  const cleaned = { ...payload, version: 5, routines: validRoutines, queues: validQueues, blocks: validBlocks, cueProfiles: profiles, customSounds: validSounds, sessions: validSessions, settings: payload.settings || null };
   return { payload: cleaned, quarantine };
 }
 
@@ -3449,7 +3457,7 @@ function showRestorePreview() {
     ${pending.manifest ? `<div class="data-integrity-ok">✓ SHA-256 integrity verified</div>` : `<div class="small muted">Legacy backup format · content validated before restore.</div>`}
     ${pending.quarantine.length ? `<div class="data-warning">${pending.quarantine.length} invalid item${pending.quarantine.length === 1 ? '' : 's'} will be quarantined instead of imported.</div>` : ''}
     <div class="backup-parts">
-      ${[['routines','Routines',counts.routines],['blocks','Reusable blocks',counts.blocks],['cueProfiles','Cue profiles',counts.cueProfiles],['customSounds','Custom sounds',counts.customSounds],['sessions','History',counts.sessions],['settings','Settings',pending.payload.settings ? 1 : 0]].map(([key,label,count]) => `<label class="check-row ${count ? '' : 'disabled'}"><input type="checkbox" data-restore-part="${key}" ${count ? 'checked' : 'disabled'}> <span>${label}</span></label>`).join('')}
+      ${[['routines','Saved timers',counts.routines],['queues','Saved queues',counts.queues],['blocks','Reusable blocks',counts.blocks],['cueProfiles','Cue profiles',counts.cueProfiles],['customSounds','Custom sounds',counts.customSounds],['sessions','History',counts.sessions],['settings','Settings',pending.payload.settings ? 1 : 0]].map(([key,label,count]) => `<label class="check-row ${count ? '' : 'disabled'}"><input type="checkbox" data-restore-part="${key}" ${count ? 'checked' : 'disabled'}> <span>${label}</span></label>`).join('')}
     </div>
     ${packageMode ? '' : `<div class="field"><label>Restore strategy</label><select id="restore-strategy" class="select"><option value="merge">Merge with current data</option><option value="replace">Replace selected categories</option></select></div>`}
     <button class="btn primary big" data-action="apply-restore">${packageMode ? 'Import package' : 'Apply restore'}</button>
@@ -3467,7 +3475,7 @@ async function applyPendingRestore() {
   const pending = state.pendingRestore;
   if (!pending) return;
   const root = $('#sheet-root');
-  const selection = Object.fromEntries(['routines','blocks','cueProfiles','customSounds','sessions','settings'].map((key) => [key, Boolean(root.querySelector(`[data-restore-part="${key}"]`)?.checked)]));
+  const selection = Object.fromEntries(['routines','queues','blocks','cueProfiles','customSounds','sessions','settings'].map((key) => [key, Boolean(root.querySelector(`[data-restore-part="${key}"]`)?.checked)]));
   const replace = !pending.packageMode && $('#restore-strategy', root)?.value === 'replace';
   if (!Object.values(selection).some(Boolean)) return toast('Select at least one category to restore.');
   let snapshot = null;
