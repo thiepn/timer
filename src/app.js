@@ -749,7 +749,7 @@ function renderTimerHome() {
   const parsed = quickInputResult();
   const preview = parsed.ok ? `${durationLabel(parsed.ms)} · ready to start` : parsed.error;
   main.innerHTML = `
-    <div class="page-head home-head"><div><h1>Timer</h1><p>One timer or many. Start in seconds.</p></div>${coordinator.size() ? `<span class="pill active-count-pill">${coordinator.size()} active</span>` : ''}</div>
+    <div class="page-head home-head"><div><h1>Timer</h1><p>One timer or many. Start in seconds.</p></div><div class="row" style="flex-wrap:wrap;justify-content:flex-end">${state.activeQueue ? `<button class="pill active-count-pill" data-action="open-workspace">Queue ${queueProgress(state.activeQueue).current}/${queueProgress(state.activeQueue).total}</button>` : ''}${coordinator.size() ? `<span class="pill active-count-pill">${coordinator.size()} active</span>` : ''}</div></div>
 
     ${coordinator.size() ? `<section class="section active-timers-section home-active-section"><div class="row-between"><div><h2 class="section-title" style="margin:0">Active Timers</h2><div class="small muted" style="margin-top:4px">All timers keep running independently.</div></div><div class="row"><span class="pill">${coordinator.size()}</span><button class="btn compact-btn" data-action="open-workspace">Workspace</button></div></div><div class="active-timer-grid">${coordinator.list().map(activeTimerCard).join('')}</div></section>` : ''}
 
