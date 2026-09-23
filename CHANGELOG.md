@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.4.0
+
+### Added
+- Dedicated Multi-Timer Workspace with live grid, compact and focus layouts.
+- Persistent active-timer ordering, workspace groups, colors and runtime display names.
+- Bulk Pause All, Resume All and Stop All controls plus per-timer reorder and workspace editing.
+- Completion-action editor supporting Stop, Overtime, Repeat and Start Next.
+- Saved Timer completion defaults and Saved Timer-to-Saved Timer chains.
+- Direct Saved Timer launching from the workspace.
+
+### Reliability
+- Workspace order and metadata are stored in active-session recovery checkpoints and restored deterministically.
+- Start Next launches the configured Saved Timer before retiring the completed runtime, preserving ownership and Wake Lock continuity across chains.
+- Background chains do not steal focus from another live timer.
+- Manual stop/end bypasses Repeat and Start Next so explicit user termination cannot trigger automation.
+- Existing IndexedDB v6 and backup payload v4 formats remain unchanged.
+- Service-worker cache generation bumped to v16.
+
 ## 2.3.0
 
 ### Added

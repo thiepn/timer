@@ -12,7 +12,7 @@ import { SessionOwnershipManager, MediaSessionManager, parseLaunchCommand, detec
 import { LOCALE_OPTIONS, resolveLocale, applyDocumentLocale, localizeDOM, translateSource, translateBuiltInLabel, phaseLabel as localizedPhaseLabel, formatDuration, formatDate, formatNumber, t as i18nT } from './i18n.js';
 import { FocusTrap, Announcer, focusMainHeading, isInteractiveTarget, timerEventAnnouncement } from './accessibility.js';
 import { PerformanceMetrics, MaintenanceCoordinator, liveSchedulerPolicy, reduceMotionEnabled } from './performance.js';
-import { TimerCoordinator, COMPLETION_ACTIONS } from './coordinator.js';
+import { TimerCoordinator, COMPLETION_ACTIONS, normalizeCompletionAction } from './coordinator.js';
 import { parseDurationInput, durationInputText, normalizeDurationList, pushRecentDuration, DEFAULT_QUICK_PRESETS, DEFAULT_QUICK_ADJUSTMENTS } from './quick.js';
 import { DEFAULT_SAVED_TIMER_COLLECTIONS, SAVED_TIMER_ACCENTS, normalizeSavedTimerRecord, normalizeSavedTimerTags, normalizeSavedTimerCollections, needsSavedTimerMigration, savedTimerSearchText, savedTimerMatchesView, sortSavedTimers, duplicateSavedTimerRecord } from './saved.js';
 
@@ -25,7 +25,7 @@ const ms = (seconds) => Math.max(0, Math.round(Number(seconds || 0) * 1000));
 const sec = (milliseconds) => Math.round(Number(milliseconds || 0) / 1000);
 const mins = (minutes) => ms(Number(minutes || 0) * 60);
 const pct = (n) => `${Math.round(clamp(n || 0, 0, 1) * 100)}%`;
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.4.0';
 
 const BUILDER_META = {
   countdown: { name: 'Countdown', desc: 'Reusable fixed-duration countdown' },
@@ -182,6 +182,7 @@ const state = {
   savedSelectMode: false,
   savedSelected: new Set(),
   pendingSavedMoveIds: [],
+  workspaceFocusId: null,
   customClipboard: null,
   pendingStart: null,
   historyView: 'list',
@@ -720,6 +721,7 @@ function render() {
   document.title = state.builder ? `${translateSource(BUILDER_META[state.builder.type]?.name || 'Builder', currentLocale())} — Timer` : `${translateSource(state.route[0].toUpperCase() + state.route.slice(1), currentLocale())} — Timer`;
   if (state.completion) return renderCompletion();
   if (state.builder) return renderBuilder();
+  if (state.route === 'workspace') return renderMultiTimerWorkspace();
   if (state.route === 'library') return renderLibrary();
   if (state.route === 'history') return renderHistory();
   if (state.route === 'settings') return renderSettings();
@@ -736,7 +738,7 @@ function renderTimerHome() {
   main.innerHTML = `
     <div class="page-head home-head"><div><h1>Timer</h1><p>One timer or many. Start in seconds.</p></div>${coordinator.size() ? `<span class="pill active-count-pill">${coordinator.size()} active</span>` : ''}</div>
 
-    ${coordinator.size() ? `<section class="section active-timers-section home-active-section"><div class="row-between"><div><h2 class="section-title" style="margin:0">Active Timers</h2><div class="small muted" style="margin-top:4px">All timers keep running independently.</div></div><span class="pill">${coordinator.size()}</span></div><div class="active-timer-grid">${coordinator.list().map(activeTimerCard).join('')}</div></section>` : ''}
+    ${coordinator.size() ? `<section class="section active-timers-section home-active-section"><div class="row-between"><div><h2 class="section-title" style="margin:0">Active Timers</h2><div class="small muted" style="margin-top:4px">All timers keep running independently.</div></div><div class="row"><span class="pill">${coordinator.size()}</span><button class="btn compact-btn" data-action="open-workspace">Workspace</button></div></div><div class="active-timer-grid">${coordinator.list().map(activeTimerCard).join('')}</div></section>` : ''}
 
     <section class="card quick-card quick-card-v2">
       <div class="row-between quick-card-head"><div><div class="quick-label">Quick Timer</div><div class="small muted">Try 90s, 1:30, 3m, or 1h 20m.</div></div><div class="row quick-head-actions"><button class="btn ghost compact-btn" data-action="save-quick-timer">Save</button><button class="btn ghost compact-btn" data-action="customize-quick">Customize</button></div></div>
@@ -785,6 +787,132 @@ function activeTimerCard(runtime) {
   </article>`;
 }
 
+
+function workspaceTitle(runtime) {
+  return runtime?.meta?.workspaceTitle || runtime?.meta?.title || coordinator.view(runtime?.id)?.title || 'Timer';
+}
+
+function workspaceColor(runtime) {
+  const color = runtime?.meta?.workspaceColor || 'default';
+  return SAVED_TIMER_ACCENTS.includes(color) ? color : 'default';
+}
+
+function completionActionLabel(action) {
+  return ({ stop: 'Stop', overtime: 'Overtime', repeat: 'Repeat', 'start-next': 'Start Next' })[action] || 'Stop';
+}
+
+function openWorkspace() {
+  closeSheet();
+  stopLiveScheduler();
+  syncFocusedRuntime(null);
+  mediaSession.disable();
+  state.completion = null;
+  state.route = 'workspace';
+  render();
+  focusMainHeading(main);
+}
+
+function workspaceRuntimeCard(runtime, index, total) {
+  const view = coordinator.view(runtime.id);
+  if (!view) return '';
+  const current = view.current || {};
+  const value = view.status === 'overtime' ? view.overtimeMs : (current.remainingMs != null ? current.remainingMs : current.elapsedMs);
+  const time = `${view.status === 'overtime' ? '+' : ''}${formatClock(value || 0, { tenths: view.mode === 'stopwatch', countUp: current.remainingMs == null })}`;
+  const phase = view.status === 'paused' ? 'Paused' : view.status === 'overtime' ? 'Overtime' : translateBuiltInLabel(current.label || view.title, currentLocale());
+  const group = String(runtime.meta?.workspaceGroup || '').trim();
+  const next = runtime.meta?.completionNextRoutineId ? state.routines.find((item) => item.id === runtime.meta.completionNextRoutineId) : null;
+  const automation = runtime.completionAction === COMPLETION_ACTIONS.START_NEXT && next ? `Start ${next.title}` : completionActionLabel(runtime.completionAction);
+  return `<article class="workspace-timer-card" data-workspace-runtime="${esc(runtime.id)}" data-saved-accent="${esc(workspaceColor(runtime))}">
+    <button class="workspace-timer-main" data-action="focus-active" data-id="${esc(runtime.id)}">
+      <span class="workspace-timer-copy"><strong>${esc(workspaceTitle(runtime))}</strong><small>${esc(group || 'Ungrouped')} · ${esc(phase)}</small></span>
+      <span class="workspace-time">${esc(time)}</span>
+    </button>
+    <div class="workspace-automation"><span>${esc(automation)}</span><button class="text-btn" data-action="workspace-edit-timer" data-id="${esc(runtime.id)}">Edit</button></div>
+    <div class="workspace-card-actions">
+      <button class="btn compact-btn" data-action="active-toggle" data-id="${esc(runtime.id)}">${view.status === 'paused' ? 'Resume' : 'Pause'}</button>
+      <button class="btn compact-btn" data-action="workspace-move" data-id="${esc(runtime.id)}" data-delta="-1" ${index === 0 ? 'disabled' : ''} aria-label="Move timer earlier">↑</button>
+      <button class="btn compact-btn" data-action="workspace-move" data-id="${esc(runtime.id)}" data-delta="1" ${index === total - 1 ? 'disabled' : ''} aria-label="Move timer later">↓</button>
+      <button class="btn compact-btn danger" data-action="workspace-stop" data-id="${esc(runtime.id)}">Stop</button>
+    </div>
+  </article>`;
+}
+
+function renderMultiTimerWorkspace() {
+  setLiveMode(false);
+  const runtimes = coordinator.list();
+  if (state.workspaceFocusId && !coordinator.has(state.workspaceFocusId)) state.workspaceFocusId = null;
+  const layout = ['grid','compact','focus'].includes(state.settings.workspaceLayout) ? state.settings.workspaceLayout : 'grid';
+  const groups = new Map();
+  for (const runtime of runtimes) {
+    const group = String(runtime.meta?.workspaceGroup || '').trim() || 'Ungrouped';
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(runtime);
+  }
+  const layoutButton = (value, label) => `<button class="${layout === value ? 'active' : ''}" data-action="workspace-layout" data-layout="${value}" aria-pressed="${layout === value}">${label}</button>`;
+  const focusId = state.workspaceFocusId || runtimes[0]?.id;
+  const groupSections = [...groups.entries()].map(([group, items]) => {
+    const shown = layout === 'focus' ? items.filter((runtime) => runtime.id === focusId) : items;
+    if (!shown.length) return '';
+    const cards = shown.map((runtime) => workspaceRuntimeCard(runtime, runtimes.indexOf(runtime), runtimes.length)).join('');
+    return `<section class="workspace-group"><div class="row-between"><h2>${esc(group)}</h2><span class="pill">${items.length}</span></div><div class="workspace-timer-grid">${cards}</div></section>`;
+  }).join('');
+  main.innerHTML = `<div class="page-head workspace-head"><div><h1>Multi-Timer Workspace</h1><p>Control, group, order and chain every active timer.</p></div><div class="row"><button class="btn" data-action="workspace-launch-saved">＋ Saved</button><button class="btn primary" data-action="create">＋ New</button></div></div>
+    <section class="workspace-toolbar card card-pad">
+      <div class="segmented workspace-layout-switch" role="group" aria-label="Workspace layout">${layoutButton('grid','Grid')}${layoutButton('compact','Compact')}${layoutButton('focus','Focus')}</div>
+      <div class="workspace-bulk-actions"><button class="btn compact-btn" data-action="workspace-pause-all" ${runtimes.length ? '' : 'disabled'}>Pause all</button><button class="btn compact-btn" data-action="workspace-resume-all" ${runtimes.length ? '' : 'disabled'}>Resume all</button><button class="btn compact-btn danger" data-action="workspace-stop-all" ${runtimes.length ? '' : 'disabled'}>Stop all</button></div>
+    </section>
+    ${layout === 'focus' && runtimes.length > 1 ? `<div class="workspace-focus-strip">${runtimes.map((runtime) => `<button class="${focusId === runtime.id ? 'active' : ''}" data-action="workspace-focus" data-id="${esc(runtime.id)}">${esc(workspaceTitle(runtime))}</button>`).join('')}</div>` : ''}
+    ${runtimes.length ? `<div class="workspace-groups layout-${layout}">${groupSections}</div>` : `<div class="card empty workspace-empty"><h2>No active timers</h2><p>Launch a saved timer or create a new one.</p><div class="row" style="justify-content:center;flex-wrap:wrap"><button class="btn primary" data-action="workspace-launch-saved">Launch Saved Timer</button><button class="btn" data-action="create">Create Timer</button></div></div>`}`;
+}
+
+function showWorkspaceLaunchSheet() {
+  const timers = state.routines.filter((item) => !item.archived);
+  showSheet('Launch Saved Timer', `<div class="sheet-list">${timers.length ? timers.map((timer) => `<button class="sheet-item" data-action="workspace-launch-routine" data-id="${esc(timer.id)}"><div><strong>${esc(timer.title)}</strong><div class="small muted">${esc(BUILDER_META[timer.type]?.name || timer.type)} · ${esc(typeSummary(timer.type, timer.config || {}))}</div></div><span>▶</span></button>`).join('') : '<div class="empty">No Saved Timers yet.</div>'}</div>`);
+}
+
+function showWorkspaceTimerSettings(id) {
+  const runtime = coordinator.get(id);
+  if (!runtime) return toast('Active timer not found.');
+  const nextId = runtime.meta?.completionNextRoutineId || '';
+  const completion = runtime.completionAction || COMPLETION_ACTIONS.STOP;
+  const nextOptions = state.routines.filter((item) => !item.archived).map((timer) => `<option value="${esc(timer.id)}" ${timer.id === nextId ? 'selected' : ''}>${esc(timer.title)}</option>`).join('');
+  showSheet('Timer Workspace Settings', `<div class="stack">
+    <label class="field"><span>Workspace name</span><input class="input" data-workspace-field="title" maxlength="120" value="${esc(workspaceTitle(runtime))}"></label>
+    <div class="input-row"><label class="field"><span>Group</span><input class="input" data-workspace-field="group" maxlength="40" value="${esc(runtime.meta?.workspaceGroup || '')}" placeholder="Kitchen, Study, Workout"></label><label class="field"><span>Color</span><select class="select" data-workspace-field="color">${SAVED_TIMER_ACCENTS.map((color) => `<option value="${color}" ${workspaceColor(runtime) === color ? 'selected' : ''}>${color[0].toUpperCase()+color.slice(1)}</option>`).join('')}</select></label></div>
+    <label class="field"><span>When this timer finishes</span><select class="select" data-workspace-field="completion"><option value="stop" ${completion === 'stop' ? 'selected' : ''}>Stop</option><option value="overtime" ${completion === 'overtime' ? 'selected' : ''}>Count overtime</option><option value="repeat" ${completion === 'repeat' ? 'selected' : ''}>Repeat automatically</option><option value="start-next" ${completion === 'start-next' ? 'selected' : ''}>Start a Saved Timer</option></select></label>
+    <label class="field"><span>Next Saved Timer</span><select class="select" data-workspace-field="next"><option value="">Choose timer</option>${nextOptions}</select><small class="muted">Used by Start Next. The target can continue the chain with its own completion action.</small></label>
+    <button class="btn primary" data-action="workspace-save-timer" data-id="${esc(id)}">Save</button>
+  </div>`);
+}
+
+async function saveWorkspaceTimerSettings(id) {
+  const runtime = coordinator.get(id);
+  const root = $('#sheet-root');
+  if (!runtime || !root) return;
+  const value = (field) => root.querySelector(`[data-workspace-field="${field}"]`)?.value ?? '';
+  const completionAction = value('completion') || COMPLETION_ACTIONS.STOP;
+  const nextRoutineId = value('next');
+  if (completionAction === COMPLETION_ACTIONS.START_NEXT && (!nextRoutineId || !state.routines.some((item) => item.id === nextRoutineId && !item.archived))) return toast('Choose a Saved Timer for Start Next.');
+  coordinator.updateRuntime(id, {
+    meta: {
+      workspaceTitle: String(value('title')).trim().slice(0, 120) || runtime.meta?.title || 'Timer',
+      workspaceGroup: String(value('group')).trim().slice(0, 40),
+      workspaceColor: SAVED_TIMER_ACCENTS.includes(value('color')) ? value('color') : 'default',
+      completionNextRoutineId: completionAction === COMPLETION_ACTIONS.START_NEXT ? nextRoutineId : ''
+    },
+    completionAction
+  });
+  await persistRuntime(id);
+  closeSheet();
+  broadcastActiveSnapshot();
+  renderMultiTimerWorkspace();
+  toast('Timer workspace settings saved.');
+}
+
+async function persistWorkspaceOrder() {
+  await Promise.allSettled(coordinator.list().map((runtime) => persistRuntime(runtime.id)));
+  broadcastActiveSnapshot();
+}
 function showQuickCustomizeSheet() {
   const pinned = [...quickPresets()];
   while (pinned.length < 6) pinned.push(DEFAULT_QUICK_PRESETS[pinned.length] || 60000);
@@ -1505,11 +1633,11 @@ async function saveBuilder() {
   toast('Saved timer updated.');
 }
 
-function showParameterizedStart({ type, config, routineId, title, savedValues, source, cueOverrides = {} }) {
+function showParameterizedStart({ type, config, routineId, title, savedValues, source, cueOverrides = {}, completionAction = COMPLETION_ACTIONS.STOP, completionNextRoutineId = '' }) {
   const parameters = config.parameters || [];
   const defaults = defaultParameterValues(parameters);
   const values = { ...defaults, ...(savedValues || {}) };
-  state.pendingStart = { type, config: structuredClone(config), routineId, title, source, cueOverrides: structuredClone(cueOverrides || {}), blocks: structuredClone(blocksForCurrentBuilder()) };
+  state.pendingStart = { type, config: structuredClone(config), routineId, title, source, cueOverrides: structuredClone(cueOverrides || {}), completionAction: normalizeCompletionAction(completionAction), completionNextRoutineId, blocks: structuredClone(blocksForCurrentBuilder()) };
   showSheet(`Start ${title || config.title || 'Routine'}`, `<div class="stack"><div class="small muted">Adjust this run without changing the saved routine.</div>${parameters.map((parameter) => `<label class="field"><span>${esc(parameter.label)}</span>${renderParameterValueInput(parameter, values[parameter.id], `data-launch-param="${esc(parameter.id)}"`)}</label>`).join('')}<button class="btn primary big" data-action="confirm-param-start">Start</button></div>`);
 }
 
@@ -1542,26 +1670,27 @@ async function confirmParameterizedStart() {
   state.pendingStart = null;
   closeSheet();
   await loadCollections();
-  await startSession(plan, { ...metaForType(pending.type, pending.config, pending.cueOverrides), title: pending.title || pending.config.title, routineId: pending.routineId, parameterValues: resolved });
+  await startSession(plan, { ...metaForType(pending.type, pending.config, pending.cueOverrides), title: pending.title || pending.config.title, routineId: pending.routineId, parameterValues: resolved, completionNextRoutineId: pending.completionNextRoutineId || '' }, { completionAction: pending.completionAction });
 }
 
 async function startBuilder() {
   const { type, config } = state.builder;
   if (type === 'custom' && (config.parameters || []).length) {
     const routine = state.routines.find((item) => item.id === state.builderEditingId);
-    return showParameterizedStart({ type, config, routineId: state.builderEditingId || undefined, title: config.title, savedValues: routine?.lastParameterValues, source: 'builder', cueOverrides: state.builderCueOverrides });
+    return showParameterizedStart({ type, config, routineId: state.builderEditingId || undefined, title: config.title, savedValues: routine?.lastParameterValues, source: 'builder', cueOverrides: state.builderCueOverrides, completionAction: routine?.completionAction, completionNextRoutineId: routine?.completionNextRoutineId });
   }
   let plan;
   try { plan = planFromType(type, config, { blocks: blocksForCurrentBuilder(), seed: type === 'custom' && config.randomMode !== 'fixed' ? uid('seed') : undefined }); }
   catch (e) { return toast(e.issues?.[0]?.message || e.message || 'This timer could not be created.'); }
-  await startSession(plan, { ...metaForType(type, config, state.builderCueOverrides), routineId: state.builderEditingId || undefined });
+  const saved = state.routines.find((item) => item.id === state.builderEditingId);
+  await startSession(plan, { ...metaForType(type, config, state.builderCueOverrides), routineId: state.builderEditingId || undefined, completionNextRoutineId: saved?.completionNextRoutineId || '' }, { completionAction: saved?.completionAction });
 }
 
 async function startRoutine(id) {
   const routine = state.routines.find((r) => r.id === id);
   if (!routine) return toast('Saved timer not found.');
   if (routine.type === 'custom' && (routine.config?.parameters || []).length) {
-    return showParameterizedStart({ type: routine.type, config: routine.config, routineId: routine.id, title: routine.title, savedValues: routine.lastParameterValues, source: 'library', cueOverrides: routine.cueOverrides });
+    return showParameterizedStart({ type: routine.type, config: routine.config, routineId: routine.id, title: routine.title, savedValues: routine.lastParameterValues, source: 'library', cueOverrides: routine.cueOverrides, completionAction: routine.completionAction, completionNextRoutineId: routine.completionNextRoutineId });
   }
   let plan;
   try { plan = planFromType(routine.type, routine.config, { blocks: state.blocks, seed: routine.type === 'custom' && routine.config?.randomMode !== 'fixed' ? uid('seed') : undefined }); }
@@ -1570,7 +1699,50 @@ async function startRoutine(id) {
   routine.lastUsedAt = Date.now();
   await state.db.saveRoutine(routine);
   await loadCollections();
-  await startSession(plan, { ...metaForType(routine.type, routine.config, routine.cueOverrides), title: routine.title, routineId: routine.id });
+  await startSession(plan, { ...metaForType(routine.type, routine.config, routine.cueOverrides), title: routine.title, routineId: routine.id, completionNextRoutineId: routine.completionNextRoutineId || '' }, { completionAction: routine.completionAction });
+}
+
+
+async function startSavedRoutineAutomated(id, { background = true, backgroundRoute = 'workspace', preserveFocus = false, workspaceGroup = '', workspaceColor = 'default' } = {}) {
+  const routine = state.routines.find((item) => item.id === id);
+  if (!routine || routine.archived) return null;
+  let parameterValues = {};
+  if (routine.type === 'custom' && (routine.config?.parameters || []).length) {
+    try {
+      parameterValues = resolveCustomParameterValues(
+        routine.config.parameters,
+        { ...defaultParameterValues(routine.config.parameters), ...(routine.lastParameterValues || {}) }
+      );
+    } catch { return null; }
+  }
+  let plan;
+  try {
+    plan = planFromType(routine.type, routine.config, {
+      parameterValues,
+      blocks: state.blocks,
+      seed: routine.type === 'custom' && routine.config?.randomMode !== 'fixed' ? uid('seed') : undefined
+    });
+  } catch { return null; }
+  routine.useCount = (routine.useCount || 0) + 1;
+  routine.lastUsedAt = Date.now();
+  if (Object.keys(parameterValues).length) routine.lastParameterValues = structuredClone(parameterValues);
+  await state.db.saveRoutine(routine);
+  await loadCollections();
+  const meta = {
+    ...metaForType(routine.type, routine.config, routine.cueOverrides),
+    title: routine.title,
+    routineId: routine.id,
+    parameterValues,
+    completionNextRoutineId: routine.completionNextRoutineId || '',
+    workspaceGroup,
+    workspaceColor
+  };
+  return startSession(plan, meta, {
+    background,
+    backgroundRoute,
+    preserveFocus,
+    completionAction: routine.completionAction || COMPLETION_ACTIONS.STOP
+  });
 }
 
 async function startSession(plan, meta, options = {}) {
@@ -1597,10 +1769,14 @@ async function startSession(plan, meta, options = {}) {
   broadcastActiveSnapshot();
   renderUpdateBanner();
   if (options.background) {
-    state.route = 'timer';
-    syncFocusedRuntime(null);
-    mediaSession.disable();
-    render();
+    if (options.preserveFocus && state.activeTimerId && coordinator.has(state.activeTimerId)) {
+      updateActiveTimerCards();
+    } else {
+      state.route = options.backgroundRoute || (state.route === 'workspace' ? 'workspace' : 'timer');
+      syncFocusedRuntime(null);
+      mediaSession.disable();
+      render();
+    }
   } else {
     focusRuntime(runtime.id);
   }
@@ -1747,7 +1923,22 @@ async function handleCoordinatorEvent(event) {
     return;
   }
   if (event.type === 'runtime-terminal') {
+    const wasFocused = state.activeTimerId === runtimeId;
+    let chained = null;
+    if (event.startNext && !event.cancelled) {
+      const nextRoutineId = runtime?.meta?.completionNextRoutineId;
+      if (nextRoutineId) {
+        chained = await startSavedRoutineAutomated(nextRoutineId, {
+          background: !wasFocused,
+          backgroundRoute: state.route === 'workspace' ? 'workspace' : 'timer',
+          preserveFocus: !wasFocused && Boolean(state.activeTimerId),
+          workspaceGroup: runtime?.meta?.workspaceGroup || '',
+          workspaceColor: runtime?.meta?.workspaceColor || 'default'
+        });
+      }
+    }
     await finalizeRuntime(runtimeId, event.snapshot, Boolean(event.cancelled));
+    if (event.startNext && !chained) toast('The configured next Saved Timer could not be started.', 4200);
   }
 }
 
@@ -1792,6 +1983,21 @@ function updateActiveTimerCards() {
     const toggle = $('[data-action="active-toggle"]', card);
     if (toggle) toggle.textContent = view.status === 'paused' ? 'Resume' : 'Pause';
     for (const adjust of $$('[data-action="active-adjust"]', card)) adjust.disabled = view.status === 'paused' || view.status === 'overtime';
+  }
+  for (const card of $('[data-workspace-runtime]')) {
+    const runtimeId = card.dataset.workspaceRuntime;
+    const runtime = coordinator.get(runtimeId);
+    const view = coordinator.view(runtimeId);
+    if (!runtime || !view) { card.remove(); continue; }
+    const current = view.current || {};
+    const value = view.status === 'overtime' ? view.overtimeMs : (current.remainingMs != null ? current.remainingMs : current.elapsedMs);
+    const time = $('.workspace-time', card);
+    if (time) time.textContent = `${view.status === 'overtime' ? '+' : ''}${formatClock(value || 0, { tenths: view.mode === 'stopwatch', countUp: current.remainingMs == null })}`;
+    const phase = view.status === 'paused' ? 'Paused' : view.status === 'overtime' ? 'Overtime' : translateBuiltInLabel(current.label || view.title, currentLocale());
+    const meta = $('.workspace-timer-copy small', card);
+    if (meta) meta.textContent = `${runtime.meta?.workspaceGroup || 'Ungrouped'} · ${phase}`;
+    const toggle = $('[data-action="active-toggle"]', card);
+    if (toggle) toggle.textContent = view.status === 'paused' ? 'Resume' : 'Pause';
   }
 }
 
@@ -2153,6 +2359,8 @@ function showSavedTimerMetadata(id) {
   if (!timer) return toast('Saved timer not found.');
   const r = normalizeSavedTimerRecord(timer);
   const collections = savedTimerCollections();
+  const completion = normalizeCompletionAction(r.completionAction);
+  const nextOptions = state.routines.filter((item) => item.id !== r.id && !item.archived).map((item) => `<option value="${esc(item.id)}" ${item.id === r.completionNextRoutineId ? 'selected' : ''}>${esc(item.title)}</option>`).join('');
   showSheet('Saved Timer Details', `<div class="stack">
     <div class="saved-meta-preview" data-saved-accent="${esc(r.accent)}"><div class="saved-timer-icon">${esc(r.icon)}</div><div><strong>${esc(r.title)}</strong><div class="small muted">${esc(BUILDER_META[r.type]?.name || r.type)}</div></div></div>
     <label class="field"><span>Name</span><input class="input" data-saved-meta="title" maxlength="120" value="${esc(r.title)}"></label>
@@ -2160,6 +2368,8 @@ function showSavedTimerMetadata(id) {
     <label class="field"><span>Description</span><textarea class="input" rows="3" maxlength="500" data-saved-meta="description" placeholder="Optional note about when or why you use this timer">${esc(r.description)}</textarea></label>
     <label class="field"><span>Collection</span><select class="select" data-saved-meta="collection"><option value="">Unsorted</option>${collections.map((name) => `<option value="${esc(name)}" ${r.collection === name ? 'selected' : ''}>${esc(name)}</option>`).join('')}</select></label>
     <label class="field"><span>Tags</span><input class="input" data-saved-meta="tags" value="${esc(r.tags.join(', '))}" placeholder="study, focus, evening"></label>
+    <label class="field"><span>Default completion action</span><select class="select" data-saved-meta="completion"><option value="stop" ${completion === 'stop' ? 'selected' : ''}>Stop</option><option value="overtime" ${completion === 'overtime' ? 'selected' : ''}>Count overtime</option><option value="repeat" ${completion === 'repeat' ? 'selected' : ''}>Repeat automatically</option><option value="start-next" ${completion === 'start-next' ? 'selected' : ''}>Start another Saved Timer</option></select></label>
+    <label class="field"><span>Next Saved Timer</span><select class="select" data-saved-meta="next"><option value="">Choose timer</option>${nextOptions}</select><small class="muted">Used by Start Next. Each target may define its own completion action.</small></label>
     <div class="row" style="flex-wrap:wrap"><button class="btn primary" data-action="save-saved-meta" data-id="${esc(id)}">Save details</button><button class="btn" data-action="manage-saved-collections">Manage collections</button></div>
   </div>`);
 }
@@ -2170,6 +2380,9 @@ async function saveSavedTimerMetadata(id) {
   if (!timer || !root) return;
   const value = (field) => root.querySelector(`[data-saved-meta="${field}"]`)?.value ?? '';
   const nextTitle = String(value('title')).trim() || timer.title || 'Saved Timer';
+  const completionAction = normalizeCompletionAction(value('completion'));
+  const completionNextRoutineId = value('next');
+  if (completionAction === COMPLETION_ACTIONS.START_NEXT && (!completionNextRoutineId || completionNextRoutineId === id || !state.routines.some((item) => item.id === completionNextRoutineId && !item.archived))) return toast('Choose a different Saved Timer for Start Next.');
   const next = normalizeSavedTimerRecord({
     ...timer,
     title: nextTitle,
@@ -2178,7 +2391,9 @@ async function saveSavedTimerMetadata(id) {
     accent: value('accent'),
     description: value('description'),
     collection: value('collection'),
-    tags: normalizeSavedTimerTags(value('tags'))
+    tags: normalizeSavedTimerTags(value('tags')),
+    completionAction,
+    completionNextRoutineId: completionAction === COMPLETION_ACTIONS.START_NEXT ? completionNextRoutineId : ''
   });
   await state.db.saveRoutine(next);
   await loadCollections();
@@ -2635,7 +2850,9 @@ function liveMoreSheet() {
   const v = focusedView();
   if (!v) return;
   showSheet('Timer', `<div class="sheet-list">
-    <button class="sheet-item" data-action="live-background">Run in background · Active Timers</button>
+    <button class="sheet-item" data-action="open-workspace">Open Multi-Timer Workspace</button>
+    <button class="sheet-item" data-action="workspace-edit-timer" data-id="${esc(state.activeTimerId)}">Grouping & completion action</button>
+    <button class="sheet-item" data-action="live-background">Run in background · Home</button>
     ${v.planKind === 'timeline' ? `<button class="sheet-item" data-action="live-restart">Restart current step</button><button class="sheet-item" data-action="live-previous">Previous step</button>` : ''}
     <button class="sheet-item" data-action="live-lock">Lock controls</button>
     <button class="sheet-item" data-action="live-layout">Layout: ${esc(state.settings.layout)}</button>
@@ -3183,6 +3400,38 @@ document.addEventListener('click', async (e) => {
     broadcastActiveSnapshot();
     return;
   }
+  if (action === 'open-workspace') return openWorkspace();
+  if (action === 'workspace-launch-saved') return showWorkspaceLaunchSheet();
+  if (action === 'workspace-launch-routine') {
+    const id = btn.dataset.id;
+    closeSheet();
+    const runtime = await startSavedRoutineAutomated(id, { background: true, backgroundRoute: 'workspace' });
+    if (!runtime) toast('Saved Timer could not be launched.', 4200);
+    return;
+  }
+  if (action === 'workspace-edit-timer') return showWorkspaceTimerSettings(btn.dataset.id);
+  if (action === 'workspace-save-timer') return saveWorkspaceTimerSettings(btn.dataset.id);
+  if (action === 'workspace-layout') {
+    const layout = btn.dataset.layout;
+    if (!['grid','compact','focus'].includes(layout)) return;
+    state.settings.workspaceLayout = layout;
+    await saveSettings();
+    return renderMultiTimerWorkspace();
+  }
+  if (action === 'workspace-focus') { state.workspaceFocusId = btn.dataset.id; return renderMultiTimerWorkspace(); }
+  if (action === 'workspace-move') {
+    if (coordinator.move(btn.dataset.id, Number(btn.dataset.delta || 0))) await persistWorkspaceOrder();
+    return renderMultiTimerWorkspace();
+  }
+  if (action === 'workspace-pause-all') { coordinator.pauseAll(); await persistAllRuntimes(); broadcastActiveSnapshot(); updateActiveTimerCards(); return; }
+  if (action === 'workspace-resume-all') { coordinator.resumeAll(); await persistAllRuntimes(); broadcastActiveSnapshot(); updateActiveTimerCards(); return; }
+  if (action === 'workspace-stop') { coordinator.command(btn.dataset.id, 'stop', 'user-ended'); return; }
+  if (action === 'workspace-stop-all') {
+    const ids = coordinator.list().map((runtime) => runtime.id);
+    if (!ids.length || !confirm(`Stop all ${ids.length} active timer${ids.length === 1 ? '' : 's'}? Partial sessions will be saved.`)) return;
+    for (const id of ids) coordinator.command(id, 'stop', 'user-ended');
+    return;
+  }
   if (action === 'close-display-window') { try { window.close(); } catch {} return; }
   if (action === 'open-display-window') {
     closeSheet();
@@ -3417,7 +3666,7 @@ document.addEventListener('click', async (e) => {
   if (action === 'select-layout') { state.settings.layout = btn.dataset.layout; await saveSettings(); closeSheet(); renderLive(); return; }
   if (action === 'live-mute') { cue.toggleMute(); closeSheet(); if (state.engine) renderLive(); return; }
   if (action === 'live-fullscreen') { closeSheet(); try { if (document.fullscreenElement) await document.exitFullscreen(); else await document.documentElement.requestFullscreen?.(); } catch {} return; }
-  if (action === 'live-end') { closeSheet(); if (confirm('End this timer now? The partial session will be saved.')) coordinator.command(state.activeTimerId, 'finish', 'user-ended'); return; }
+  if (action === 'live-end') { closeSheet(); if (confirm('End this timer now? The partial session will be saved.')) coordinator.command(state.activeTimerId, 'stop', 'user-ended'); return; }
   if (action === 'completion-done') { state.completion = null; state.route = 'timer'; render(); return; }
   if (action === 'noop') return;
 });
