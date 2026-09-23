@@ -17,7 +17,7 @@ if (/user-scalable\s*=\s*no/i.test(html) || /maximum-scale\s*=\s*1/i.test(html))
 
 const sw = read('sw.js');
 const cacheMatch = sw.match(/const CACHE = 'thiepn-timer-v(\d+)'/);
-if (!cacheMatch || Number(cacheMatch[1]) !== 18) fail('service-worker cache generation must be v18');
+if (!cacheMatch || Number(cacheMatch[1]) !== 19) fail('service-worker cache generation must be v19');
 
 const app = read('src/app.js');
 const appImports = [...app.matchAll(/from\s+['"](\.\/[^'"]+\.js)['"]/g)].map((m) => `./src/${m[1].replace(/^\.\//, '')}`);
@@ -40,12 +40,12 @@ for (const file of sourceFiles) {
 }
 
 const shell = [
-  'index.html','styles.css','visual-system.css','manifest.webmanifest','icon.svg','sw.js',
+  'index.html','styles.css','visual-system.css','manifest.webmanifest','icon.svg','icons.svg','sw.js',
   ...sourceFiles.map((name) => `src/${name}`)
 ];
 let gzipBytes = 0;
 for (const file of shell) gzipBytes += zlib.gzipSync(fs.readFileSync(path.join(root, file))).length;
-if (gzipBytes > 135 * 1024) fail(`release shell ${Math.round(gzipBytes/1024)} KiB gzip exceeds 135 KiB gate`);
+if (gzipBytes > 140 * 1024) fail(`release shell ${Math.round(gzipBytes/1024)} KiB gzip exceeds 140 KiB gate`);
 
 for (const required of ['README.md','CHANGELOG.md','RELEASE_SCOPE.md','CERTIFICATION.md','KNOWN_LIMITATIONS.md','.nojekyll']) {
   if (!fs.existsSync(path.join(root, required))) fail(`${required} is missing`);

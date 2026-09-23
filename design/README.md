@@ -18,7 +18,7 @@ Timer should be visually quiet while idle and increasingly expressive as tempora
 
 - **V1 — Visual Audit, Art Direction & Redesign Contract** — complete
 - **V2 — Design System V3: Color, Type, Geometry & Materials** — complete
-- **V3 — App Shell, Navigation & Spatial Architecture**
+- **V3 — App Shell, Navigation & Spatial Architecture** — complete
 - **V4 — Home 3.0: Signature Timer Surface**
 - **V5 — Live Timer 3.0: Showcase Experience**
 - **V6 — Saved Timers & Library Object System**
