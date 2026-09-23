@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseDurationInput, durationInputText, normalizeDurationList, pushRecentDuration, DEFAULT_QUICK_PRESETS, DEFAULT_QUICK_ADJUSTMENTS } from '../src/quick.js';
+import { parseDurationInput, durationInputText, quickDurationDial, normalizeDurationList, pushRecentDuration, DEFAULT_QUICK_PRESETS, DEFAULT_QUICK_ADJUSTMENTS } from '../src/quick.js';
 
 test('quick duration parser accepts the universal quick-entry formats', () => {
   assert.equal(parseDurationInput('90').ms, 90000);
@@ -32,4 +32,12 @@ test('duration list normalization filters duplicates and invalid entries', () =>
   assert.deepEqual(normalizeDurationList([30000, 30000, 0, '60000', Number.NaN], { limit: 6 }), [30000, 60000]);
   assert.equal(DEFAULT_QUICK_PRESETS.length, 6);
   assert.deepEqual([...DEFAULT_QUICK_ADJUSTMENTS], [10000, 30000, 60000]);
+});
+
+
+test('Quick Timer dial encodes minute position within the current hour', () => {
+  assert.deepEqual(quickDurationDial(30 * 60 * 1000), { hours: 0, withinHourSeconds: 1800, sweepDegrees: 180 });
+  assert.deepEqual(quickDurationDial(60 * 60 * 1000), { hours: 1, withinHourSeconds: 0, sweepDegrees: 360 });
+  assert.deepEqual(quickDurationDial(80 * 60 * 1000), { hours: 1, withinHourSeconds: 1200, sweepDegrees: 120 });
+  assert.equal(quickDurationDial(10 * 1000).sweepDegrees, 2);
 });
