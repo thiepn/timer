@@ -36,6 +36,15 @@ test('V4 clock dial is explicitly decorative while typed duration remains access
   assert.match(home, /aria-describedby="quick-duration-preview"/);
 });
 
+
+
+test('V4 duration dial adapts numeral scale for multi-hour values', () => {
+  assert.match(home, /data-quick-numeral-size=/);
+  assert.match(app, /instrument\.dataset\.quickNumeralSize = model\.numeralSize/);
+  assert.match(visual, /data-quick-numeral-size="medium"/);
+  assert.match(visual, /data-quick-numeral-size="long"/);
+});
+
 test('V4 Home shortcuts use the SVG icon language rather than Unicode controls', () => {
   for (const id of ['i-play','i-arrow-right','i-repeat','i-stopwatch','i-interval','i-grid','i-queue']) {
     assert.ok(icons.includes('id="' + id + '"'), 'missing ' + id);
