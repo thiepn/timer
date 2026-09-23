@@ -68,6 +68,27 @@ test('queue presets and active queue recovery state persist independently', asyn
   assert.equal((await restored.getActiveQueues()).length, 0);
 });
 
+
+
+test('replacing from a pre-v5 backup does not erase queue presets that the backup could not contain', async () => {
+  const db = new TimerDB();
+  await db.open();
+  await db.saveQueue({ id: 'keep-queue', title: 'Keep me', items: [{ id: 'i1', savedTimerId: 'r1', action: 'advance' }] });
+  await db.importData({
+    format: 'thiepn-timer-backup',
+    version: 4,
+    selection: { routines: true, blocks: true, cueProfiles: true, customSounds: true, sessions: true, settings: true },
+    routines: [],
+    blocks: [],
+    cueProfiles: [],
+    customSounds: [],
+    sessions: [],
+    settings: {}
+  }, { replace: true });
+  assert.equal((await db.all('queues')).length, 1);
+  assert.equal((await db.all('queues'))[0].id, 'keep-queue');
+});
+
 test('saving an existing reusable block increments its revision', async () => {
   const db = new TimerDB();
   await db.open();
