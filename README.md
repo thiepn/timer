@@ -83,7 +83,7 @@ The timer engine is timestamp-based; rendering frequency is not the source of ti
 
 ## Visual design program
 
-The V2–V10 visual overhaul is governed by the Phase V1 design artifacts in [`design/`](./design/README.md). The locked art direction is **Precision instrument + ambient depth + expressive state**. V1 established the audit and contract. V2 now implements the production semantic design system; V3 now redesigns the product shell/navigation; screen-specific content redesign begins with Home in V4.
+The V2–V10 visual overhaul is governed by the Phase V1 design artifacts in [`design/`](./design/README.md). The locked art direction is **Precision instrument + ambient depth + expressive state**. V1 established the audit and contract. V2 now implements the production semantic design system; V3 redesigned the product shell/navigation. V4 now provides the signature Quick Timer Home surface; Live Timer becomes the next flagship redesign in V5.
 
 ## v1.0.1 hardening
 
