@@ -3422,14 +3422,19 @@ function validateIncomingPayload(payload) {
     else validSessions.push(session);
   }
   const profiles = payload.version >= 3 && Array.isArray(payload.cueProfiles) ? payload.cueProfiles.filter((profile) => profile?.id && profile?.title) : [];
+  const queuesAvailable = Number(payload.version) >= 5;
   const validQueues = [];
-  const sourceQueues = payload.version >= 5 && Array.isArray(payload.queues) ? payload.queues : [];
+  const sourceQueues = queuesAvailable && Array.isArray(payload.queues) ? payload.queues : [];
   for (const queue of sourceQueues) {
     const normalized = normalizeQueuePreset(queue);
     if (!queue?.id || !normalized.items.length || normalized.items.length > 250) quarantine.push({ source: 'backup', entityType: 'queue', entityId: queue?.id || '', reason: 'Invalid queue preset', record: queue });
     else validQueues.push(normalized);
   }
-  const cleaned = { ...payload, version: 5, routines: validRoutines, queues: validQueues, blocks: validBlocks, cueProfiles: profiles, customSounds: validSounds, sessions: validSessions, settings: payload.settings || null };
+  const legacySelection = payload.version >= 4 && payload.selection
+    ? payload.selection
+    : { routines: true, blocks: true, cueProfiles: true, customSounds: true, sessions: true, settings: true };
+  const cleanedSelection = { ...legacySelection, queues: queuesAvailable ? legacySelection.queues !== false : false };
+  const cleaned = { ...payload, version: 5, selection: cleanedSelection, routines: validRoutines, queues: validQueues, blocks: validBlocks, cueProfiles: profiles, customSounds: validSounds, sessions: validSessions, settings: payload.settings || null };
   return { payload: cleaned, quarantine };
 }
 
