@@ -565,6 +565,7 @@ async function relinquishRuntimeOwnership() {
   mediaSession.disable();
   coordinator.clear();
   syncFocusedRuntime(null);
+  state.activeQueue = null;
   if (bundle.sessions.length) setRemoteActive(bundle);
   ownership.stopHeartbeat();
   await ownership.release();
@@ -580,8 +581,14 @@ async function takeOverActiveSession() {
   for (let i = 0; i < 20; i++) {
     if (await ownership.acquire()) {
       state.pendingTakeover = false;
-      const records = await state.db.getActiveSessions().catch(() => []);
-      if (records.length && await restoreOwnedActive(records)) return;
+      const [records, queueRuns] = await Promise.all([
+        state.db.getActiveSessions().catch(() => []),
+        state.db.getActiveQueues().catch(() => [])
+      ]);
+      if (records.length && await restoreOwnedActive(records)) {
+        await restoreActiveQueueRuns(queueRuns);
+        return;
+      }
       await ownership.release();
       setRemoteActive(null);
       render();
@@ -3599,11 +3606,12 @@ async function boot() {
   state.deviceCapabilities = detectDeviceCapabilities();
   applyTheme();
   const activePromise = state.db.getActiveSessions().catch(() => []);
+  const activeQueuesPromise = state.db.getActiveQueues().catch(() => []);
   await loadCollections({ fullHistory: false });
   perf.mark('boot:collections');
   registerPwa();
 
-  const active = await activePromise;
+  const [active, activeQueues] = await Promise.all([activePromise, activeQueuesPromise]);
   if (active.length) {
     if (state.displayMode) {
       setRemoteActive({ sessions: active });
@@ -3612,15 +3620,21 @@ async function boot() {
       if (!await restoreOwnedActive(active)) {
         await ownership.release();
         await state.db.clearAllActiveSessions().catch(() => {});
+        await state.db.clearAllActiveQueues().catch(() => {});
         toast('The previous active timers could not be restored.', 4200);
         await handleLaunchCommand(state.launchCommand);
+      } else {
+        await restoreActiveQueueRuns(activeQueues);
       }
     } else {
       setRemoteActive({ sessions: active });
       renderRemoteActive();
     }
   } else if (state.displayMode) renderRemoteActive();
-  else await handleLaunchCommand(state.launchCommand);
+  else if (activeQueues.length && await restoreActiveQueueRuns(activeQueues)) {
+    state.route = 'workspace';
+    render();
+  } else await handleLaunchCommand(state.launchCommand);
 
   perf.mark('boot:interactive');
   perf.measure('bootInteractiveMs', 'boot:start', 'boot:interactive');
