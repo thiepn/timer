@@ -163,10 +163,12 @@ export function sortSavedTimers(records = [], mode = 'recent', durationOf = () =
 export function duplicateSavedTimerRecord(record, { id, title, now = Date.now() } = {}) {
   if (!id) throw new Error('A new saved timer ID is required.');
   const source = normalizeSavedTimerRecord(record);
+  const nextTitle = cleanText(title || `${source.title || 'Saved Timer'} Copy`, 120);
   return normalizeSavedTimerRecord({
     ...structuredClone(source),
     id,
-    title: cleanText(title || `${source.title || 'Saved Timer'} Copy`, 120),
+    title: nextTitle,
+    config: source.config ? { ...structuredClone(source.config), title: nextTitle } : source.config,
     archived: false,
     useCount: 0,
     lastUsedAt: undefined,
