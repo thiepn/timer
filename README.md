@@ -71,6 +71,8 @@ The app uses relative paths and is ready to be served from the repository root w
 - `src/performance.js` — performance budgets, live scheduling policy, instrumentation and deferred-maintenance coordinator
 - `src/coordinator.js` — multi-runtime timer coordination, completion actions and overtime/repeat orchestration
 - `src/quick.js` — deterministic Quick Timer duration parsing, normalization and recency helpers
+- `src/saved.js` — Saved Timer normalization, search, sorting and metadata helpers
+- `src/queue.js` — Saved Queue normalization, ordering, progress and queue-run state transitions
 - `src/app.js` — application coordinator and UI
 - `sw.js` — offline application shell
 
